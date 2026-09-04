@@ -676,6 +676,51 @@ const routes = {
     json(res, 200, { user: { id: user.id, name: user.name, admin: isAdmin(user) } }, { 'Set-Cookie': sessionCookie(user) });
   },
 
+  /* ---------- device management ---------- */
+  // "current" (which credential the active session was established with) is deliberately NOT
+  // included: the session cookie payload is `<uid>:<exp>:<sv>` (see makeSession) and carries no
+  // credential id, and neither /api/login/verify nor /api/link/verify record anywhere which
+  // credential minted a given cookie. Wiring that up would mean changing the cookie payload
+  // shape, which touches the behaviour of the login/link routes — out of scope here. So every
+  // device is returned without a `current` field rather than a guessed one.
+  'GET /api/devices': async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    const devices = db.creds
+      .filter(c => c.userId === user.id)
+      .map(c => ({ id: c.id, created: c.created || null, transports: c.transports || [] }));
+    json(res, 200, { devices });
+  },
+
+  // Revokes one of the caller's own passkeys, e.g. after selling/losing the device it lives on.
+  // Path parameters aren't a thing this dispatcher supports (routes are matched by exact
+  // "METHOD pathname" string — see the bottom of this file), so the credential id travels as a
+  // query string param, same pattern already used by GET /api/admin/user's `?id=`.
+  'DELETE /api/devices': async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    const id = new URL(req.url, 'http://x').searchParams.get('id');
+    const cred = db.creds.find(c => c.id === id && c.userId === user.id);
+    // Doesn't exist, or belongs to someone else — identical response either way so a caller can
+    // never use this to probe whether a credential id exists on another account.
+    if (!cred) return json(res, 404, { error: 'no such device' });
+    const mine = db.creds.filter(c => c.userId === user.id);
+    // A profile with zero credentials can never be signed into again — that must be impossible
+    // to do by accident, so the last one is refused outright rather than left to the client.
+    if (mine.length <= 1) return json(res, 409, { error: 'cannot remove your only device' });
+    // Both fields, not just id: credential ids are unique in practice today (both
+    // creation paths reject an id that already exists globally, see /api/register/verify and
+    // /api/link/verify), but that uniqueness is an invariant maintained elsewhere in this file,
+    // not something this route should lean on. Filtering by id alone would delete a same-id row
+    // under ANY user if that invariant were ever broken (hand-edited db.json, a future importer,
+    // a restored/merged backup) — including another user's, silently, straight past the
+    // ownership check above.
+    db.creds = db.creds.filter(c => !(c.id === cred.id && c.userId === user.id));
+    saveDb();
+    audit(req, 'device.removed', { user });
+    json(res, 200, { ok: true });
+  },
+
   'GET /api/data': async (req, res) => {
     const user = readSession(req);
     if (!user) return json(res, 401, { error: 'not signed in' });
