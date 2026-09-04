@@ -10,25 +10,30 @@ sin fusionar) · `hecho` (fusionado a `develop`, con hash).
 
 | # | Tarea | Rama | Estado | Commit de merge |
 |---|-------|------|--------|-----------------|
-| F0 | Preparación: instalar dependencias, línea base verde, crear `.agent/` | — | abierto | — |
-| T1 | Lógica pura de códigos de vinculación | `feat/link-core` | abierto | — |
+| F0 | Preparación: instalar dependencias, línea base verde, crear `.agent/` | — | **hecho** | — (línea base: 346 tests frontend) |
+| T1 | Lógica pura de códigos de vinculación | `feat/link-core` | **hecho** | `7d39a5a` (31 tests) |
 | T2 | Endpoints de vinculación | `feat/link-api` | abierto | — |
 | T3 | Listar y revocar dispositivos | `feat/devices-api` | abierto | — |
 | T4 | Interfaz de vinculación | `feat/link-ui` | abierto | — |
 | T5 | Gestión de dispositivos en Ajustes | `feat/devices-ui` | abierto | — |
-| T6 | Configuración y documentación de despliegue | `chore/deploy-home` | abierto | — |
+| T6 | Configuración y documentación de despliegue | `chore/deploy-home` | en curso | — |
 | FA | Aceptación manual (autenticador virtual) | — | abierto | — |
 | FB | Cierre: `develop` → `main` | — | abierto | — |
 
 ## Orden de ejecución
 
 ```
-Ola 1:  T1  +  T6        (paralelo — ficheros distintos)
+Ola 1:  T1  →  T6        (SECUENCIAL, ver nota)
 Ola 2:  T2               (necesita T1)
-Ola 3:  T3  +  T4        (paralelo — api vs frontend)
+Ola 3:  T3  →  T4        (SECUENCIAL, ver nota)
 Ola 4:  T5               (necesita T3 y T4; toca Settings.jsx después de T4)
 Ola 5:  Fase A → Fase B
 ```
+
+> **Nota (2026-09-04):** el paralelismo previsto no es aplicable. Dos agentes no pueden trabajar
+> en dos ramas distintas del mismo árbol de trabajo, aunque toquen ficheros disjuntos: la rama es
+> estado compartido. Haría falta un worktree por agente, lo que complica el merge de vuelta sin
+> ahorrar créditos (solo reloj). Todo va secuencial.
 
 ## Decisiones tomadas (no reabrir sin motivo nuevo)
 
