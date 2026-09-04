@@ -1,0 +1,27 @@
+# Superposición (overlay) que añade un Cloudflare Tunnel delante de openGym, para exponerlo
+# por HTTPS en tu dominio sin abrir ningún puerto en tu router. No modifica docker-compose.yml
+# — se combina con él en el momento de levantar el stack:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d
+#
+# Requisitos previos (ver docs/DESPLIEGUE.md, paso 1):
+#   1. Dominio propio.
+#   2. Túnel creado en el dashboard de Cloudflare Zero Trust (Networks → Tunnels), con una ruta
+#      pública (public hostname) que apunte tu dominio a http://web:80 — el puerto INTERNO del
+#      contenedor `web` (NGINX_PORT, no WEB_PORT: el túnel habla con el contenedor directamente
+#      por la red de Docker Compose, no a través del puerto publicado en el host).
+#   3. El token de ese túnel en TUNNEL_TOKEN, en tu .env — ver .env.production.example.
+#
+# `cloudflared` no publica ningún puerto: abre una conexión saliente hacia Cloudflare y no
+# necesita que tu router reenvíe nada. Se conecta a `web` por su nombre de servicio en la red
+# por defecto que crea Compose para este proyecto (docker-compose.yml no declara una red propia,
+# así que ambos ficheros comparten la red por defecto sin configuración adicional).
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN:?Set TUNNEL_TOKEN in .env — see .env.production.example}
+    depends_on:
+      - web
