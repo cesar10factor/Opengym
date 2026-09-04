@@ -850,6 +850,175 @@ lo que ya había. Los checks en verde no bastan; lo juzga el dueño en pantalla.
 
 ---
 
+# CICLO 3 — Subir los entrenamientos a Strava
+
+Mismas reglas, mismo flujo git, mismas revisiones Opus. Ramas desde `develop`.
+
+**Cómo funciona (verificado en developers.strava.com, no supuesto):**
+`POST /uploads` con `data_type=json`, ámbito `activity:write`. Cuerpo:
+`{ version, start_time, utc_offset, elapsed_time, sets: [{ exercise_type, repetitions, weight, duration, start_time }] }`.
+`exercise_type` sale de un **vocabulario cerrado** de ~600 identificadores del FIT SDK, agrupados
+en ~36 categorías, la mayoría con un `*_GENERIC`. Strava añadió esto el 21/05/2026.
+**No** usar `POST /activities`: solo admite nombre, tipo, duración y descripción.
+
+**Decisiones del dueño (no reabrir):**
+- Un ejercicio sin equivalente exacto → **el genérico de su categoría**. Nunca se inventa un
+  identificador, nunca se omite el ejercicio.
+- La subida es **automática** al terminar el entrenamiento, con marca de "ya subido" para no
+  duplicar.
+
+**Reparto:** el móvil construye el JSON (tiene los datos de ejercicios y el mapeo); el servidor
+guarda el token y reenvía a Strava. El `client_secret` no baja nunca al navegador.
+
+**Orden:** T10 → T11 → T12 → T13. T10 no necesita credenciales y puede empezar ya.
+
+---
+
+## T10 — Mapeo de ejercicios a Strava
+
+**Rama:** `feat/strava-exercise-map` · **Depende de:** nada
+
+**DECISIÓN**
+El trabajo real de este ciclo. 1.324 ejercicios de openGym contra ~600 identificadores de Strava.
+Un mapeo equivocado registra en Strava un ejercicio que no hiciste, para siempre y en silencio,
+así que **es preferible un genérico correcto a un específico dudoso**.
+
+**FICHEROS QUE POSEES**
+- `frontend/src/lib/strava-exercises.js` (nuevo: vocabulario + reglas de categoría + overrides)
+- `frontend/src/lib/strava-map.js` (nuevo: la función de resolución)
+- `frontend/src/lib/strava-map.test.js` (nuevo)
+
+**INTENCIÓN**
+- **Trae el vocabulario tú mismo** de `https://developers.strava.com/docs/uploads/`. No te fíes de
+  ninguna lista transcrita por el orquestador: una lista resumida a mano pierde entradas y
+  desordena categorías. Deja constancia en el fichero de la fecha en que lo obtuviste.
+- `stravaExerciseFor(ex)` → identificador válido, **siempre**. Nunca `undefined`, nunca una cadena
+  inventada. `ex` trae `n` (nombre), `bp` (parte del cuerpo), `tg` (músculo objetivo), `eq`
+  (equipamiento) — ver `frontend/src/lib/exercises-data.js`.
+- Estrategia en tres escalones, en este orden: **override explícito** → **coincidencia por nombre
+  normalizada** (contemplando el equipamiento: barra, mancuerna, máquina, polea) → **genérico de la
+  categoría** deducido de `bp`/`tg`.
+- Categorías sin `*_GENERIC` propio (Hip Thrust, Lower Leg, Quad Extension): elige a qué genérico
+  vecino caen y justifícalo en un comentario.
+- Un ejercicio inventado por el usuario solo tiene nombre y parte del cuerpo: debe resolver igual.
+
+**VERIFICACIÓN**
+`cd frontend ; npm test`
+1. **Los 1.324 ejercicios de `EXDB` resuelven a un identificador que está en el vocabulario.**
+   Este es el test que importa: recórrelos todos, sin excepciones ni listas de exclusión.
+2. Ninguno resuelve a `undefined`, cadena vacía o algo fuera del vocabulario.
+3. Aciertos concretos de los básicos, comprobados a mano: press de banca con barra, sentadilla
+   trasera con barra, peso muerto, dominadas, press militar, curl con barra, extensión de tríceps
+   en polea, prensa de piernas, remo con barra, plancha.
+4. Un ejercicio inventado (solo nombre + parte del cuerpo) resuelve a un genérico coherente.
+5. Reporta **cuántos** caen en cada escalón (override / nombre / genérico). Es la medida real de
+   la calidad del mapeo y quiero el número, no una impresión.
+
+**CHECKS**
+```json
+{
+  "vocabulary_fetched_from_strava_docs": true,
+  "all_1324_resolve": true,
+  "never_returns_invalid_identifier": true,
+  "custom_exercise_resolves": true,
+  "common_lifts_spot_checked": true,
+  "coverage_numbers_reported": true,
+  "existing_suite_green": true
+}
+```
+
+---
+
+## T11 — OAuth con Strava y guardado del token
+
+**Rama:** `feat/strava-oauth` · **Depende de:** nada (paralelo posible con T10, ficheros distintos)
+
+**DECISIÓN**
+El `client_secret` vive solo en el servidor, igual que las claves VAPID. El token de cada perfil
+se guarda junto a sus datos y se renueva solo.
+
+**FICHEROS QUE POSEES**
+- `api/server.js`
+- `api/strava.js` + `api/strava.test.js` (nuevos: lógica pura de tokens, sin HTTP)
+- `.env.production.example` y `docs/DESPLIEGUE.md` (documentar las variables nuevas)
+
+**INTENCIÓN**
+- Variables: `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`. Si faltan, la función queda **apagada**
+  y las rutas responden 404 — una instancia sin Strava no debe mostrar nada de esto.
+- `GET /api/strava/connect` (con sesión) → redirige al consentimiento de Strava con `state`
+  firmado y de un solo uso, ámbito `activity:write`.
+- `GET /api/strava/callback` → valida el `state`, canjea el código, guarda
+  `{ athleteId, access, refresh, expiresAt }` **por usuario** en `./data`.
+- `POST /api/strava/disconnect` (con sesión) → revoca en Strava y borra el token local.
+- `GET /api/strava/status` (con sesión) → `{ connected, athleteId }`. Nunca devuelve tokens.
+- Renovación: si `expiresAt` ya pasó, refresca antes de usar y guarda el token nuevo.
+- Auditar `strava.connected` y `strava.disconnected`. **Nunca** registres tokens en el log.
+
+**REGLAS DURAS**
+- Los tokens no salen nunca del servidor en ninguna respuesta.
+- El `state` debe impedir CSRF: firmado, con caducidad y de un solo uso.
+- No cambies el comportamiento de ninguna ruta existente.
+
+**VERIFICACIÓN**
+`cd api ; npm test` — la lógica pura de `strava.js` (caducidad, decidir si toca refrescar, firma
+y validación del `state`) se testea sin red. El intercambio real con Strava se verifica a mano.
+1. Sin las variables de entorno, las cuatro rutas dan 404.
+2. Las rutas con sesión dan 401 sin ella.
+3. Un `state` manipulado, caducado o reutilizado se rechaza.
+4. Un token caducado se detecta como "hay que refrescar"; uno vivo, no.
+5. Ninguna respuesta contiene `access` ni `refresh` (compruébalo sobre el texto crudo).
+
+---
+
+## T12 — Construir el JSON y subirlo
+
+**Rama:** `feat/strava-upload` · **Depende de:** T10 y T11
+
+**FICHEROS QUE POSEES**
+- `frontend/src/lib/strava-payload.js` + su test (nuevos, puros)
+- `api/server.js`
+- `api/strava-upload.integration.test.js` (nuevo)
+
+**INTENCIÓN**
+- `buildStravaPayload(workout, exercises, unit)` → el cuerpo JSON. Puro y testeable.
+  El peso **va en kilos**: si el perfil está en libras hay que convertir. Las series no completadas
+  no se suben. Los ejercicios por tiempo usan `duration`, no `repetitions`. Los de peso corporal
+  van sin `weight`.
+- `POST /api/strava/upload` (con sesión): recibe el payload, adjunta el token (refrescando si
+  hace falta), reenvía a `POST /uploads` de Strava y devuelve el resultado.
+- **Antiduplicados en el servidor**, no en el cliente: guarda los ids de entrenamientos ya subidos
+  por usuario. El estado del cliente es "el último gana" y no es sitio para esto.
+- Errores de Strava: propágalos con su motivo, sin marcar el entreno como subido.
+
+**VERIFICACIÓN**
+1. Peso en libras → convertido a kilos en el payload.
+2. Series sin completar → fuera.
+3. Ejercicio por tiempo → `duration`, sin `repetitions`.
+4. Ejercicio de peso corporal → sin `weight`.
+5. Subir dos veces el mismo entreno → la segunda no llega a Strava.
+6. Si Strava falla, el entreno **no** queda marcado como subido.
+
+---
+
+## T13 — Interfaz y subida automática
+
+**Rama:** `feat/strava-ui` · **Depende de:** T12
+
+**FICHEROS QUE POSEES**
+- `frontend/src/views/Settings.jsx`
+- `frontend/src/lib/api.js`
+- `frontend/src/store/useStore.js`
+
+**INTENCIÓN**
+- Sección "Strava" en Ajustes, solo con sesión iniciada y solo si el servidor dice que está
+  configurado: conectar, estado, desconectar.
+- Al terminar un entrenamiento, tras sincronizar, se sube solo. Sin red, se reintenta al volver.
+- Un fallo se cuenta con un aviso discreto, **nunca** con una hoja modal a mitad de entrenamiento.
+
+**TRABAJO VISUAL:** lo juzga el dueño en pantalla.
+
+---
+
 # Trabajo futuro (no en este ciclo)
 
 - Proponer la vinculación de dispositivos como merge request upstream en GitLab. Es una carencia

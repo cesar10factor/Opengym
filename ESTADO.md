@@ -57,6 +57,29 @@ Decisiones del ciclo 2 (no reabrir):
 - Las 5 cadenas nuevas están **solo en español**. Los otros 10 idiomas caen al inglés, coherente
   con lo ya anotado en trabajo futuro.
 
+## Subir los entrenamientos a Strava — SÍ es posible (ciclo 3, por planificar)
+
+> **Corrección.** El 2026-09-05 escribí aquí que la API de Strava no tenía modelo de datos de
+> fuerza y que solo cabía una actividad manual con la duración y un texto. **Era falso.** Lo
+> desmintieron unas capturas del dueño de entrenos subidos desde Hevy, con sección "Ejercicios"
+> estructurada y métricas propias de volumen, series y repeticiones. Verificado después contra la
+> documentación: Strava añadió soporte de fuerza el **21 de mayo de 2026**, después de mi corte de
+> conocimiento. No des por buena una limitación de una API de terceros sin comprobarla.
+
+**Cómo se hace (verificado en developers.strava.com):**
+- `POST /uploads` con `data_type=json`. **No** `POST /activities`, que sigue siendo la vía pobre
+  (solo nombre, tipo, duración, distancia y descripción).
+- Ámbito OAuth: `activity:write`.
+- Cuerpo: `{ version, start_time, utc_offset, elapsed_time, sets: [...] }`, y cada serie es
+  `{ exercise_type, repetitions, weight, duration, start_time }`. El peso va en kilos.
+- Tipos válidos: `WeightTraining`, `HighIntensityIntervalTraining`, `Workout`, `Crossfit`.
+
+**El trabajo de verdad está en el mapeo, no en la subida.** `exercise_type` no es texto libre:
+sale de un vocabulario cerrado del FIT SDK (~200 identificadores tipo `BARBELL_BENCH_PRESS`,
+`PLANK_GENERIC`). openGym tiene **1.324 ejercicios** más los que el usuario se invente. Así que
+hay que decidir qué pasa con lo que no mapea, y un mapeo mal hecho registra en Strava un ejercicio
+equivocado para siempre, en silencio.
+
 ## Bloqueantes abiertos
 
 - **Revisión visual pendiente (ciclo 2).** La fila de descanso en la hoja de configuración de
