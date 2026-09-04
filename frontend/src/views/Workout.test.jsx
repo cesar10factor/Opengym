@@ -149,6 +149,56 @@ describe('Workout set completion flow', () => {
     expect(mocks.S.active.cur).toBe(1)
     expect(mocks.startRest).toHaveBeenCalledWith(90)
   })
+
+  // Mis-tapping a set and correcting it used to cost you the rest timer: the high-water mark
+  // never decreases, so the re-check did not read as progress and the timer never started.
+  it('starts rest again when a set is unchecked and re-checked', async () => {
+    await mount([exercise('plain-bench', [false, false, false])])
+
+    await toggleSet(1)
+    expect(mocks.startRest).toHaveBeenCalledTimes(1)
+
+    await toggleSet(1)                    // corrected the mis-tap
+    expect(mocks.startRest).toHaveBeenCalledTimes(1)   // unchecking rests nobody
+
+    await toggleSet(1)                    // and back on
+    expect(mocks.startRest).toHaveBeenCalledTimes(2)
+    expect(mocks.startRest).toHaveBeenLastCalledWith(90)
+  })
+
+  // The worst case of the same bug: the last set can never beat its own high-water mark again,
+  // so that exercise stayed timer-less for the whole session after a single mis-tap.
+  it('starts rest again after a mis-tapped final set is corrected', async () => {
+    await mount([exercise('plain-bench', [true, true, false]), exercise('later', [false, false])])
+
+    await toggleSet(2)                    // exercise complete — rest stops, none starts
+    expect(mocks.stopRest).toHaveBeenCalled()
+    expect(mocks.startRest).not.toHaveBeenCalled()
+
+    await toggleSet(2)                    // undo: there is work again
+    await toggleSet(2)                    // redo
+    // Completing the last set finishes the exercise, so the right answer is still "stop" — but
+    // it is REACHED again instead of the whole block bailing out at the high-water check. Before
+    // the fix this second correction produced no timer decision at all.
+    expect(mocks.stopRest).toHaveBeenCalledTimes(2)
+    expect(mocks.startRest).not.toHaveBeenCalled()
+  })
+
+  it('does not re-navigate a superset when a set is unchecked and re-checked', async () => {
+    const group = 'superset-1'
+    await mount([
+      exercise('superset-a', [false, false], { sg: group }),
+      exercise('superset-b', [false, false], { sg: group }),
+    ], 0)
+
+    await toggleSet(0)                    // a's first set → advance to b
+    expect(mocks.S.active.cur).toBe(1)
+
+    mocks.S.active.cur = 0                // the user navigated back by hand
+    await toggleSet(0)
+    await toggleSet(0)                    // uncheck + re-check of the same set
+    expect(mocks.S.active.cur).toBe(0)    // must NOT have been dragged forward again
+  })
 })
 
 describe('superset flow survives an exercise being removed mid-session', () => {
