@@ -13,7 +13,7 @@ vi.mock('./store/useUI.js', () => ({
   useUI: Object.assign(() => ({}), { getState: () => ({ toast: () => {}, openSheet: () => {} }) }),
 }))
 
-const { fmtRest, stepRest, restRowSubtitle, restInfo, computeExConfig } = await import('./sheets.jsx')
+const { fmtRest, stepRest, restInfo, computeExConfig } = await import('./sheets.jsx')
 
 describe('fmtRest', () => {
   it('formats whole minutes', () => { expect(fmtRest(60)).toBe('1:00') })
@@ -76,18 +76,16 @@ describe('restInfo (derives display + override-ness from rest.js, not a local re
   })
 })
 
-describe('restRowSubtitle', () => {
-  it('names the inherited default when unset', () => {
-    expect(restRowSubtitle(false, 90)).toBe('Default (1:30)')
-  })
-  it('reads differently, and names the same default, when it is a genuine override', () => {
-    const inherited = restRowSubtitle(false, 90)
-    const overridden = restRowSubtitle(true, 90)
-    expect(overridden).not.toBe(inherited)
-    expect(overridden).toContain('1:30')
-  })
-  it('"No rest" (the fmtRest wording for 0) is visually distinct from "Default (1:30)"', () => {
-    expect(fmtRest(0)).not.toBe(restRowSubtitle(false, 90))
+// The row had a subtitle naming the inherited default, and a second wording for when a value of
+// your own was set. Both are gone: the owner asked for the row to carry no text under the title.
+// The number was never only there — the stepper shows it in both states — and the two wordings
+// were different lengths, so the row grew a second line the moment you stepped off the default.
+// restInfo still decides WHICH number the stepper shows, and is tested above; there is no longer
+// a string to test. Do not reintroduce one without checking it on a phone first.
+describe('the rest row carries no subtitle', () => {
+  it('exports no subtitle helper any more', async () => {
+    const mod = await import('./sheets.jsx')
+    expect(mod.restRowSubtitle).toBeUndefined()
   })
 })
 

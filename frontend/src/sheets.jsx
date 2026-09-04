@@ -534,9 +534,6 @@ export function stepRest(current, globalRest, dir) {
   const base = current != null ? current : (globalRest || 0)
   return Math.max(0, Math.min(REST_STEP_MAX_SEC, base + dir * REST_STEP_SEC))
 }
-export function restRowSubtitle(isOverride, globalRest) {
-  return isOverride ? t('Overrides the default ({0})', fmtRest(globalRest)) : t('Default ({0})', fmtRest(globalRest))
-}
 
 // The exact object ExConfig#save() hands to onSave(...) — pulled out of the component so it
 // has no React/store dependency and can be unit-tested directly (this is also where T8's
@@ -592,7 +589,12 @@ function RestRow({ c, setC, globalRest }) {
   })
   const resetToDefault = () => setC(x => { const { rest, ...rest2 } = x; return rest2 })
   return <div className="sect-b" style={{ marginBottom: 8 }}>
-    <Row icon="timer" iconTint="var(--orange)" title={t('Rest between sets')} subtitle={restRowSubtitle(isOverride, globalRest)}>
+    {/* No subtitle on purpose. The stepper beside this already shows the number in both states —
+        the inherited one when nothing is set, your own once it is — so a line of text underneath
+        only repeated it, and the two wordings were different lengths, which made the row grow a
+        second line the moment you stepped off the default. Which of the two states you are in is
+        carried by the reset button, which only appears once a value of your own is set. */}
+    <Row icon="timer" iconTint="var(--orange)" title={t('Rest between sets')}>
       <div className="stp">
         <button onClick={() => step(-1)} aria-label={t('Decrease')}><Icon name="minus" /></button>
         <span className="val"><span className="num">{fmtRest(shown)}</span></span>
