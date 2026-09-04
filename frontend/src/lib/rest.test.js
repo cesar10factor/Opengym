@@ -67,6 +67,13 @@ describe('restFor', () => {
       expect(restFor(entryWith(true), 90)).toBe(90)
       expect(restFor(entryWith(false), 90)).toBe(90)
     })
+
+    // Number(null) is 0 as well, so an explicit null — a hand-written "rest": null in a shared
+    // plan file — would otherwise read as a deliberate "no rest" instead of "not set".
+    it('an explicit null is unset, not a deliberate zero', () => {
+      expect(restFor({ rest: null }, 90)).toBe(90)
+      expect(restFor({ target: { rest: null } }, 90)).toBe(90)
+    })
   })
 })
 
