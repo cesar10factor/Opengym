@@ -17,7 +17,8 @@ sin fusionar) · `hecho` (fusionado a `develop`, con hash).
 | T4 | Interfaz de vinculación | `feat/link-ui` | **hecho** | `bd3fce1` (354 tests) |
 | T5 | Gestión de dispositivos en Ajustes | `feat/devices-ui` | **hecho** | `f60ca56` (361 tests) |
 | T6 | Configuración y documentación de despliegue | `chore/deploy-home` | **hecho** | `d881bc1` (con salvedad ↓) |
-| FA | Aceptación manual (autenticador virtual) | — | abierto | — |
+| FX | Arreglo: `link.js` no viajaba en la imagen del `api` | `fix/api-image-missing-link-module` | **hecho** | `a9aa113` |
+| FA | Aceptación manual (autenticador virtual) | — | **listo para empezar** (stack en pie) | — |
 | FB | Cierre: `develop` → `main` | — | abierto | — |
 
 ## Orden de ejecución
@@ -74,6 +75,11 @@ Ola 5:  Fase A → Fase B
   minteo: queda en trabajo futuro.
 - **La API de dispositivos usa `?id=`**, no un parámetro de ruta: el dispatcher solo hace match
   exacto de `MÉTODO ruta`. Mismo patrón que `GET /api/admin/user?id=`.
+- **`api/Dockerfile` lista los módulos de runtime uno a uno.** Al añadir `link.js` la API entró en
+  bucle de reinicio con `ERR_MODULE_NOT_FOUND` mientras los 55 tests seguían en verde: los tests
+  importan del árbol de trabajo, donde el fichero sí está. **Todo módulo nuevo en `api/` hay que
+  añadirlo al `COPY`**, y ningún test lo detectará. Es la razón por la que la Fase A no es
+  opcional: fue lo primero que encontró, antes incluso del primer clic.
 
 ## Registro
 
