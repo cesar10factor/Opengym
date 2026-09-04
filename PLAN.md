@@ -183,23 +183,37 @@ para que sea testeable al 100% con `node --test`. `server.js` no se toca en esta
 
 - `makeCode()` → cadena de 8 caracteres del alfabeto `ABCDEFGHJKMNPQRSTUVWXYZ23456789`
   (sin `0`,`O`,`1`,`I`,`L` para que no se confundan al teclear), formateada `XXXX-XXXX`.
-  Usa `crypto.randomBytes`, no `Math.random`.
-- `createLink(uid, now)` → objeto `{ code, uid, exp, attempts: 0 }` con `exp = now + 15*60*1000`.
+  Usa `crypto.randomBytes`, no `Math.random`, y sin sesgo de módulo.
+- `createLink(uid, now)` → objeto `{ code, uid, exp }` con `exp = now + 15*60*1000`.
 - `validateLink(links, code, now)` → `{ ok, uid, reason }`. Normaliza la entrada (mayúsculas,
-  quita espacios y guiones) antes de comparar. Razones posibles: `'not-found'`, `'expired'`,
-  `'too-many-attempts'`.
-- `registerAttempt(links, code, now)` → incrementa `attempts` del código si existe. A partir de
-  **5 intentos fallidos** el código queda invalidado permanentemente (`validateLink` devuelve
-  `'too-many-attempts'` aunque el código sea correcto).
+  quita espacios y guiones) antes de comparar. Razones: `'not-found'`, `'expired'`.
+- `recordFailure(fails, now)` → lista nueva con `now` añadido y los anteriores a `FAIL_WINDOW`
+  descartados.
+- `isThrottled(fails, now)` → `true` cuando hay `MAX_FAILS` o más fallos dentro de `FAIL_WINDOW`.
 - `burnLink(links, code)` → devuelve la lista sin ese código.
 - `pruneLinks(links, now)` → elimina los caducados.
 
+Constantes exportadas: `MAX_FAILS = 10`, `FAIL_WINDOW = 15 * 60 * 1000`.
+
 Reglas de comportamiento no negociables:
-- Un código sirve **una sola vez**.
+- Un código sirve **una sola vez**. El módulo **no** lo impone: `validateLink` devuelve `ok`
+  tantas veces como se le llame, y **el llamador debe invocar `burnLink` al validar con éxito**.
+  Documentado en la cabecera del módulo para que T2 no lo pierda.
 - Un código caducado nunca valida, aunque sea correcto.
-- La comparación de códigos es **insensible a mayúsculas** y tolera guiones/espacios.
+- La comparación de códigos es **insensible a mayúsculas**, tolera guiones/espacios, y se hace
+  en **tiempo constante** (`crypto.timingSafeEqual` sobre búferes de igual longitud). El código
+  es un secreto de 8 caracteres que abre una cuenta.
+- Un código normalizado vacío (`''`, `'   '`, `'----'`, `null`, `undefined`) se rechaza de
+  entrada con `'not-found'`, sin buscar nada.
 - Nunca hay dos códigos activos idénticos: `createLink` no lo garantiza por sí solo, así que
   documenta que el llamador debe reintentar si colisiona (probabilidad despreciable, pero explícito).
+
+> **Corrección de diseño (2026-09-04, tras revisión Opus).** La primera versión de este brief
+> limitaba los intentos **por código** (5 fallos y el código muere). No sirve: quien ataca prueba
+> códigos que no existen, así que no hay registro que incrementar y el contador nunca sube. Lo
+> único que bloqueaba era al usuario legítimo reenviando su propio código. El límite debe ir
+> ligado a **quien intenta**, no al secreto adivinado — de ahí el estrangulador global. Es global
+> a propósito y no por IP: vincular ocurre unas pocas veces al año, y una IP se rota.
 
 En `api/package.json` añade: `"test": "node --test"`. **No añadas dependencias.**
 
@@ -213,12 +227,19 @@ Cobertura mínima obligatoria en `api/link.test.js` (un test por punto):
 1. `makeCode` devuelve el formato `XXXX-XXXX` y solo usa el alfabeto permitido.
 2. `makeCode` no repite en 1000 llamadas.
 3. Código válido dentro de la ventana → `ok: true` con el uid correcto.
-4. Código un milisegundo después de `exp` → `ok: false`, `reason: 'expired'`.
+4. Frontera de caducidad: en `exp - 1` vale, en `exp` exacto **vale**, en `exp + 1` caduca.
+   (Con solo `exp + 1` una regresión a `>=` pasaría inadvertida.)
 5. Código inexistente → `reason: 'not-found'`.
 6. Minúsculas, con espacios y sin guion → valida igual.
-7. Tras 5 intentos fallidos, el código correcto ya no valida → `'too-many-attempts'`.
-8. `burnLink` lo elimina y una segunda validación da `'not-found'`.
-9. `pruneLinks` quita los caducados y conserva los vivos.
+7. Códigos vacíos y basura (`''`, `'   '`, `'----'`, `null`, `undefined`) → `'not-found'`, sin excepción.
+8. Dos códigos válidos a la vez: cada uno valida contra su propio uid, y normalizar uno nunca
+   casa con el otro.
+9. Estrangulador: con `MAX_FAILS - 1` fallos no estrangula; con `MAX_FAILS`, sí.
+10. Los fallos anteriores a `FAIL_WINDOW` caen solos y desestrangulan.
+11. `burnLink` lo elimina y una segunda validación da `'not-found'`.
+12. `pruneLinks` quita los caducados y conserva los vivos.
+13. No mutación: tras cada función exportada, la lista de entrada y sus objetos siguen idénticos
+    (comparación profunda contra una copia previa).
 
 **CHECKS**
 ```json
@@ -227,9 +248,13 @@ Cobertura mínima obligatoria en `api/link.test.js` (un test por punto):
   "no_new_dependencies": true,
   "server_js_untouched": true,
   "tests_pass": true,
-  "test_count_min_9": true,
+  "test_count_min_13": true,
   "uses_crypto_randomBytes": true,
-  "ambiguous_chars_excluded": true
+  "ambiguous_chars_excluded": true,
+  "constant_time_compare": true,
+  "global_throttle_not_per_code": true,
+  "empty_code_guarded": true,
+  "burn_obligation_documented": true
 }
 ```
 
@@ -260,10 +285,15 @@ esos mismos patrones. Tres rutas nuevas:
    Audita `link.code.created`.
 
 2. **`POST /api/link/options`** — **sin** sesión. Body `{ code }`.
-   Valida el código. Si no vale: registra el intento fallido, audita `link.fail` con la razón,
-   y responde `400` con `{ error: 'invalid or expired code' }`.
+   **Antes de validar nada**, comprueba `isThrottled(db.linkFails, now)`: si estrangula, responde
+   `400` con el mismo error genérico y **no** mires el código siquiera.
+   Valida el código. Si no vale: `db.linkFails = recordFailure(db.linkFails, now)`, `saveDb()`,
+   audita `link.fail` con la razón, y responde `400` con `{ error: 'invalid or expired code' }`.
    **El mensaje de error es el mismo para todas las razones** — no reveles si el código existe,
-   ha caducado o está bloqueado.
+   ha caducado o está estrangulado.
+   `db.linkFails` es un array de marcas de tiempo, aditivo, y por defecto `[]` en un `db.json`
+   antiguo. El estrangulador es **global a la instancia**, no por código ni por usuario: quien
+   ataca prueba códigos inexistentes, así que un contador ligado al código no cuenta nada.
    Si vale: genera opciones de registro WebAuthn para el **uid existente** (no uno nuevo),
    con `excludeCredentials` conteniendo las credenciales que ya tiene ese usuario, para que un
    dispositivo ya vinculado no se registre dos veces. Guarda el challenge igual que hace
@@ -307,10 +337,12 @@ Tests obligatorios:
 4. `POST /api/link/options` con código inexistente → 400.
 5. `POST /api/link/options` con código válido → 200, y las opciones llevan el `user.id` del
    usuario existente, no uno nuevo.
-6. Seis intentos con código incorrecto → el sexto sigue dando 400 y el código legítimo queda
-   bloqueado.
-7. El error de código inválido es **idéntico** en texto para caducado, inexistente y bloqueado.
-8. `db.json` de un servidor previo **sin** el campo `links` arranca sin error.
+6. `MAX_FAILS` intentos con código incorrecto → el siguiente da 400 **aunque el código sea el
+   legítimo**, y `db.linkFails` tiene las marcas de tiempo.
+7. El error de código inválido es **idéntico** en texto para caducado, inexistente y estrangulado.
+8. `db.json` de un servidor previo **sin** los campos `links` ni `linkFails` arranca sin error.
+9. Un código válido canjeado dos veces: el segundo intento da 400 (`burnLink` se llamó al
+   validar con éxito, que es responsabilidad del llamador).
 
 El tramo `/api/link/verify` con criptografía real **no se testea aquí** (requeriría un
 autenticador virtual). Queda cubierto por la aceptación manual de la Fase A. Dilo en el reporte.
@@ -325,8 +357,10 @@ autenticador virtual). Queda cubierto por la aceptación manual de la Fase A. Di
   "excludeCredentials_populated": true,
   "old_db_json_compatible": true,
   "invite_only_not_applied_to_link": true,
+  "throttle_checked_before_validation": true,
+  "burn_called_on_success": true,
   "tests_pass": true,
-  "test_count_min_8": true
+  "test_count_min_9": true
 }
 ```
 
