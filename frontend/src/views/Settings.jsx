@@ -4,8 +4,9 @@ import { useStore, DEF, hasData } from '../store/useStore.js'
 import { useUI } from '../store/useUI.js'
 import { ACCENTS, todayISO, localTZ } from '../lib/format.js'
 import { effortOf } from '../lib/history.js'
-import { api, webauthnOK, passkeyLogin, passkeyRegister, linkCode, IS_ANDROID } from '../lib/api.js'
+import { api, webauthnOK, passkeyLogin, passkeyRegister, linkCode, listDevices, removeDevice, IS_ANDROID } from '../lib/api.js'
 import { formatCode, remaining } from '../lib/link.js'
+import { canRemove, deviceLabel } from '../lib/devices.js'
 import { pushSupported, enablePush, disablePush, sendTestPush } from '../lib/push.js'
 import { wakeLockSupported } from '../lib/wakelock.js'
 import { t, LANGS, INSTR_LANGS } from '../lib/i18n.js'
@@ -105,6 +106,9 @@ export default function Settings() {
       )}
     </Section>
     {!user && !DEMO && !MOBILE && <p className="sect-f" style={{ marginTop: -18, marginBottom: 22 }}>{t('Guest mode — data lives only in this browser.')}</p>}
+
+    {/* ---------- devices: see and revoke the passkeys on this profile ---------- */}
+    {user && <DevicesCard toast={toast} />}
 
     {/* ---------- general ---------- */}
     <Section title={t('General')} footer={t('Note: switching units only changes the label — logged numbers are not converted.')}>
@@ -363,6 +367,47 @@ function LinkCodeSheet({ code, exp, close }) {
     <div className="dim small" style={{ marginBottom: 14 }}>{t('This code works once and expires 15 minutes after it is generated. Anyone who has it can add a device to your profile, so don’t share it or leave it on screen.')}</div>
     <Button variant="ghost" className="dim" onClick={close}>{t('Close')}</Button>
   </>
+}
+
+// Lists the passkeys on this profile so one can be revoked before, say, selling the phone it
+// lives on. The server has no idea which credential signed the current session — the cookie is
+// uid:exp:version, nothing more — so there is no "this device" marker here, and the removal
+// confirmation has to carry that uncertainty in words instead.
+function DevicesCard({ toast }) {
+  const [devices, setDevices] = useState(null)   // null = loading; [] once loaded but empty never happens (server always has >=1)
+  const [failed, setFailed] = useState(false)
+
+  const load = () => {
+    setFailed(false)
+    listDevices().then(r => setDevices(r.devices || [])).catch(() => { setDevices(null); setFailed(true) })
+  }
+  useEffect(load, [])
+
+  const remove = d => confirmSheet({
+    title: t('Remove this passkey?'),
+    message: t('This may be the device you’re using right now — the app can’t tell which one you’re signed in from. If it is, you’ll be signed out and won’t be able to sign back in from it. Your other devices keep working.'),
+    confirmText: t('Remove'), danger: true,
+    onConfirm: async () => {
+      try { await removeDevice(d.id); toast(t('Passkey removed')); load() }
+      catch (e) { toast(e.message || t('Could not remove that passkey')) }
+    },
+  })
+
+  return (
+    <Section title={t('Devices')} footer={failed ? t('Couldn’t load your devices — check your connection.') : null}>
+      {devices === null && !failed && <Row icon="link" iconTint="var(--grey)" title={t('Loading…')} />}
+      {devices && devices.map(d => {
+        const removable = canRemove(devices)
+        return (
+          <Row key={d.id} icon="lock" iconTint="var(--grey)" title={deviceLabel(d)}
+            subtitle={!removable ? t('A profile needs at least one passkey, so this one can’t be removed.') : null}>
+            <button className="iconbtn" style={{ width: 32, height: 30, borderRadius: 8, fontSize: 15, color: removable ? 'var(--red)' : 'var(--label-3)' }}
+              disabled={!removable} onClick={() => remove(d)} aria-label={t('Remove')}><Icon name="trash" /></button>
+          </Row>
+        )
+      })}
+    </Section>
+  )
 }
 
 // The same registration as the sign-in screen's, reached from Settings instead. It asks for

@@ -71,3 +71,13 @@ export async function linkDevice(code) {
   const res = await api('/api/link/verify', { method: 'POST', body: JSON.stringify({ cid, credential: credToJSON(cred) }) })
   return res.user
 }
+// Lists the signed-in profile's passkeys ({ id, created, transports } each — no `current`
+// flag: the session cookie never records which credential signed it in).
+export async function listDevices() {
+  return api('/api/devices')
+}
+// Revokes one passkey by credential id. 404 if it isn't yours (or doesn't exist), 409 if it's
+// the profile's last one — both surface as a rejected promise with a readable e.message.
+export async function removeDevice(id) {
+  return api('/api/devices?id=' + encodeURIComponent(id), { method: 'DELETE' })
+}
