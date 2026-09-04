@@ -817,6 +817,15 @@ El descanso se define a mano al montar la rutina, por ejercicio.
 **FICHEROS QUE POSEES**
 - `frontend/src/sheets.jsx` (la hoja de configuración de ejercicio)
 - `frontend/src/views/Plan.jsx`
+- `frontend/src/views/RoutineEdit.jsx`
+
+> **Hallazgo de la revisión de T8 — arréglalo aquí, es la mitad del trabajo.** El campo `rest`
+> **no es duradero hoy**. `RoutineEdit.jsx` reconstruye el ejercicio como
+> `{ id, sg, ...cfg }`, y `ExConfig#save` en `sheets.jsx` arma su salida desde cero con una
+> **lista blanca de campos que no incluye `rest`**. Consecuencia: un `rest` que llegue por
+> importación de un plan **se borra en silencio en cuanto tocas ese ejercicio en el editor**.
+> No basta con añadir el control: hay que meter `rest` en esa lista blanca y **testear que
+> editar otra cosa del ejercicio —las series, las repeticiones— no se lo lleva por delante.**
 
 **INTENCIÓN**
 En la hoja donde se configura un ejercicio de una rutina, un control de descanso en `mm:ss`,
@@ -834,6 +843,7 @@ lo que ya había. Los checks en verde no bastan; lo juzga el dueño en pantalla.
   "shows_inherited_default_with_value": true,
   "can_reset_to_default": true,
   "steps_of_15s": true,
+  "rest_survives_editing_other_fields": true,
   "existing_suite_green": true
 }
 ```
