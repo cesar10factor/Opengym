@@ -45,6 +45,9 @@ function cleanEx(e) {
   if (e.repsMin != null) o.repsMin = e.repsMin
   if (e.repsMax != null) o.repsMax = e.repsMax
   if (e.sg) o.sg = e.sg
+  // Per-exercise rest override (seconds). `!= null` on purpose: `rest: 0` is an explicit
+  // "no rest" and must travel with the plan, not get dropped like an unset weight would.
+  if (e.rest != null) o.rest = e.rest
   return o
 }
 

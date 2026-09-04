@@ -9,6 +9,7 @@ import { beep, vibrate } from '../lib/sound.js'
 import { t } from '../lib/i18n.js'
 import { api } from '../lib/api.js'
 import { setProgressHighWater, supersetFlowStep, restAction } from '../lib/supersetFlow.js'
+import { restFor } from '../lib/rest.js'
 import Media from '../components/Media.jsx'
 import { startFlow, exercisePicker, exConfigSheet, exerciseDetailSheet, topWeightSheet, finishWorkout, workoutCompleteSheet, confirmSheet } from '../sheets.jsx'
 import Icon from '../components/Icon.jsx'
@@ -340,7 +341,19 @@ function ActiveWorkout() {
 
       const rest = restAction({ unitDone: freshUnitDone, unitLength, isLastUnit: freshLastUnit, step })
       if (rest.stop) stopRest()
-      if (rest.start) startRest(S.restSec)
+      if (rest.start) {
+        // The rest that applies is the exercise that was just completed — itself for an
+        // ordinary exercise, or whichever superset member closed this round/unit (idx is always
+        // that member; see supersetFlowStep's own "last active member" boundary — the group's
+        // last array index is not always the same entry in an uneven superset).
+        // rest: 0 (or any invalid value from a corrupt plan file, sanitized inside restFor)
+        // means no timer at all: startRest(0) sets endsAt = now, so its first tick never crosses
+        // the `left <= 0` branch that ends it, leaving a stuck 0:00 timer instead. Ending
+        // whatever rest was running is the correct action here, not merely skipping a start.
+        const sec = restFor(fresh.entries[idx], S.restSec)
+        if (sec > 0) startRest(sec)
+        else stopRest()
+      }
 
       // Everything past this point moves the user somewhere they did not ask to go, so it fires
       // only on genuinely new progress.
