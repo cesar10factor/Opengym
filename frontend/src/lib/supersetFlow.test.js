@@ -1,4 +1,38 @@
+import { restAction } from './supersetFlow.js'
 import { describe, expect, it } from 'vitest'
+
+describe('restAction', () => {
+  const call = o => restAction({ unitDone: false, unitLength: 1, isLastUnit: false, step: null, ...o })
+
+  it('rests after an ordinary set that leaves work behind', () => {
+    expect(call({})).toEqual({ stop: false, start: true })
+  })
+
+  it('stops without restarting when an ordinary exercise is finished', () => {
+    expect(call({ unitDone: true })).toEqual({ stop: true, start: false })
+  })
+
+  // The case a first attempt at this got wrong: finishing a superset both ends the running rest
+  // and earns a new one before the next exercise. stop must not short-circuit start.
+  it('stops and starts when a superset closes with another exercise still to come', () => {
+    expect(call({ unitDone: true, unitLength: 2, step: { unitDone: true } }))
+      .toEqual({ stop: true, start: true })
+  })
+
+  it('does not start a rest when the last superset of the workout closes', () => {
+    expect(call({ unitDone: true, unitLength: 2, isLastUnit: true, step: { unitDone: true } }))
+      .toEqual({ stop: true, start: false })
+  })
+
+  it('rests between rounds of a superset, not between its members', () => {
+    expect(call({ unitLength: 2, step: { roundDone: true } })).toEqual({ stop: false, start: true })
+    expect(call({ unitLength: 2, step: { roundDone: false } })).toEqual({ stop: false, start: false })
+  })
+
+  it('does nothing for a superset with no flow step to act on', () => {
+    expect(call({ unitLength: 2, step: null })).toEqual({ stop: false, start: false })
+  })
+})
 import { setProgressHighWater, supersetFlowStep } from './supersetFlow.js'
 
 const entry = done => ({ sets: done.map(value => ({ done: value })) })
