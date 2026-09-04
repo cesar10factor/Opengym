@@ -18,7 +18,10 @@ LABEL maintainer="Duarte Santos https://gitlab.com/DuarteSantos8" \
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev && npm cache clean --force
-COPY server.js ./
+# Every runtime module has to be listed here — the tests import them straight off the working
+# tree, so a module missing from the image passes every test and then crash-loops the container
+# on the first import. Add new ones here as they appear.
+COPY server.js link.js ./
 
 ENV NODE_ENV=production
 ENV PORT=3000
