@@ -486,8 +486,6 @@ export default {
   'Seconds': 'Segundos',
   'A timer runs while you hold the set. Leave the weight at 0 for bodyweight holds.': 'Un temporizador corre mientras aguantas la serie. Deja el peso en 0 para isométricos con tu propio peso.',
   'Rest between sets': 'Descanso entre series',
-  'Default ({0})': 'Por defecto ({0})',
-  'Overrides the default ({0})': 'Sustituye el valor por defecto ({0})',
   'No rest': 'Sin descanso',
   'Reset to default': 'Volver al valor por defecto',
   'Done': 'Listo',
