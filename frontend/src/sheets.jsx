@@ -22,6 +22,7 @@ import { nextPrescription, applyPrescription, policyFor, defaultIncrement, POLIC
 import { MOBILE, shareExport } from './lib/mobile.js'
 import { buildCompletedWorkout } from './lib/finish-workout.js'
 import { isWarmupRow } from './lib/workout-model.js'
+import { restFor } from './lib/rest.js'
 
 const S = () => useStore.getState().S
 const update = (...a) => useStore.getState().update(...a)
@@ -489,6 +490,119 @@ function ProgressionFields({ ex, mode, c, setC, routine, unit }) {
   </>
 }
 
+// Rest between sets — pure formatting/stepping helpers, kept free of React state and the
+// store so they can be unit-tested directly (see sheets.rest.test.jsx).
+//
+// rest.js is the one place that decides what a `rest` value actually means (absent/invalid
+// falls back to the global, 0 is deliberate, anything else is clamped to 1800s) — this file
+// must not re-decide any of that itself, or the row and the timer can disagree about what a
+// malformed value (e.g. from an imported plan) resolves to. rest.js exports exactly one
+// function, `restFor(entry, globalRest)`, so both "what number does this actually resolve
+// to" and "is this genuinely a user-set override" are derived by calling restFor itself
+// rather than re-implementing sanitizeRest here:
+//   - the resolved/displayed value is restFor({ rest }, globalRest) — the exact number the
+//     workout timer will use.
+//   - whether `rest` is a real override (not absent, not garbage) is read off
+//     restFor({ rest }, NaN): a valid own value comes back as that (finite) number; an
+//     absent/invalid one falls through to the global we passed in, i.e. NaN. sanitizeRest
+//     itself never returns NaN (it guards on Number.isFinite), so NaN is unambiguous here —
+//     no sentinel collision with a real rest value is possible.
+// This was the smallest way to stay off rest.js's exported surface without duplicating its
+// rules a second time in the UI; the only alternative would have been exporting rest.js's
+// internal `ownRest`/`sanitizeRest`, which is a rest.js change and out of scope here.
+export function restInfo(rawRest, globalRest) {
+  const shown = restFor({ rest: rawRest }, globalRest)
+  const isOverride = !Number.isNaN(restFor({ rest: rawRest }, NaN))
+  return { shown, isOverride }
+}
+// Formats an already-resolved (rest.js-sanitized) number of seconds. Rounds once, up front —
+// flooring minutes and %-ing seconds off two *different* roundings of the input used to
+// disagree at the boundary (119.6s read back as "1:00" instead of "2:00").
+export function fmtRest(sec) {
+  const total = Math.round(sec)
+  if (!(total > 0)) return t('No rest')
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
+}
+const REST_STEP_SEC = 15
+const REST_STEP_MAX_SEC = 1800 // UX ceiling for the +/- button only; rest.js's own clamp is
+                                // still the one applied at save time via restFor, so a raw
+                                // value beyond this is never trusted just because it's low.
+// Steps by 15s. `current` null/undefined (inherited, or not a real override) steps from the
+// global default, not from 0 — the whole point of "Default (1:30)" is that it already names
+// a real number to move off.
+export function stepRest(current, globalRest, dir) {
+  const base = current != null ? current : (globalRest || 0)
+  return Math.max(0, Math.min(REST_STEP_MAX_SEC, base + dir * REST_STEP_SEC))
+}
+export function restRowSubtitle(isOverride, globalRest) {
+  return isOverride ? t('Overrides the default ({0})', fmtRest(globalRest)) : t('Default ({0})', fmtRest(globalRest))
+}
+
+// The exact object ExConfig#save() hands to onSave(...) — pulled out of the component so it
+// has no React/store dependency and can be unit-tested directly (this is also where T8's
+// review found `rest` silently dropped: this whitelist used to have no `rest` field at all,
+// so any exercise carrying one — e.g. imported from a shared plan — lost it the moment any
+// other field was edited).
+export function computeExConfig(c, ex, cardio, mode, bw, perSide, routine) {
+  const sets = Math.max(1, Math.round(c.sets) || (cardio ? 1 : 3))
+  // Only carry progression settings that differ from the inherited default, so a plan file
+  // stays readable and "follow the routine" keeps meaning exactly that.
+  const prog = {}
+  if (c.prog) prog.prog = c.prog
+  if (c.inc > 0) prog.inc = c.inc
+  // Written only when it differs from what the dataset already says, so a barbell config
+  // stays exactly the shape it was before these flags existed.
+  // `bodyweight` is true of a hold as much as of a set of reps; `side` is not — it counts
+  // reps, and a timed hold has none. Switching an exercise to Time therefore drops it
+  // rather than carrying a flag nothing downstream can read.
+  const flags = {}
+  if (bw !== isBodyweightEq(ex.id)) flags.bodyweight = bw
+  // Written ONLY for a value rest.js itself would accept as a real override — never a
+  // duplicated re-check of its rules. restFor({ rest: c.rest }, NaN) comes back as the
+  // sanitized number for a genuine override, or NaN for anything absent/invalid ('', a
+  // negative, a boolean, NaN, ...) — see restInfo() above for why NaN is a safe sentinel.
+  // The NaN case omits the key entirely, which is what "inherit" means; it is never written
+  // as ''.
+  const restOut = {}
+  const sanitizedRest = restFor({ rest: c.rest }, NaN)
+  if (!Number.isNaN(sanitizedRest)) restOut.rest = sanitizedRest
+  if (cardio) return { sets, min: Math.max(1, Math.round(c.min) || 20), speed: Math.max(0, c.speed || 8), ...restOut }
+  if (mode === 'time') return { sets, mode: 'time', sec: Math.max(1, Math.round(c.sec) || 45), weight: Math.max(0, c.weight || 0), ...flags, ...prog, ...restOut }
+  // A unilateral target is stored even: the split has to divide, and a typed 15 would
+  // otherwise plan seven reps on one side and eight on the other, every session.
+  const typed = Math.max(1, Math.round(c.reps) || 10)
+  const reps = perSide ? Math.ceil(typed / 2) * 2 : typed
+  const out = { sets, mode: 'reps', reps, weight: Math.max(0, c.weight || 0), ...flags, ...(perSide ? { side: true } : {}), ...prog, ...restOut }
+  if (policyFor({ ...c, id: ex.id }, routine, 'reps') === 'double') out.repsMin = Math.min(reps, Math.max(1, Math.round(c.repsMin) || Math.max(1, reps - 2)))
+  // A ceiling below the working reps would tell you to add a set on day one.
+  if (bw && !(out.weight > 0) && c.repsMax > 0) out.repsMax = Math.max(reps, Math.round(c.repsMax))
+  return out
+}
+
+// Rest between sets (T9) — same Row treatment as Bodyweight/Reps-per-side just below, but
+// with a compact +/-15s stepper (reusing the `.stp` control) instead of a Switch, since this
+// is a number with a meaningful "inherit" state rather than a toggle. Both the number shown
+// and whether it counts as an override come from restInfo(), i.e. from rest.js's own
+// restFor() — see the comment above restInfo for why.
+function RestRow({ c, setC, globalRest }) {
+  const { shown, isOverride } = restInfo(c.rest, globalRest)
+  const step = dir => setC(x => {
+    const info = restInfo(x.rest, globalRest)
+    return { ...x, rest: stepRest(info.isOverride ? info.shown : null, globalRest, dir) }
+  })
+  const resetToDefault = () => setC(x => { const { rest, ...rest2 } = x; return rest2 })
+  return <div className="sect-b" style={{ marginBottom: 8 }}>
+    <Row icon="timer" iconTint="var(--orange)" title={t('Rest between sets')} subtitle={restRowSubtitle(isOverride, globalRest)}>
+      <div className="stp">
+        <button onClick={() => step(-1)} aria-label={t('Decrease')}><Icon name="minus" /></button>
+        <span className="val"><span className="num">{fmtRest(shown)}</span></span>
+        <button onClick={() => step(1)} aria-label={t('Increase')}><Icon name="plus" /></button>
+      </div>
+      {isOverride && <button className="iconbtn" style={{ width: 32, height: 30, borderRadius: 8, fontSize: 14, marginLeft: 4 }} aria-label={t('Reset to default')} onClick={resetToDefault}><Icon name="reset" /></button>}
+    </Row>
+  </div>
+}
+
 function ExConfig({ ex, existing, onSave, onDelete, close, routine, initial }) {
   const st = useStore(s => s.S)
   const cardio = isCardio(ex.id)
@@ -503,32 +617,7 @@ function ExConfig({ ex, existing, onSave, onDelete, close, routine, initial }) {
   const setMode = m => setC(x => ({ ...defaultConfig(ex.id, m), ...x, mode: m }))
   const save = () => {
     close()
-    const sets = Math.max(1, Math.round(c.sets) || (cardio ? 1 : 3))
-    // Only carry progression settings that differ from the inherited default, so a plan file
-    // stays readable and "follow the routine" keeps meaning exactly that.
-    const prog = {}
-    if (c.prog) prog.prog = c.prog
-    if (c.inc > 0) prog.inc = c.inc
-    // Written only when it differs from what the dataset already says, so a barbell config
-    // stays exactly the shape it was before these flags existed.
-    // `bodyweight` is true of a hold as much as of a set of reps; `side` is not — it counts
-    // reps, and a timed hold has none. Switching an exercise to Time therefore drops it
-    // rather than carrying a flag nothing downstream can read.
-    const flags = {}
-    if (bw !== isBodyweightEq(ex.id)) flags.bodyweight = bw
-    if (cardio) onSave({ sets, min: Math.max(1, Math.round(c.min) || 20), speed: Math.max(0, c.speed || 8) })
-    else if (mode === 'time') onSave({ sets, mode: 'time', sec: Math.max(1, Math.round(c.sec) || 45), weight: Math.max(0, c.weight || 0), ...flags, ...prog })
-    else {
-      // A unilateral target is stored even: the split has to divide, and a typed 15 would
-      // otherwise plan seven reps on one side and eight on the other, every session.
-      const typed = Math.max(1, Math.round(c.reps) || 10)
-      const reps = perSide ? Math.ceil(typed / 2) * 2 : typed
-      const out = { sets, mode: 'reps', reps, weight: Math.max(0, c.weight || 0), ...flags, ...(perSide ? { side: true } : {}), ...prog }
-      if (policyFor({ ...c, id: ex.id }, routine, 'reps') === 'double') out.repsMin = Math.min(reps, Math.max(1, Math.round(c.repsMin) || Math.max(1, reps - 2)))
-      // A ceiling below the working reps would tell you to add a set on day one.
-      if (bw && !(out.weight > 0) && c.repsMax > 0) out.repsMax = Math.max(reps, Math.round(c.repsMax))
-      onSave(out)
-    }
+    onSave(computeExConfig(c, ex, cardio, mode, bw, perSide, routine))
   }
   return <>
     <h3 className="capitalize">{ex.n}</h3>
@@ -562,6 +651,7 @@ function ExConfig({ ex, existing, onSave, onDelete, close, routine, initial }) {
     {mode === 'time' && !bw && <div className="small dim" style={{ marginBottom: 18 }}>
       {t('A timer runs while you hold the set. Leave the weight at 0 for bodyweight holds.')}
     </div>}
+    <RestRow c={c} setC={setC} globalRest={st.restSec} />
     {/* ---------- bodyweight + per side (issues #31/#32/#33) ---------- */}
     {!cardio && <div className="sect-b" style={{ marginBottom: 8 }}>
       <Row icon="figureStrength" iconTint="var(--acc)" title={t('Bodyweight')}

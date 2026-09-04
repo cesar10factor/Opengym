@@ -18,10 +18,11 @@
 const MAX_REST_SEC = 1800
 
 function sanitizeRest(raw) {
-  // Number('') is 0, not NaN, so an empty string would arrive here as an explicit "no rest"
-  // rather than as "unset" — a text input cleared by hand is the obvious way to produce one, and
-  // silently muting that exercise's timer is the last thing the person meant by emptying a field.
-  if (raw === '' || typeof raw === 'boolean') return null
+  // Number('') and Number(null) are both 0, not NaN, so an empty string or an explicit null would
+  // arrive here as a deliberate "no rest" rather than as "unset" — a cleared text input and a
+  // hand-written `"rest": null` in a shared plan file are the obvious ways to produce them, and
+  // silently muting that exercise's timer is the last thing either one meant.
+  if (raw == null || raw === '' || typeof raw === 'boolean') return null
   const n = Number(raw)
   if (!Number.isFinite(n) || n < 0) return null
   return Math.min(n, MAX_REST_SEC)
