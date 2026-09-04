@@ -36,9 +36,36 @@ Ola 5:  Fase A → Fase B
 > estado compartido. Haría falta un worktree por agente, lo que complica el merge de vuelta sin
 > ahorrar créditos (solo reloj). Todo va secuencial.
 
+## Ciclo 2 — descanso por ejercicio (código completo)
+
+| # | Tarea | Rama | Estado | Commit de merge |
+|---|-------|------|--------|-----------------|
+| T7 | Arreglo: el cronómetro no volvía tras desmarcar/remarcar | `fix/rest-timer-recheck` | **hecho** | `569511f` (370 tests) |
+| T8 | Descanso por ejercicio: modelo y fontanería | `feat/per-exercise-rest` | **hecho** | `e2127c1` (390 tests) |
+| T9 | Interfaz y durabilidad del campo | `feat/per-exercise-rest-ui` | **hecho** | `405aee1` (424 tests) |
+| FV | Revisión visual del dueño en pantalla | — | **pendiente** | — |
+
+Decisiones del ciclo 2 (no reabrir):
+- Los ±15" del cronómetro son solo para ese descanso; no tocan la rutina.
+- En superserie manda el descanso **del ejercicio con el que cierras la ronda**, que es el que
+  acabas de marcar. Keyear por "último índice del array" da mal en superseries **desiguales**.
+- `rest: 0` es "sin descanso" y **no** arranca cronómetro (`startRest(0)` deja la cuenta atrás
+  clavada en 0:00 para siempre: su propio tick sale antes de la rama que la terminaría).
+- Ausente, `null`, `''`, booleano, no finito y negativo son **"no definido"** → global. Tope 1800 s.
+  `Number(null)` y `Number('')` valen 0 en JavaScript: sin guarda explícita, "sin definir" se
+  convierte en "sin descanso".
+- Las 5 cadenas nuevas están **solo en español**. Los otros 10 idiomas caen al inglés, coherente
+  con lo ya anotado en trabajo futuro.
+
 ## Bloqueantes abiertos
 
-*(ninguno)*
+- **Revisión visual pendiente (ciclo 2).** La fila de descanso en la hoja de configuración de
+  ejercicio no la ha visto nadie en pantalla. Los checks en verde no dicen si se ve bien.
+- **Fase A pendiente (ciclo 1).** Sigue faltando el paso 4: canjear el código desde un
+  autenticador **realmente distinto**. Ver el aviso del guion: una ventana de incógnito **no**
+  vale, comparte el almacén de passkeys del sistema.
+
+`main` sigue sin tocarse. No se fusiona hasta que ambas cosas estén hechas.
 
 ## Bloqueantes resueltos
 
