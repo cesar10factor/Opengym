@@ -14,8 +14,8 @@ sin fusionar) · `hecho` (fusionado a `develop`, con hash).
 | T1 | Lógica pura de códigos de vinculación | `feat/link-core` | **hecho** | `7d39a5a` (31 tests) |
 | T2 | Endpoints de vinculación | `feat/link-api` | **hecho** | `605b7f4` (44 tests) |
 | T3 | Listar y revocar dispositivos | `feat/devices-api` | **hecho** | `a4c815a` (55 tests) |
-| T4 | Interfaz de vinculación | `feat/link-ui` | en curso | — |
-| T5 | Gestión de dispositivos en Ajustes | `feat/devices-ui` | abierto | — |
+| T4 | Interfaz de vinculación | `feat/link-ui` | **hecho** | `bd3fce1` (354 tests) |
+| T5 | Gestión de dispositivos en Ajustes | `feat/devices-ui` | en curso | — |
 | T6 | Configuración y documentación de despliegue | `chore/deploy-home` | **hecho** | `d881bc1` (con salvedad ↓) |
 | FA | Aceptación manual (autenticador virtual) | — | abierto | — |
 | FB | Cierre: `develop` → `main` | — | abierto | — |
