@@ -689,6 +689,157 @@ git push origin --tags
 
 ---
 
+# CICLO 2 — Descanso por ejercicio
+
+Mismas reglas de trabajo, mismo flujo git, mismas revisiones Opus. Ramas desde `develop`.
+`main` sigue sin tocarse hasta que pase la Fase A del ciclo 1.
+
+**Decisiones del dueño (2026-09-04, no reabrir):**
+- Los ±15" del cronómetro son **solo para ese descanso**. No se recuerdan ni se guardan en la
+  rutina. Es el comportamiento actual: tocar el cronómetro con las manos sudadas no debe
+  reescribir el plan.
+- En una superserie manda el descanso **del último ejercicio del grupo**, que es tras el que
+  realmente descansas.
+
+**Orden:** T7 → T8 → T9. Secuencial (T8 y T9 tocan ficheros solapados; T7 va primero por ser
+independiente y pequeño).
+
+---
+
+## T7 — Arreglo: el cronómetro no vuelve tras desmarcar y remarcar
+
+**Rama:** `fix/rest-timer-recheck` · **Depende de:** nada
+
+**DECISIÓN**
+Verificado en el código: `setProgressHighWater` (`frontend/src/lib/supersetFlow.js`) guarda la
+mayor cantidad de series completadas a la vez en la sesión y **nunca baja** (`Math.max`). Al
+remarcar una serie ya contada, `done > previous` es falso y `Workout.jsx` sale antes de arrancar
+el descanso. Consecuencia práctica: si marcas por error la **última** serie de un ejercicio, ese
+ejercicio se queda sin cronómetro para el resto de la sesión.
+
+El candado existe por un motivo válido — evita que desmarcar/remarcar repita la navegación entre
+miembros de una superserie y vuelva a abrir las hojas de "peso de trabajo" y "entrenamiento
+completado". No se elimina: **se separa**.
+
+Regla nueva: marcar una serie que no estaba marcada arranca el descanso **siempre** que a esa
+unidad le quede trabajo, con independencia de la marca de agua. La marca de agua sigue
+custodiando **solo** la navegación (cambiar `cur`) y las hojas modales.
+
+**FICHEROS QUE POSEES**
+- `frontend/src/views/Workout.jsx`
+- `frontend/src/lib/supersetFlow.js` (solo si la separación necesita un ayudante nuevo)
+- `frontend/src/lib/supersetFlow.test.js`
+
+**REGLAS DURAS**
+- Los 361 tests existentes siguen verdes. Comprueba la línea base antes de tocar nada.
+- No cambies el comportamiento de las superseries salvo lo que exija esta separación.
+- **Nada debe reabrir una hoja modal ni renavegar al remarcar.** Es la regresión a evitar.
+
+**VERIFICACIÓN**
+Tests obligatorios, sobre lógica pura siempre que se pueda:
+1. Marcar la serie 2, desmarcarla, remarcarla → el descanso arranca las **dos** veces.
+2. Marcar por error la **última** serie, desmarcarla, remarcarla → arranca el descanso (hoy no).
+3. Remarcar **no** vuelve a abrir la hoja de entrenamiento completado.
+4. Remarcar **no** cambia `cur` en una superserie.
+5. Con la unidad ya terminada, remarcar no arranca descanso (sigue llamando a `stopRest`).
+
+**CHECKS**
+```json
+{
+  "rest_restarts_after_recheck": true,
+  "rest_restarts_on_last_set_recheck": true,
+  "no_modal_replay_on_recheck": true,
+  "no_navigation_replay_on_recheck": true,
+  "existing_suite_green": true
+}
+```
+
+---
+
+## T8 — Descanso por ejercicio: modelo y fontanería
+
+**Rama:** `feat/per-exercise-rest` · **Depende de:** T7
+
+**DECISIÓN**
+Hoy `restSec` es un único número global (`useStore.js`, 90 s) leído en los tres puntos donde
+arranca el descanso. Pasa a ser un valor **por ejercicio dentro de cada rutina**, porque el mismo
+ejercicio pide 1' en una rutina y 2' en otra. El global se conserva como valor por defecto.
+
+**FICHEROS QUE POSEES**
+- `frontend/src/lib/history.js` (config de ejercicio: `buildSets`, `defaultConfig`, `freestyleConfig`)
+- `frontend/src/lib/rest.js` + `frontend/src/lib/rest.test.js` (nuevos, lógica pura)
+- `frontend/src/views/Workout.jsx`
+- `frontend/src/lib/plan-share.js`
+
+**INTENCIÓN**
+- El ejercicio dentro de una rutina admite `rest` (segundos, opcional). Ausente o nulo = usar
+  el global. **Nunca migres datos existentes**: las rutinas actuales no tienen el campo y deben
+  seguir funcionando cayendo al global.
+- `restFor(entry, globalRest)` → segundos efectivos de un ejercicio suelto.
+- `restForUnit(entries, unit, globalRest)` → para una superserie, el valor del **último ejercicio
+  del grupo** (decisión del dueño), cayendo al global si no lo tiene.
+- `Workout.jsx` usa estos ayudantes en los tres `startRest(...)` en vez de `S.restSec`.
+- Las sesiones libres (freestyle) no tienen rutina: van al global.
+- `plan-share` exporta e importa el campo. Un fichero de plan antiguo sin él debe importarse sin
+  romperse, y uno nuevo abierto por una versión vieja tampoco debe romperla.
+
+**VERIFICACIÓN**
+1. Ejercicio con `rest: 120` → 120.
+2. Ejercicio sin `rest` → el global.
+3. `rest: 0` → tratado como "sin descanso", **no** como ausente (fija el criterio explícitamente).
+4. Superserie: manda el último miembro; si no tiene, el global.
+5. Rutina antigua sin el campo → global, sin excepciones.
+6. Ida y vuelta por `plan-share` conserva el valor.
+7. Import de un plan antiguo sin el campo no rompe.
+
+**CHECKS**
+```json
+{
+  "rest_per_exercise_resolved": true,
+  "falls_back_to_global": true,
+  "zero_is_no_rest_not_absent": true,
+  "superset_uses_last_member": true,
+  "legacy_routines_unaffected": true,
+  "plan_share_roundtrip": true,
+  "existing_suite_green": true
+}
+```
+
+---
+
+## T9 — Interfaz: fijar el descanso al crear la rutina
+
+**Rama:** `feat/per-exercise-rest-ui` · **Depende de:** T8
+
+**DECISIÓN**
+El descanso se define a mano al montar la rutina, por ejercicio.
+
+**FICHEROS QUE POSEES**
+- `frontend/src/sheets.jsx` (la hoja de configuración de ejercicio)
+- `frontend/src/views/Plan.jsx`
+
+**INTENCIÓN**
+En la hoja donde se configura un ejercicio de una rutina, un control de descanso en `mm:ss`,
+en pasos de 15 s. Cuando no está fijado debe verse que hereda el global, con el número real
+delante (p. ej. "Por defecto (1:30)"), no un hueco vacío. Debe poder volver a "por defecto".
+No rediseñes la pantalla: añade una fila donde ya viven series y repeticiones.
+
+**TRABAJO VISUAL:** itera contra el resto de controles de esa hoja hasta que no se distinga de
+lo que ya había. Los checks en verde no bastan; lo juzga el dueño en pantalla.
+
+**CHECKS**
+```json
+{
+  "rest_row_in_exercise_config": true,
+  "shows_inherited_default_with_value": true,
+  "can_reset_to_default": true,
+  "steps_of_15s": true,
+  "existing_suite_green": true
+}
+```
+
+---
+
 # Trabajo futuro (no en este ciclo)
 
 - Proponer la vinculación de dispositivos como merge request upstream en GitLab. Es una carencia
