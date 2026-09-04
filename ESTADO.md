@@ -13,8 +13,8 @@ sin fusionar) · `hecho` (fusionado a `develop`, con hash).
 | F0 | Preparación: instalar dependencias, línea base verde, crear `.agent/` | — | **hecho** | — (línea base: 346 tests frontend) |
 | T1 | Lógica pura de códigos de vinculación | `feat/link-core` | **hecho** | `7d39a5a` (31 tests) |
 | T2 | Endpoints de vinculación | `feat/link-api` | **hecho** | `605b7f4` (44 tests) |
-| T3 | Listar y revocar dispositivos | `feat/devices-api` | en curso | — |
-| T4 | Interfaz de vinculación | `feat/link-ui` | abierto | — |
+| T3 | Listar y revocar dispositivos | `feat/devices-api` | **hecho** | `a4c815a` (55 tests) |
+| T4 | Interfaz de vinculación | `feat/link-ui` | en curso | — |
 | T5 | Gestión de dispositivos en Ajustes | `feat/devices-ui` | abierto | — |
 | T6 | Configuración y documentación de despliegue | `chore/deploy-home` | **hecho** | `d881bc1` (con salvedad ↓) |
 | FA | Aceptación manual (autenticador virtual) | — | abierto | — |
@@ -67,6 +67,13 @@ Ola 5:  Fase A → Fase B
 - **El tramo criptográfico de WebAuthn no se testea automáticamente.** Se cubre en la Fase A con
   el autenticador virtual de Chrome DevTools.
 - **Red de seguridad permanente:** exportar el JSON antes de soltar el Android.
+- **La lista de dispositivos no marca "este dispositivo"** (hallazgo de T3). La cookie de sesión
+  es `uid:caducidad:versión` y no guarda con qué credencial se firmó, así que el servidor no
+  puede saberlo. Se omitió el campo en vez de inventarlo. T5 compensa con un aviso explícito en
+  la confirmación de borrado. Cambiarlo exigiría tocar el formato de cookie y los tres puntos de
+  minteo: queda en trabajo futuro.
+- **La API de dispositivos usa `?id=`**, no un parámetro de ruta: el dispatcher solo hace match
+  exacto de `MÉTODO ruta`. Mismo patrón que `GET /api/admin/user?id=`.
 
 ## Registro
 
