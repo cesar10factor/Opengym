@@ -518,10 +518,23 @@ deshagas.
 
 **INTENCIÓN**
 Sección "Devices" en Ajustes, con sesión iniciada: lista los dispositivos de `GET /api/devices`
-con su fecha de alta, marcando el actual. Cada uno con acción de eliminar, que pide confirmación
-con `confirmSheet` (ya existe) antes de llamar al `DELETE`. El dispositivo actual y el último
-dispositivo no se pueden eliminar: deshabilita la acción y explica por qué en una línea.
-Tras eliminar, refresca la lista.
+con su fecha de alta. Cada uno con acción de eliminar, que pide confirmación con `confirmSheet`
+(ya existe) antes de llamar a `DELETE /api/devices?id=<credId>`. El último dispositivo no se
+puede eliminar: deshabilita la acción y explica por qué en una línea. Tras eliminar, refresca
+la lista.
+
+> **Recorte de alcance (2026-09-04, hallazgo de T3).** El plan original decía "marcando el actual"
+> y "el dispositivo actual no se puede eliminar". **No es posible:** la cookie de sesión guarda
+> `<uid>:<caducidad>:<versión>` y no registra con qué credencial se inició sesión, así que el
+> servidor no puede saber cuál de los dispositivos eres tú. Saberlo exigiría cambiar el formato
+> de la cookie y el minteo de sesiones en el registro, el login y la vinculación — la parte más
+> sensible del sistema, y fuera del alcance de T3/T5.
+>
+> Consecuencia asumida: puedes borrar la credencial del dispositivo que tienes en la mano. No es
+> catastrófico — la sesión abierta sigue viva hasta caducar, y la guarda del último dispositivo
+> impide quedarse sin ninguna — pero perderías la capacidad de volver a entrar desde él.
+> **Mitigación obligatoria en la UI:** el texto de confirmación debe advertir de forma explícita
+> que, si el dispositivo que borras es este mismo, dejarás de poder iniciar sesión desde él.
 
 **VERIFICACIÓN**
 ```powershell
@@ -538,7 +551,7 @@ el no-actual es eliminable; el actual nunca.
   "t4_changes_preserved": true,
   "confirm_before_delete": true,
   "last_device_not_deletable_in_ui": true,
-  "current_device_not_deletable_in_ui": true,
+  "confirm_warns_about_deleting_this_device": true,
   "existing_vitest_suite_green": true
 }
 ```
@@ -681,4 +694,8 @@ git push origin --tags
 - Proponer la vinculación de dispositivos como merge request upstream en GitLab. Es una carencia
   real del proyecto, no específica de este fork.
 - Traducir las claves nuevas a los otros 11 idiomas.
+- Guardar la credencial usada en la cookie de sesión, para poder marcar "este dispositivo" en la
+  lista y bloquear su borrado (ver el recorte de alcance de T5). Toca el minteo de sesiones en
+  registro, login y vinculación, y debe tolerar las cookies ya emitidas sin ese campo — trabajo
+  propio, no un añadido a una tarea existente.
 - Revisar si la sincronización *último gana* merece un merge por marca de tiempo por entidad.
