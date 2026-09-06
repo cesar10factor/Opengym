@@ -54,6 +54,14 @@ cosas distintas, ver los comentarios en `docker-compose.tunnel.yml`.
 todavía no responde; y si `/api/health` falla aquí, es mucho más barato depurarlo con la base de
 datos vacía que con perfiles ya dentro.
 
+**Nota si ya conectaste Strava (paso 11 de este runbook):** el `state` que protege el flujo de
+autorización de Strava se guarda solo en memoria, no en disco — a propósito, porque ese flujo dura
+segundos y no tiene sentido que sobreviva a un reinicio. Si reinicias el stack justo entre pulsar
+"Conectar con Strava" y volver de la pantalla de consentimiento, la vuelta dará "invalid or expired
+state" y no habrá pasado nada más: basta con pulsar "Conectar con Strava" otra vez desde cero. Una
+cuenta que ya estaba conectada antes del reinicio no se ve afectada — su token vive en su propio
+fichero en `data/`, no en este estado en memoria.
+
 ## 4. Crear el perfil desde el Android, hacerte admin
 
 Abre `https://<tu-dominio>` desde el navegador del Android y crea tu perfil con passkey (huella
@@ -141,6 +149,26 @@ Android, inaccesible desde el iPhone.
 **Por qué va antes de deshacerte del teléfono y no después:** una vez vendido, ya no tienes
 manera físicamente cómoda de comprobar cuál era su credencial exacta entre varias — hazlo con
 el teléfono todavía en la mano.
+
+## 11. Conectar Strava (opcional)
+
+> Solo sube el entrenamiento a Strava; no sustituye a nada del historial de openGym, que sigue
+> viviendo en `data/state-<uid>.json` como siempre. Salta este paso si no lo necesitas — sin
+> `STRAVA_CLIENT_ID`/`STRAVA_CLIENT_SECRET` en `.env`, las rutas `/api/strava/*` ni existen (404).
+
+1. Crea una aplicación en [strava.com/settings/api](https://www.strava.com/settings/api). El
+   "Authorization Callback Domain" que pide el formulario es el hostname de tu `ORIGIN` (el mismo
+   dominio ya definitivo del paso 2 — la URL de callback real es `<ORIGIN>/api/strava/callback`).
+2. Copia `Client ID` y `Client Secret` a `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET` en `.env`
+   (ver `.env.production.example` para el bloque completo comentado).
+3. Reinicia: `docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d`.
+4. Desde el perfil, en Ajustes, conecta la cuenta de Strava (autoriza el ámbito `activity:write`
+   cuando Strava lo pida) — la subida en sí de un entrenamiento es una tarea aparte del plan.
+
+**Por qué es opcional y va al final:** no depende de nada de lo anterior salvo tener ya `ORIGIN`
+fijado (paso 2) y el stack respondiendo (paso 3) — el callback de Strava tiene que apuntar a una
+URL real. El `client_secret` no sale nunca del servidor, igual que el fichero `data/secret` que
+firma las cookies de sesión: ni la app cliente ni ninguna respuesta HTTP lo ven jamás.
 
 ---
 
