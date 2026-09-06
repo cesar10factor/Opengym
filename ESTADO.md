@@ -74,7 +74,35 @@ Decisiones del ciclo 2 (no reabrir):
   `{ exercise_type, repetitions, weight, duration, start_time }`. El peso va en kilos.
 - Tipos válidos: `WeightTraining`, `HighIntensityIntervalTraining`, `Workout`, `Crossfit`.
 
-**El trabajo de verdad está en el mapeo, no en la subida.** `exercise_type` no es texto libre:
+### Estado del ciclo 3
+
+| # | Tarea | Rama | Estado | Commit de merge |
+|---|-------|------|--------|-----------------|
+| T10 | Mapeo de ejercicios a Strava | `feat/strava-exercise-map` | **hecho** | `85f7290` (466 tests) |
+| T11 | OAuth y guardado del token | `feat/strava-oauth` | abierto | — |
+| T12 | Construir el JSON y subirlo | `feat/strava-upload` | abierto | — |
+| T13 | Interfaz y subida automática | `feat/strava-ui` | abierto | — |
+
+**Resultado de T10:** 671 de 1.324 (51%) resuelven a un identificador específico; el resto al
+genérico de su categoría. Costó **5 rondas y 4 revisiones**. El vocabulario se verificó
+identificador a identificador contra la web de Strava: los 656 existen, ninguno inventado.
+
+Lecciones que valen para cualquier retoque futuro del mapeo:
+- **Un genérico correcto vale más que un específico dudoso.** Un identificador equivocado registra
+  en Strava un ejercicio que no hiciste, en silencio y para siempre.
+- **El objetivo no es ser estricto, es no equivocarse.** La primera versión exigía coincidencia
+  exacta de palabras y solo mapeaba el 7%. Un específico es seguro cuando nada en él contradice al
+  ejercicio; es peligroso solo cuando **afirma** algo que el ejercicio no tiene.
+- **El nombre dice qué movimiento es; `tg` solo dice qué músculo se enfatiza.** Cuando se
+  contradicen al elegir el genérico, gana el nombre — si no, "biceps pull-up" acaba en curl.
+- **Cada ensanchado del modelo rompió algo contiguo.** Medir el radio de impacto (reconstruir el
+  resolver anterior y diffear los 1.324) es parte del trabajo, no un extra.
+- **Los tests de propiedad valen más que los de ejemplo.** "Todos los estiramientos resuelven a la
+  misma familia" cazó un fallo que 30 aserciones concretas no vieron.
+- `STRAVA_OVERRIDES` es la válvula de escape: si aparece un mapeo malo usándolo de verdad, se
+  pincha ese caso en una línea en vez de retocar las reglas.
+
+**El trabajo de verdad estaba en el mapeo, no en la subida.** `exercise_type` no es texto libre:
 sale de un vocabulario cerrado del FIT SDK (~200 identificadores tipo `BARBELL_BENCH_PRESS`,
 `PLANK_GENERIC`). openGym tiene **1.324 ejercicios** más los que el usuario se invente. Así que
 hay que decidir qué pasa con lo que no mapea, y un mapeo mal hecho registra en Strava un ejercicio
