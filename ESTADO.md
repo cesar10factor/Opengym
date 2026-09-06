@@ -79,7 +79,7 @@ Decisiones del ciclo 2 (no reabrir):
 | # | Tarea | Rama | Estado | Commit de merge |
 |---|-------|------|--------|-----------------|
 | T10 | Mapeo de ejercicios a Strava | `feat/strava-exercise-map` | **hecho** | `85f7290` (466 tests) |
-| T11 | OAuth y guardado del token | `feat/strava-oauth` | abierto | — |
+| T11 | OAuth y guardado del token | `feat/strava-oauth` | **hecho** | `c766217` (132 tests api) |
 | T12 | Construir el JSON y subirlo | `feat/strava-upload` | abierto | — |
 | T13 | Interfaz y subida automática | `feat/strava-ui` | abierto | — |
 
@@ -101,6 +101,29 @@ Lecciones que valen para cualquier retoque futuro del mapeo:
   misma familia" cazó un fallo que 30 aserciones concretas no vieron.
 - `STRAVA_OVERRIDES` es la válvula de escape: si aparece un mapeo malo usándolo de verdad, se
   pincha ese caso en una línea en vez de retocar las reglas.
+
+**Resultado de T11:** las cuatro rutas de OAuth, con el token por perfil en `./data`. Variables
+`STRAVA_CLIENT_ID` y `STRAVA_CLIENT_SECRET`; sin ambas, las rutas dan 404 de verdad.
+Dos ganchos solo para pruebas, documentados como tales: `STRAVA_API_BASE` y `STRAVA_TIMEOUT_MS`.
+
+Decisiones de T11 que conviene no deshacer:
+- **Todas las llamadas salientes llevan timeout (8 s).** Node no pone ninguno por defecto. Que
+  Strava falle es fácil de manejar; que **se cuelgue** congelaría la pantalla de Ajustes para
+  siempre, porque `/status` refresca el token antes de responder.
+- **`/status` refresca y, si el refresco falla, se repliega al token guardado.** Un Strava lento
+  nunca debe hacer que un perfil conectado parezca desconectado.
+  *Origen honesto de esta decisión: nació de querer que el camino de refresco fuera alcanzable por
+  HTTP en los tests, y se justificó como producto después. El agente lo declaró él mismo. Se queda
+  porque con timeout y repliegue es defendible por sí sola, pero que conste el orden real.*
+- **La URL base de Strava es inyectable.** Gracias a eso el intercambio, el refresco, la forma de
+  la petición de revocación y el caso de Strava colgada se prueban **sin red**, contra un servidor
+  de mentira local. Un tercero de mentira permite ensayar cosas que la API real no te concede a
+  voluntad: un 200 con el cuerpo roto, un 500, una conexión que acepta y no responde nunca.
+- Se rechaza la conexión si Strava devuelve 200 sin token usable, o si el consentimiento vuelve
+  sin `activity:write`. Marcar como conectado y fallar luego al subir aleja el error de su causa.
+
+**Lo único que queda sin cubrir** es si la API real de Strava se comporta como dice su
+documentación. Eso solo se comprueba a mano, con credenciales reales.
 
 **El trabajo de verdad estaba en el mapeo, no en la subida.** `exercise_type` no es texto libre:
 sale de un vocabulario cerrado del FIT SDK (~200 identificadores tipo `BARBELL_BENCH_PRESS`,
