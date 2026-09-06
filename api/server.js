@@ -10,6 +10,10 @@ import {
 } from '@simplewebauthn/server';
 import webpush from 'web-push';
 import { createLink, validateLink, burnLink, pruneLinks, recordFailure, isThrottled } from './link.js';
+import {
+  createState, signState, validateState, burnState, pruneStates,
+  needsRefresh, tokenFromExchange, tokenFromRefresh, isCompleteToken, hasRequiredScope
+} from './strava.js';
 
 const PORT = +(process.env.PORT || 3000);
 const DATA = process.env.DATA_DIR || '/data';
@@ -30,6 +34,28 @@ const ALLOW_GUEST = !/^(0|false|no|off)$/i.test(process.env.ALLOW_GUEST || '');
 // internet don't want the same number. Only affects cookies minted from now on — the expiry is
 // baked into each cookie when it's issued, so lowering this never cuts an existing session short.
 const SESSION_DAYS = Math.max(1, +(process.env.SESSION_DAYS || 90) || 90);
+// Strava OAuth (T11): both are required or the feature is fully OFF — an instance that doesn't
+// use Strava must not advertise it exists, so the four /api/strava/* routes below are only ever
+// added to the route table when STRAVA_ENABLED is true (see near the bottom of this file). A
+// half-configured instance (only one of the two set) is treated the same as neither being set.
+const STRAVA_CLIENT_ID = (process.env.STRAVA_CLIENT_ID || '').trim();
+const STRAVA_CLIENT_SECRET = (process.env.STRAVA_CLIENT_SECRET || '').trim();
+const STRAVA_ENABLED = !!(STRAVA_CLIENT_ID && STRAVA_CLIENT_SECRET);
+// Not a deployment knob — a testing hook. Every real instance leaves this at its default and talks
+// to the genuine Strava API; the integration suite points it at a local stub so the OAuth/token/
+// revoke round trips can be asserted deterministically and offline, without depending on a third
+// party's uptime or posting fabricated tokens to it. Trailing slash stripped so `base + '/oauth/x'`
+// never ends up with a doubled slash regardless of how the value was set.
+const STRAVA_API_BASE = (process.env.STRAVA_API_BASE || 'https://www.strava.com').trim().replace(/\/+$/, '');
+// Strava failing fast is not the dangerous case — every fetch below already has a catch/!r.ok
+// branch for that. Strava HANGING is: Node's fetch has no default timeout, and since the refresh
+// call now lives inside GET /api/strava/status (the route the Settings screen polls), a hung
+// upstream would otherwise hang that screen forever, not just fail it. 8s is long enough to
+// tolerate ordinary internet + API latency without spuriously timing out a slow-but-alive request,
+// short enough that a hung Strava is a bounded, user-visible delay instead of an indefinite one.
+// Configurable only so the test suite can shrink it to keep the "Strava hangs" test fast — a real
+// deployment should leave this at its default.
+const STRAVA_TIMEOUT_MS = +(process.env.STRAVA_TIMEOUT_MS || 8000) || 8000;
 const MAX_BODY = 5 * 1024 * 1024;
 // Secure cookies require HTTPS; over plain http://localhost the flag would drop the cookie
 const SECURE = /^https:/i.test(ORIGIN) ? ' Secure;' : '';
@@ -69,6 +95,43 @@ function atomicWrite(file, content) {
 const stateFile = uid => path.join(DATA, 'state-' + uid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
 function readState(uid) {
   try { return JSON.parse(fs.readFileSync(stateFile(uid), 'utf8')); } catch { return null; }
+}
+
+/* ---------- Strava token storage (T11) ---------- */
+// One file per user, same pattern as stateFile above — NOT part of db.json, so a pre-Strava
+// db.json needs no migration at all: "connected" is simply "does this file exist".
+const stravaFile = uid => path.join(DATA, 'strava-' + uid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
+function readStrava(uid) {
+  try { return JSON.parse(fs.readFileSync(stravaFile(uid), 'utf8')); } catch { return null; }
+}
+function writeStrava(uid, tok) { atomicWrite(stravaFile(uid), JSON.stringify(tok)); }
+function deleteStrava(uid) { try { fs.unlinkSync(stravaFile(uid)); } catch { /* already gone */ } }
+// Refreshes the stored token if it's expired (or close enough — see strava.js's REFRESH_MARGIN_MS)
+// and persists the new one. Not called by any route in T11 (there is no upload route yet — T12
+// adds it); kept here so T12 can call it directly rather than re-deriving the exchange call.
+async function ensureFreshStravaToken(uid) {
+  const tok = readStrava(uid);
+  if (!tok) return null;
+  if (!needsRefresh(tok.expiresAt, Date.now())) return tok;
+  let r;
+  try {
+    r = await fetch(STRAVA_API_BASE + '/oauth/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: STRAVA_CLIENT_ID, client_secret: STRAVA_CLIENT_SECRET,
+        refresh_token: tok.refresh, grant_type: 'refresh_token'
+      }),
+      signal: AbortSignal.timeout(STRAVA_TIMEOUT_MS)
+    });
+    // A timeout throws here (AbortError), landing in the catch below exactly like any other
+    // network failure — the caller (GET /api/strava/status) already falls back to the stored
+    // token on any refresh failure, so a hung Strava degrades to "answer from the stale token"
+    // rather than hanging the caller.
+  } catch (e) { console.error('strava refresh failed', e.message); return null; }
+  if (!r.ok) { console.error('strava refresh failed', r.status); return null; }
+  const fresh = tokenFromRefresh(tok, await r.json());
+  writeStrava(uid, fresh);
+  return fresh;
 }
 
 /* ---------- push notifications (Web Push / VAPID) ---------- */
@@ -235,6 +298,17 @@ function takeChallenge(cid) {
   return c;
 }
 setInterval(() => { for (const [k, v] of challenges) if (v.exp < Date.now()) challenges.delete(k); }, 60000).unref();
+
+/* ---------- Strava OAuth state store (in-memory, single-use — T11) ---------- */
+// Ties GET /api/strava/callback (unauthenticated) back to the user who started the flow at
+// GET /api/strava/connect. Kept in memory rather than in db.json/db.links: an OAuth redirect round
+// trip is seconds to minutes, never needs to survive a restart, and keeping it off disk means the
+// server's HMAC secret is the only thing that would have to leak for a forged state to matter. See
+// api/strava.js for the pure create/sign/validate/burn/prune logic this backs.
+let stravaStates = [];
+if (STRAVA_ENABLED) {
+  setInterval(() => { stravaStates = pruneStates(stravaStates, Date.now()); }, 60000).unref();
+}
 
 /* ---------- helpers ---------- */
 function json(res, code, obj, extraHeaders) {
@@ -928,6 +1002,147 @@ const routes = {
     json(res, 200, { ok: true });
   }
 };
+
+/* ---------- Strava OAuth (T11) ----------
+   Only added to the route table when STRAVA_ENABLED — an unregistered key falls straight through
+   the dispatcher's existing 404 below, so a Strava-less instance never even discloses these paths
+   exist. Tokens (access/refresh) NEVER appear in any response here, and NEVER go into audit(). */
+if (STRAVA_ENABLED) {
+  routes['GET /api/strava/connect'] = async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    const now = Date.now();
+    stravaStates = pruneStates(stravaStates, now);
+    // One active state per user, same as /api/link/code's "only one active code per user" — an
+    // authenticated caller re-hitting /connect repeatedly must not be able to pile up entries for
+    // the whole 10-minute TTL (a quadratic prune cost on top of an unbounded array).
+    stravaStates = stravaStates.filter(s => s.uid !== user.id);
+    const state = createState(user.id, now);
+    stravaStates.push(state);
+    const token = signState(SECRET, state);
+    const authUrl = new URL(STRAVA_API_BASE + '/oauth/authorize');
+    authUrl.searchParams.set('client_id', STRAVA_CLIENT_ID);
+    authUrl.searchParams.set('redirect_uri', ORIGIN + '/api/strava/callback');
+    authUrl.searchParams.set('response_type', 'code');
+    authUrl.searchParams.set('approval_prompt', 'auto');
+    authUrl.searchParams.set('scope', 'activity:write');
+    authUrl.searchParams.set('state', token);
+    res.writeHead(302, { Location: authUrl.toString() });
+    res.end();
+  };
+
+  // No session here on purpose — the user is arriving back from strava.com with no cookie of ours.
+  // The signed, single-use `state` param is what stands in for a session on this one request.
+  routes['GET /api/strava/callback'] = async (req, res) => {
+    const q = new URL(req.url, 'http://x').searchParams;
+    const now = Date.now();
+    const result = validateState(stravaStates, SECRET, q.get('state'), now);
+    if (!result.ok) {
+      // Never log the raw state value/token — only the generic reason code.
+      audit(req, 'strava.connect.fail', { ok: false, msg: result.reason });
+      return json(res, 400, { error: 'invalid or expired state' });
+    }
+    // Burn immediately, before the network exchange: a replay attempt arriving while the first
+    // request is still in flight must not find the nonce still usable.
+    stravaStates = burnState(stravaStates, result.nonce);
+    const user = db.users.find(u => u.id === result.uid);
+    if (!user) {
+      audit(req, 'strava.connect.fail', { ok: false, uid: result.uid, msg: 'user-missing' });
+      return json(res, 400, { error: 'user missing' });
+    }
+    // Strava sends `?error=access_denied` (no `code`) when the user declines consent.
+    const code = q.get('code');
+    if (!code) {
+      // Deliberately not logging Strava's `error` query param verbatim: it's caller-supplied text
+      // on an unauthenticated route, and audit() only truncates at 120 chars rather than
+      // whitelisting content — a fixed reason code keeps the log free of arbitrary external input.
+      audit(req, 'strava.connect.fail', { ok: false, user, msg: 'no-code' });
+      return json(res, 400, { error: 'authorization was not completed' });
+    }
+    // Strava's consent screen lets the user untick individual permissions; `scope` reports what
+    // was actually granted. Checked BEFORE the network round trip below, and refused with a
+    // specific, actionable message — this is the one place a specific error is right, because the
+    // caller here is the user's own consent choice, not an attacker probing the endpoint.
+    if (!hasRequiredScope(q.get('scope'))) {
+      audit(req, 'strava.connect.fail', { ok: false, user, msg: 'scope-denied' });
+      return json(res, 400, {
+        error: 'Debes conceder el permiso "Subir tus datos de actividad" (activity:write) en Strava para conectar tu cuenta. Vuelve a intentarlo y no lo desmarques en la pantalla de autorización.'
+      });
+    }
+    let tokenRes;
+    try {
+      tokenRes = await fetch(STRAVA_API_BASE + '/oauth/token', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: STRAVA_CLIENT_ID, client_secret: STRAVA_CLIENT_SECRET,
+          code, grant_type: 'authorization_code'
+        }),
+        signal: AbortSignal.timeout(STRAVA_TIMEOUT_MS)
+      });
+    } catch (e) {
+      // A timeout throws (AbortError) and lands here exactly like any other network failure: a
+      // failed connection, nothing persisted — the same outcome as Strava answering with an error.
+      audit(req, 'strava.connect.fail', { ok: false, user, msg: 'exchange-error' });
+      return json(res, 502, { error: 'strava exchange failed' });
+    }
+    if (!tokenRes.ok) {
+      audit(req, 'strava.connect.fail', { ok: false, user, msg: 'exchange-' + tokenRes.status });
+      return json(res, 502, { error: 'strava exchange failed' });
+    }
+    const data = await tokenRes.json();
+    const tok = tokenFromExchange(data);
+    // A 200 with an unexpected/incomplete body must never be persisted as a real connection — that
+    // would leave /status reporting connected:true with a null athleteId, and a later disconnect
+    // would send a null access_token to Strava.
+    if (!isCompleteToken(tok)) {
+      audit(req, 'strava.connect.fail', { ok: false, user, msg: 'incomplete-token' });
+      return json(res, 502, { error: 'strava exchange failed' });
+    }
+    writeStrava(user.id, tok);
+    audit(req, 'strava.connected', { user });
+    res.writeHead(302, { Location: ORIGIN + '/' });
+    res.end();
+  };
+
+  routes['POST /api/strava/disconnect'] = async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    const tok = readStrava(user.id);
+    if (tok) {
+      // Revoking must never block disconnecting: a broken/expired token, a network hiccup, or a
+      // hung upstream (see STRAVA_TIMEOUT_MS) would otherwise leave the user unable to disconnect
+      // a link that's already useless — or waiting on Strava just to click "disconnect".
+      // Strava's /oauth/deauthorize takes access_token as a request parameter (query string), NOT
+      // a JSON body — see https://developers.strava.com/docs/authentication/#deauthorization. A
+      // JSON body there gets no access_token at all and Strava answers 401.
+      try {
+        const revokeUrl = new URL(STRAVA_API_BASE + '/oauth/deauthorize');
+        revokeUrl.searchParams.set('access_token', tok.access);
+        const r = await fetch(revokeUrl, { method: 'POST', signal: AbortSignal.timeout(STRAVA_TIMEOUT_MS) });
+        if (!r.ok) console.error('strava revoke returned', r.status);
+      } catch (e) { console.error('strava revoke failed', e.message); }
+      deleteStrava(user.id);
+      audit(req, 'strava.disconnected', { user });
+    } else {
+      deleteStrava(user.id); // no-op if nothing was there, but harmless and idempotent
+    }
+    json(res, 200, { ok: true });
+  };
+
+  // Refreshes on read when the stored token is at or past REFRESH_MARGIN_MS out — this is the one
+  // place in T11 that actually exercises ensureFreshStravaToken over HTTP (T12's upload route will
+  // be the other). A failed refresh attempt (network hiccup, Strava briefly down) must not read as
+  // "disconnected" for someone who is genuinely still linked, so that case falls back to the token
+  // on disk as-is rather than reporting connected:false.
+  routes['GET /api/strava/status'] = async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    const fresh = await ensureFreshStravaToken(user.id);
+    if (fresh) return json(res, 200, { connected: true, athleteId: fresh.athleteId });
+    const stale = readStrava(user.id);
+    json(res, 200, { connected: !!stale, athleteId: stale ? stale.athleteId : null });
+  };
+}
 
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
