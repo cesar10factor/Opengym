@@ -253,7 +253,9 @@ lo que hay en él:
 | N3 | Payload dual (Declarative Web Push) — habilita iPhone | `feat/declarative-web-push` | **hecho** | `0df4b35` (539 front + 169 api) |
 | N4 | "Qué toca ahora" en la notificación + salto a la app | `feat/next-up-notification` | **hecho** | `63898cd` (564 front + 179 api) |
 | N5 | Aceptación manual (Android ahora, iPhone al cambiar) | — | **Android confirmado** por el dueño; iPhone pendiente del cambio de móvil | — |
+| N6 | Marcador de versión (hash + fecha) en `/api/health` y al pie de Ajustes | `feat/version-marker` | **hecho** | `93a067e` (574 front + 183 api) |
 | NX | Limpieza: borrar `api/n4-baseline/` y `frontend/src/n4-baseline/` | — | abierto | — |
+| ND | **Desplegar: `develop` → `main`.** Nada del ciclo 4 está publicado | — | abierto | — |
 
 Decisiones del ciclo 4 (no reabrir):
 - **Solo PWA.** Nada de shell nativa: el cambio a iPhone sigue previsto en pocos meses y el
@@ -278,6 +280,18 @@ Decisiones del ciclo 4 (no reabrir):
   deja, no molesta.
 - **No se toca `sound.js`.** Probado en Android: el sonido de la notificación push ya se oye bien
   con cascos, y al dueño le basta. Subir la ganancia del pitido WebAudio era innecesario.
+- **Pendiente ND: el ciclo 4 NO está desplegado.** `auto-deploy.ps1` vigila `origin/main`, y todo
+  el ciclo vive en `develop`. Lo último servido es `76f89fc` (17:56 del 2026-09-07), anterior a N1.
+  Para publicar: `develop` → `main`, push, y `powershell -File scripts\auto-deploy.ps1`. Ojo: el
+  script **se salta el despliegue si el árbol está sucio**, y `plans/` tiene cambios sin commitear.
+- **`ARG` es de ámbito de etapa.** En `web/Dockerfile` los `ARG` estaban en la etapa `nginx`, así
+  que la etapa `build` (donde corre `npm run build`) no los veía: hay que declararlos otra vez
+  allí, y después de `COPY frontend/ ./` para no invalidar la capa de `npm ci` en cada commit.
+- **El marcador de versión se valida, no se recorta.** Los defaults de los `ARG` existentes son
+  `dev`/`unknown`, así que un test hexadecimal los rechaza y una construcción sin parametrizar no
+  muestra versión en vez de inventarse una.
+- **Dos líneas en Ajustes significan bundle y servidor desparejados**, que en una PWA es el service
+  worker sirviendo un bundle viejo contra un servidor nuevo. Es la señal útil, no un fallo.
 - **Pendiente NX: sobran `api/n4-baseline/` y `frontend/src/n4-baseline/`.** Son copias que un agente
   dejó al verificar "esto falla sin mi cambio". Están sin seguir por git, pero **los dos ejecutores
   de tests las recogen**: con ellas presentes salen 3 fallos en frontend y 1 en api que son falsos
