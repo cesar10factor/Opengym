@@ -1,13 +1,14 @@
 import { useStore } from '../store/useStore.js'
 import { useUI } from '../store/useUI.js'
-import { webauthnOK, passkeyLogin, passkeyRegister, BIO } from '../lib/api.js'
+import { webauthnOK, passkeyLogin, passkeyRegister, linkDevice, BIO } from '../lib/api.js'
 import { hasData } from '../store/useStore.js'
 import { t } from '../lib/i18n.js'
 import { DEMO, REPO } from '../lib/demo.js'
 import { guestAllowed } from '../lib/guest.js'
+import { normalizeCode, formatCode } from '../lib/link.js'
 import { useState, useRef, useEffect } from 'react'
 import Icon from '../components/Icon.jsx'
-import { Button } from '../components/ui.jsx'
+import { Button, TextField } from '../components/ui.jsx'
 
 function RegisterSheet({ close }) {
   const { setUser, pushState, pullState, loadConfig } = useStore()
@@ -43,6 +44,34 @@ function RegisterSheet({ close }) {
     </>}
     <div style={{ height: 12 }} />
     <Button variant="primary" onClick={go}>{t('Create passkey')}</Button>
+  </>
+}
+
+// Redeems a code generated on another (already signed-in) device — attaches this device's
+// passkey to that same profile instead of creating a new one.
+function LinkSheet({ close }) {
+  const { setUser, pullState } = useStore()
+  const [code, setCode] = useState('')
+  const ref = useRef(null)
+  useEffect(() => { setTimeout(() => ref.current?.focus(), 250) }, [])
+  const go = async () => {
+    const c = normalizeCode(code)
+    if (!c) { useUI.getState().toast(t('Enter the code')); return }
+    try {
+      const u = await linkDevice(c)
+      setUser(u); close()
+      await pullState()
+      useUI.getState().toast(t('Device linked'))
+    } catch (e) { if (e.name !== 'NotAllowedError' && e.name !== 'AbortError') useUI.getState().toast(e.message || t('Linking failed')) }
+  }
+  return <>
+    <h3>{t('Link this device')}</h3>
+    <div className="muted small" style={{ marginBottom: 14 }}>{t('Enter the code shown on your other device, then confirm with {0}.', BIO)}</div>
+    <TextField ref={ref} placeholder={t('Code')} maxLength={9} value={formatCode(code)}
+      onChange={e => setCode(normalizeCode(e.target.value))}
+      style={{ fontFamily: 'monospace', letterSpacing: '.14em', fontWeight: 600, textAlign: 'center' }} />
+    <div style={{ height: 12 }} />
+    <Button variant="primary" onClick={go}>{t('Link device')}</Button>
   </>
 }
 
@@ -83,6 +112,8 @@ export default function Login() {
         <Button variant="primary" icon="person" onClick={signIn}>{t('Sign in with passkey')}</Button>
         <div style={{ height: 10 }} />
         <Button icon="sparkles" onClick={() => useUI.getState().openSheet(close => <RegisterSheet close={close} />)}>{t('Create new profile')}</Button>
+        <div style={{ height: 10 }} />
+        <Button icon="link" onClick={() => useUI.getState().openSheet(close => <LinkSheet close={close} />)}>{t('Link this device')}</Button>
         {canGuest && <div style={{ height: 10 }} />}
       </> : <div className="card small muted" style={{ textAlign: 'left' }}>{canGuest
         ? t("This browser doesn't support passkeys — you can still use openGym locally on this device.")

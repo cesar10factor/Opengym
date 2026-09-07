@@ -8,7 +8,8 @@ import { fmtNum, fmtDate, todayISO, exCount, DAYN } from '../lib/format.js'
 import { beep, vibrate } from '../lib/sound.js'
 import { t } from '../lib/i18n.js'
 import { api } from '../lib/api.js'
-import { setProgressHighWater, supersetFlowStep } from '../lib/supersetFlow.js'
+import { setProgressHighWater, supersetFlowStep, restAction } from '../lib/supersetFlow.js'
+import { restFor } from '../lib/rest.js'
 import Media from '../components/Media.jsx'
 import { startFlow, exercisePicker, exConfigSheet, exerciseDetailSheet, topWeightSheet, finishWorkout, workoutCompleteSheet, confirmSheet } from '../sheets.jsx'
 import Icon from '../components/Icon.jsx'
@@ -320,40 +321,53 @@ function ActiveWorkout() {
     else if (exJustDone && cardioEntry) useUI.getState().toast(t('Cardio logged'))
     else if (exJustDone && m === 'time') useUI.getState().toast(t('Hold logged'))
 
-    // Only progress beyond this exercise's high-water mark may navigate or change rest. This
-    // prevents an uncheck/re-check of finished work from replaying the flow side effects.
+    // Two different rules here, and they used to be one. The rest timer answers "did I just
+    // finish a set with work still ahead?", which is true again every time you re-check a set you
+    // unchecked. Navigation and the modal sheets answer "have I got further than before?", and
+    // replaying those on a correction is disorienting — so only those stay behind the high-water
+    // mark.
     const fresh = useStore.getState().S.active
     if (fresh && checked && fresh.entries[idx]) {
       const progress = setProgressHighWater(fresh.entries[idx], progressHighWater.current[idx] || 0)
       progressHighWater.current[idx] = progress.highWater
-      if (!progress.isNew) return
 
       const freshUnits = supersetUnits(fresh.entries)
       const freshUnit = freshUnits.find(u => u.includes(idx))
       const freshUnitIdx = freshUnits.indexOf(freshUnit)
       const freshLastUnit = freshUnitIdx >= freshUnits.length - 1
       const freshUnitDone = freshUnit?.every(ui => fresh.entries[ui].sets.every(x => x.done))
+      const unitLength = freshUnit ? freshUnit.length : 1
+      const step = unitLength > 1 ? supersetFlowStep(fresh.entries, freshUnit, idx) : null
 
-      // Singleton units are ordinary exercises: preserve their historical between-set rest,
-      // while final sets finish quietly and never enter superset navigation.
-      if (freshUnitDone) stopRest()
-      if (!freshUnit || freshUnit.length <= 1) {
-        if (!freshUnitDone) startRest(S.restSec)
-        return
+      const rest = restAction({ unitDone: freshUnitDone, unitLength, isLastUnit: freshLastUnit, step })
+      if (rest.stop) stopRest()
+      if (rest.start) {
+        // The rest that applies is the exercise that was just completed — itself for an
+        // ordinary exercise, or whichever superset member closed this round/unit (idx is always
+        // that member; see supersetFlowStep's own "last active member" boundary — the group's
+        // last array index is not always the same entry in an uneven superset).
+        // rest: 0 (or any invalid value from a corrupt plan file, sanitized inside restFor)
+        // means no timer at all: startRest(0) sets endsAt = now, so its first tick never crosses
+        // the `left <= 0` branch that ends it, leaving a stuck 0:00 timer instead. Ending
+        // whatever rest was running is the correct action here, not merely skipping a start.
+        const sec = restFor(fresh.entries[idx], S.restSec)
+        if (sec > 0) startRest(sec)
+        else stopRest()
       }
 
-      const step = supersetFlowStep(fresh.entries, freshUnit, idx)
-      if (!step) return
+      // Everything past this point moves the user somewhere they did not ask to go, so it fires
+      // only on genuinely new progress.
+      if (!progress.isNew) return
+      if (unitLength <= 1 || !step) return
+
       if (step.unitDone) {
         if (!freshLastUnit) {
           const nextUnit = freshUnits[freshUnitIdx + 1]
           // The top-weight sheet's explicit "Just close" path owns the choice not to advance.
           if (!askTop && nextUnit?.length) update(s => { if (s.active) s.active.cur = nextUnit[0] })
-          startRest(S.restSec)
         }
-      } else {
-        if (step.nextIdx != null) update(s => { if (s.active) s.active.cur = step.nextIdx })
-        if (step.roundDone) startRest(S.restSec)
+      } else if (step.nextIdx != null) {
+        update(s => { if (s.active) s.active.cur = step.nextIdx })
       }
     }
   }

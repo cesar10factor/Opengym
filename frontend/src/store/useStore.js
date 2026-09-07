@@ -1,10 +1,14 @@
 import { create } from 'zustand'
-import { api } from '../lib/api.js'
+import { api, stravaStatus, stravaUpload } from '../lib/api.js'
 import { localTZ } from '../lib/format.js'
-import { registerCustom } from '../lib/exercises.js'
+import { registerCustom, EXIDX } from '../lib/exercises.js'
 import { DEMO, DEMO_SEEDED } from '../lib/demo.js'
 import { guestAllowed } from '../lib/guest.js'
 import { MOBILE, nativeLoad, nativeSave, syncReminder } from '../lib/mobile.js'
+import { nextWorkoutToUpload } from '../lib/strava-sync.js'
+import { buildStravaPayload } from '../lib/strava-payload.js'
+import { useUI } from './useUI.js'
+import { t } from '../lib/i18n-core.js'
 
 const KEY = 'gym_state_v1'
 export const DEF = {
@@ -30,9 +34,152 @@ function loadState() {
 
 const hasData = st => !!((st.workouts || []).length || (st.routines || []).length || (st.bodyweight || []).length)
 
+// ---------- Strava auto-upload (T13) ----------
+// Four small localStorage caches, all in the same spirit as gym_dirty: plain markers this
+// device uses to avoid pointless work, never a second source of truth (the server is the real
+// dedup authority — POST /api/strava/upload refuses a repeat by workoutId on its own).
+const STRAVA_UPLOADED_KEY = 'gym_strava_uploaded'     // ids already confirmed uploaded (or duplicate)
+const STRAVA_ATTEMPTS_KEY = 'gym_strava_attempts'     // id -> failed-attempt count
+const STRAVA_WATERMARK_KEY = 'gym_strava_watermark'   // ms epoch; see ensureStravaWatermark below
+// A workout that fails this many real (server-reaching) attempts is never retried again — see
+// lib/strava-sync.js's header comment for why an unbounded retry count on an oldest-first queue
+// blocks every workout behind the one that can't succeed.
+const STRAVA_MAX_ATTEMPTS = 3
+
+const loadStravaUploaded = () => {
+  try {
+    const raw = JSON.parse(localStorage.getItem(STRAVA_UPLOADED_KEY) || '[]')
+    return new Set(Array.isArray(raw) ? raw : [])
+  } catch (e) { return new Set() }
+}
+const markStravaUploaded = id => {
+  const ids = loadStravaUploaded()
+  ids.add(id)
+  localStorage.setItem(STRAVA_UPLOADED_KEY, JSON.stringify([...ids]))
+}
+const loadStravaAttempts = () => {
+  try {
+    const raw = JSON.parse(localStorage.getItem(STRAVA_ATTEMPTS_KEY) || '{}')
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+  } catch (e) { return {} }
+}
+// Returns the new count, so the caller can tell the user whether this was the last try.
+const recordStravaFailure = id => {
+  const attempts = loadStravaAttempts()
+  attempts[id] = (attempts[id] || 0) + 1
+  localStorage.setItem(STRAVA_ATTEMPTS_KEY, JSON.stringify(attempts))
+  return attempts[id]
+}
+const loadStravaWatermark = () => {
+  const raw = Number(localStorage.getItem(STRAVA_WATERMARK_KEY))
+  return Number.isFinite(raw) && raw > 0 ? raw : 0
+}
+// Stamped the first time this device observes a LIVE connection (status.connected === true),
+// never overwritten while it's still set — connecting is the one moment that has to draw the
+// line, so it draws it once. Review fix (2026-09-07): without this, connecting Strava for the
+// first time treats a CSV-imported history or a restored backup exactly like a just-finished
+// set — every past workout has a real id and done:true sets — and drips years of old sessions
+// into the user's feed. A server-issued "token stored at" timestamp would survive a cleared
+// browser and so is more robust than this client stamp; that field does not exist on
+// GET /api/strava/status today (api/server.js:1171, not owned by this task — see the plan/report
+// for why it wasn't added here), so this is the best available line without touching it.
+const ensureStravaWatermark = () => {
+  if (!loadStravaWatermark()) localStorage.setItem(STRAVA_WATERMARK_KEY, String(Date.now()))
+}
+// Called on a successful disconnect (Settings.jsx's StravaCard) so a later reconnect draws a
+// fresh line rather than reusing one from a connection that no longer exists — workouts finished
+// while disconnected are treated the same as older history: they stay put, not auto-uploaded in
+// a burst the moment the profile reconnects.
+export function forgetStravaConnection() { localStorage.removeItem(STRAVA_WATERMARK_KEY) }
+
+// Drops cache entries for workout ids that no longer exist locally (deleted, or wiped by
+// "Reset everything" / a backup restore) — otherwise they accumulate forever. Cheap: bounded by
+// the number of ids currently cached, run at most once per debounced sync cycle.
+const pruneStravaCaches = workouts => {
+  const ids = new Set((Array.isArray(workouts) ? workouts : []).map(w => w && w.id).filter(Boolean))
+  const uploaded = loadStravaUploaded()
+  let uploadedChanged = false
+  ;[...uploaded].forEach(id => { if (!ids.has(id)) { uploaded.delete(id); uploadedChanged = true } })
+  if (uploadedChanged) localStorage.setItem(STRAVA_UPLOADED_KEY, JSON.stringify([...uploaded]))
+  const attempts = loadStravaAttempts()
+  let attemptsChanged = false
+  Object.keys(attempts).forEach(id => { if (!ids.has(id)) { delete attempts[id]; attemptsChanged = true } })
+  if (attemptsChanged) localStorage.setItem(STRAVA_ATTEMPTS_KEY, JSON.stringify(attempts))
+}
+
 export const useStore = create((set, get) => {
   let pushTm = null
   let saveTm = null
+  let stravaSyncBusy = false
+  // null = we have not asked this session; 'off' = this server has no Strava, or this profile is
+  // not connected. See the check in trySyncStrava for why it exists.
+  let stravaProbe = null
+
+  // Runs after every successful pushState/pullState — the same "next real opportunity" gym_dirty
+  // already waits for, so a workout finished offline uploads once the connection (and the next
+  // state sync) come back, with no dedicated retry timer of its own. Cheap to call often: with
+  // nothing pending it returns before touching the network at all.
+  const trySyncStrava = async () => {
+    if (stravaSyncBusy) return
+    const user = get().user
+    if (!user) return
+    // Never while a workout is in progress — S.active isn't itself a candidate (it only becomes
+    // one, in S.workouts, once finishWorkout ends it), but every set checked off during a live
+    // session debounces into a pushState, and this must not turn that into a status check, an
+    // upload attempt, or — worst — a toast thrown in the user's face mid-set. This is the guard
+    // the comment further down (by the toast) already promised.
+    if (get().S.active) return
+    // Once we know this server has no Strava, or this profile is not connected to it, stop asking
+    // on every state change. Without this the probe below runs on every debounced pushState for
+    // the life of the session — measured at one request per push on an unconfigured server. It is
+    // deliberately session-scoped: connecting navigates out to Strava and back, which reloads the
+    // page and clears it, and a sign-in or an explicit disconnect resets it by hand.
+    if (stravaProbe === 'off') return
+    const workouts = get().S.workouts
+    pruneStravaCaches(workouts)
+    // The pre-check has to apply the watermark too. Leaving it out looked harmless — it can only
+    // narrow the set, so "nothing pending" stays "nothing pending" — but a pre-watermark workout
+    // is never recorded as uploaded and never accrues attempts, so it stays "pending" here for
+    // ever and buys a status round trip on every single state change. That is precisely the
+    // profile with an imported history, which is the common case, not the corner one.
+    if (!nextWorkoutToUpload(workouts, loadStravaUploaded(), true, {
+      after: loadStravaWatermark(), attempts: loadStravaAttempts(), maxAttempts: STRAVA_MAX_ATTEMPTS,
+    })) return
+    stravaSyncBusy = true
+    try {
+      let status
+      // Any failure here — 404 (not configured), 401, offline, a flaky network — is a silent
+      // capability probe, not the upload itself: wait for the next opportunity, same as
+      // gym_dirty, and never surface a toast for it.
+      try { status = await stravaStatus() } catch (e) { stravaProbe = 'off'; return }
+      if (!status || !status.connected) { stravaProbe = 'off'; return }
+      ensureStravaWatermark()
+      const w = nextWorkoutToUpload(get().S.workouts, loadStravaUploaded(), true, {
+        after: loadStravaWatermark(), attempts: loadStravaAttempts(), maxAttempts: STRAVA_MAX_ATTEMPTS,
+      })
+      if (!w) return
+      try {
+        await stravaUpload(w.id, buildStravaPayload(w, EXIDX, get().S.unit))
+        markStravaUploaded(w.id)
+      } catch (e) {
+        // e.status set = a real response from our server/Strava (e.g. the upload itself failed,
+        // or the token turned out to be gone) — counts as an attempt, and a quiet toast, never a
+        // modal and (per the S.active guard above) never mid-workout.
+        // No e.status = a network-level failure (offline) — doesn't count as an attempt, stays
+        // silent, and simply retries at the next sync, exactly like a failed pushState leaves
+        // gym_dirty set without complaint.
+        if (e && e.status) {
+          const spent = recordStravaFailure(w.id) >= STRAVA_MAX_ATTEMPTS
+          // On the last attempt the old wording ("will retry later") became untrue at the exact
+          // moment the user read it — that workout is done being tried. Say which of the two
+          // actually happened; nothing else here misleads and this must not be the exception.
+          useUI.getState().toast(spent
+            ? t('Could not upload that workout to Strava. It will not be tried again.')
+            : t('Could not upload to Strava — will retry later.'))
+        }
+      }
+    } finally { stravaSyncBusy = false }
+  }
 
   // Mobile build: mirror the state into a file in the app's data directory (survives WebView
   // storage eviction) and keep the native reminder schedule in step with the weekly plan.
@@ -76,6 +223,9 @@ export const useStore = create((set, get) => {
     get().setUser(null)
     localStorage.removeItem('gym_guest')
     localStorage.removeItem('gym_dirty')
+    localStorage.removeItem(STRAVA_UPLOADED_KEY)
+    localStorage.removeItem(STRAVA_ATTEMPTS_KEY)
+    localStorage.removeItem(STRAVA_WATERMARK_KEY)
     localStorage.removeItem(KEY)
     persist(clone(DEF), false)
   }
@@ -109,13 +259,16 @@ export const useStore = create((set, get) => {
     setUser(u) {
       if (u) { localStorage.setItem('gym_user', JSON.stringify(u)); localStorage.removeItem('gym_guest') }
       else localStorage.removeItem('gym_user')
+      // A different profile may well have Strava connected where this one did not, so the
+      // session-scoped "don't bother asking" verdict does not carry across a sign-in.
+      stravaProbe = null
       set({ user: u })
     },
 
     async pushState() {
       if (!get().user) return
       clearTimeout(pushTm)
-      try { await api('/api/data', { method: 'PUT', body: JSON.stringify({ state: get().S }) }); localStorage.removeItem('gym_dirty') }
+      try { await api('/api/data', { method: 'PUT', body: JSON.stringify({ state: get().S }) }); localStorage.removeItem('gym_dirty'); trySyncStrava() }
       catch (e) { localStorage.setItem('gym_dirty', '1') }
     },
     async pullState() {
@@ -130,6 +283,9 @@ export const useStore = create((set, get) => {
           persist(next, false)
         } else if (hasData(S)) { await get().pushState() }
       } catch (e) { /* offline — keep local */ }
+      // Catches a workout that finished while offline: the sync above either just pushed it or
+      // confirmed we're still current, so this is the next real opportunity to upload it.
+      trySyncStrava()
     },
 
     async signOut() {

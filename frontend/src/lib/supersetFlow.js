@@ -4,10 +4,30 @@ const hasWork = (entries, idx) => !!entries[idx]?.sets?.some(set => !set.done)
 
 // A completion is new progress only when it takes this exercise beyond the largest number of
 // simultaneously completed sets seen in this mounted session. Uncheck/re-check therefore does
-// not repeat navigation or rest side effects, while completing an added set still can.
+// not repeat navigation or the modal sheets, while completing an added set still can.
+// Note this deliberately does NOT gate the rest timer — see restAction below.
 export function setProgressHighWater(entry, previous = 0) {
   const done = entry?.sets?.reduce((count, set) => count + (set.done ? 1 : 0), 0) || 0
   return { isNew: done > previous, highWater: Math.max(previous, done) }
+}
+
+// What the rest timer should do when a set has just been checked. Kept apart from the high-water
+// mark on purpose: that mark never decreases, so gating rest on it meant that mis-tapping a set,
+// unchecking it and checking it again left you with no timer — and mis-tapping the LAST set of an
+// exercise killed its timer for the rest of the session, since the mark could never be beaten
+// again. Navigation and the sheets still need that guard (replaying them is disorienting), but a
+// rest timer is not a side effect worth withholding: you are standing there waiting for it.
+export function restAction({ unitDone, unitLength, isLastUnit, step }) {
+  // Finishing a unit ends the rest that was running. It does not by itself forbid a new one:
+  // closing a superset mid-workout still earns the rest before the next exercise, so stop and
+  // start are answered separately rather than one short-circuiting the other.
+  const stop = !!unitDone
+  // Ordinary (non-superset) exercise: a completed set that leaves work behind earns a rest.
+  if (unitLength <= 1) return { stop, start: !unitDone }
+  // In a superset the rest belongs to the end of a round, not to each member.
+  if (!step) return { stop, start: false }
+  if (step.unitDone) return { stop, start: !isLastUnit }
+  return { stop, start: !!step.roundDone }
 }
 
 // Decide where a newly completed superset set goes next. Spent members are skipped, including

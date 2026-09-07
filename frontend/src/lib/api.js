@@ -57,3 +57,47 @@ export async function passkeyLogin() {
   const res = await api('/api/login/verify', { method: 'POST', body: JSON.stringify({ cid, credential: credToJSON(cred) }) })
   return res.user
 }
+// Generates a one-time code for the signed-in user (old device). Requires a session — the
+// server reads the uid from the cookie, not from the body.
+export async function linkCode() {
+  return api('/api/link/code', { method: 'POST', body: '{}' })
+}
+// Redeems a code on a new device: fetches WebAuthn registration options for the existing
+// profile behind the code, creates a passkey, and verifies it — attaching the credential to
+// that profile instead of creating a new one.
+export async function linkDevice(code) {
+  const { cid, options } = await api('/api/link/options', { method: 'POST', body: JSON.stringify({ code }) })
+  const cred = await navigator.credentials.create({ publicKey: toCreationOptions(options) })
+  const res = await api('/api/link/verify', { method: 'POST', body: JSON.stringify({ cid, credential: credToJSON(cred) }) })
+  return res.user
+}
+// Lists the signed-in profile's passkeys ({ id, created, transports } each — no `current`
+// flag: the session cookie never records which credential signed it in).
+export async function listDevices() {
+  return api('/api/devices')
+}
+// Revokes one passkey by credential id. 404 if it isn't yours (or doesn't exist), 409 if it's
+// the profile's last one — both surface as a rejected promise with a readable e.message.
+export async function removeDevice(id) {
+  return api('/api/devices?id=' + encodeURIComponent(id), { method: 'DELETE' })
+}
+
+// { connected, athleteId }. On an instance with no Strava credentials the route isn't even
+// registered — the rejected promise's `e.status` is 404, which the caller must tell apart from
+// "signed in but not connected" (a normal 200 with connected:false) and from any other failure
+// (offline, 5xx): 404 means "this instance doesn't do Strava at all", nothing else does.
+export async function stravaStatus() {
+  return api('/api/strava/status')
+}
+// Revokes the token on Strava's side and forgets it locally. Same 404-means-unconfigured rule
+// as stravaStatus — callers only reach this once a status check has already shown the feature
+// exists, but the rule still holds if that assumption is ever wrong.
+export async function stravaDisconnect() {
+  return api('/api/strava/disconnect', { method: 'POST', body: '{}' })
+}
+// Uploads one already-built payload (lib/strava-payload.js's buildStravaPayload) for a given
+// workout id. The server is the dedup authority: a repeat of an id it already recorded comes
+// back as { ok: true, duplicate: true } rather than an error.
+export async function stravaUpload(workoutId, payload) {
+  return api('/api/strava/upload', { method: 'POST', body: JSON.stringify({ workoutId, payload }) })
+}

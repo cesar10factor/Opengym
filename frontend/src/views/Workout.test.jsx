@@ -149,6 +149,120 @@ describe('Workout set completion flow', () => {
     expect(mocks.S.active.cur).toBe(1)
     expect(mocks.startRest).toHaveBeenCalledWith(90)
   })
+
+  // Mis-tapping a set and correcting it used to cost you the rest timer: the high-water mark
+  // never decreases, so the re-check did not read as progress and the timer never started.
+  it('starts rest again when a set is unchecked and re-checked', async () => {
+    await mount([exercise('plain-bench', [false, false, false])])
+
+    await toggleSet(1)
+    expect(mocks.startRest).toHaveBeenCalledTimes(1)
+
+    await toggleSet(1)                    // corrected the mis-tap
+    expect(mocks.startRest).toHaveBeenCalledTimes(1)   // unchecking rests nobody
+
+    await toggleSet(1)                    // and back on
+    expect(mocks.startRest).toHaveBeenCalledTimes(2)
+    expect(mocks.startRest).toHaveBeenLastCalledWith(90)
+  })
+
+  // The worst case of the same bug: the last set can never beat its own high-water mark again,
+  // so that exercise stayed timer-less for the whole session after a single mis-tap.
+  it('starts rest again after a mis-tapped final set is corrected', async () => {
+    await mount([exercise('plain-bench', [true, true, false]), exercise('later', [false, false])])
+
+    await toggleSet(2)                    // exercise complete — rest stops, none starts
+    expect(mocks.stopRest).toHaveBeenCalled()
+    expect(mocks.startRest).not.toHaveBeenCalled()
+
+    await toggleSet(2)                    // undo: there is work again
+    await toggleSet(2)                    // redo
+    // Completing the last set finishes the exercise, so the right answer is still "stop" — but
+    // it is REACHED again instead of the whole block bailing out at the high-water check. Before
+    // the fix this second correction produced no timer decision at all.
+    expect(mocks.stopRest).toHaveBeenCalledTimes(2)
+    expect(mocks.startRest).not.toHaveBeenCalled()
+  })
+
+  it('does not re-navigate a superset when a set is unchecked and re-checked', async () => {
+    const group = 'superset-1'
+    await mount([
+      exercise('superset-a', [false, false], { sg: group }),
+      exercise('superset-b', [false, false], { sg: group }),
+    ], 0)
+
+    await toggleSet(0)                    // a's first set → advance to b
+    expect(mocks.S.active.cur).toBe(1)
+
+    mocks.S.active.cur = 0                // the user navigated back by hand
+    await toggleSet(0)
+    await toggleSet(0)                    // uncheck + re-check of the same set
+    expect(mocks.S.active.cur).toBe(0)    // must NOT have been dragged forward again
+  })
+})
+
+describe('per-exercise rest wiring (T8 FIX 4)', () => {
+  it('starts rest with the exercise-specific value when the entry carries target.rest', async () => {
+    await mount([exercise('plain-bench', [false, false, false], { target: { mode: 'reps', reps: 5, weight: 60, bodyweight: false, rest: 120 } })])
+    await toggleSet(0)
+
+    expect(mocks.startRest).toHaveBeenCalledWith(120)
+    expect(mocks.stopRest).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the global restSec when the entry has no rest field', async () => {
+    await mount([exercise('plain-bench', [false, false, false])])
+    await toggleSet(0)
+
+    expect(mocks.startRest).toHaveBeenCalledWith(90)
+  })
+
+  it('treats target.rest: 0 as no rest at all — stops rather than starting a stuck 0:00 timer', async () => {
+    await mount([exercise('plain-bench', [false, false, false], { target: { mode: 'reps', reps: 5, weight: 60, bodyweight: false, rest: 0 } })])
+    await toggleSet(0)
+
+    expect(mocks.startRest).not.toHaveBeenCalled()
+    expect(mocks.stopRest).toHaveBeenCalled()
+  })
+
+  // Uneven superset: A has 4 sets (rest 120), B has 2 (rest 60), followed by a third plain
+  // exercise so the superset is NOT the last unit of the session (isolates the rest decision
+  // from the separate "don't rest after the very last set of the workout" rule). B is spent
+  // after round 2, so rounds 3 and 4 close on A — the rest that fires must be A's, not B's.
+  // A rule keyed off "the group's last array index" gets this wrong; the rule must key off
+  // whichever entry actually closed the round (supersetFlowStep's own "last active member"
+  // boundary, which idx already identifies for the caller).
+  it('uses the closing exercise\'s own rest in an uneven superset, not the last member\'s', async () => {
+    const group = 'uneven'
+    await mount([
+      exercise('exercise-a', [false, false, false, false], { sg: group, target: { mode: 'reps', reps: 5, weight: 60, bodyweight: false, rest: 120 } }),
+      exercise('exercise-b', [false, false], { sg: group, target: { mode: 'reps', reps: 5, weight: 60, bodyweight: false, rest: 60 } }),
+      exercise('exercise-c', [false, false]),
+    ], 0)
+
+    await toggleSet(0)   // a set 1 — b still has work, round not closed yet
+    expect(mocks.startRest).not.toHaveBeenCalled()
+
+    await toggleSet(4)   // b set 1 (checkbox indices: a has 4, b starts at 4) — round 1 closes on b
+    expect(mocks.startRest).toHaveBeenLastCalledWith(60)
+
+    mocks.startRest.mockClear()
+    await toggleSet(1)   // a set 2 — b still has one set left, round not closed
+    expect(mocks.startRest).not.toHaveBeenCalled()
+
+    await toggleSet(5)   // b set 2 (final) — round 2 closes on b, b is now fully spent
+    expect(mocks.startRest).toHaveBeenLastCalledWith(60)
+
+    mocks.startRest.mockClear()
+    await toggleSet(2)   // a set 3 — b has no work left, so round 3 closes on a
+    expect(mocks.startRest).toHaveBeenLastCalledWith(120)
+
+    mocks.startRest.mockClear()
+    await toggleSet(3)   // a set 4 (final) — round 4 / unit done, closes on a; not the last
+    // unit of the session (exercise-c follows), so rest still starts, using a's own value.
+    expect(mocks.startRest).toHaveBeenLastCalledWith(120)
+    expect(mocks.stopRest).toHaveBeenCalled()   // the unit itself also ends
+  })
 })
 
 describe('superset flow survives an exercise being removed mid-session', () => {
