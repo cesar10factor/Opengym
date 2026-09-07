@@ -80,6 +80,21 @@ Decisiones del ciclo 2 (no reabrir):
 |---|-------|------|--------|-----------------|
 | T10 | Mapeo de ejercicios a Strava | `feat/strava-exercise-map` | **hecho** | `85f7290` (466 tests) |
 | T11 | OAuth y guardado del token | `feat/strava-oauth` | **hecho** | `c766217` (132 tests api) |
+| T12 | Construir el JSON y subirlo | `feat/strava-upload` | **hecho** | `a503317` |
+| T13 | Interfaz y subida automática | `feat/strava-ui` | **hecho** | `a80f735` (516 tests front) |
+| FX | Arreglo: subir a `/api/v3/uploads`, no a `/uploads` | `fix/strava-upload-url` | **hecho** | `55b17ec` |
+| FE | **Prueba real de extremo a extremo** | — | **PASADA 2026-09-07** | actividad subida a Strava y verificada por el dueño |
+
+### Los dos fallos que solo aparecieron usando la app
+
+Ninguno lo detectó ningún test, y los dos por la misma causa de fondo: **el servidor de mentira
+estaba escrito para coincidir con nuestro código en lugar de con el contrato real de Strava.**
+1. **Formato:** se mandaba un cuerpo JSON; `/uploads` es `multipart/form-data` con el documento
+   como parte `file`. Diez tests en verde certificando una petición que Strava rechaza.
+2. **Ruta:** se subía a `/uploads`; la API v3 vive en `/api/v3/uploads`. Los endpoints de OAuth sí
+   están en la raíz, y por eso conectar funcionaba y subir daba 404.
+Ambos tests afirman ahora la forma y la ruta exactas, y el doble **responde 404 a rutas
+desconocidas** en vez de aceptar cualquier cosa. Un doble que dice que sí a todo no verifica nada.
 | T12 | Construir el JSON y subirlo | `feat/strava-upload` | abierto | — |
 | T13 | Interfaz y subida automática | `feat/strava-ui` | abierto | — |
 
@@ -130,6 +145,26 @@ sale de un vocabulario cerrado del FIT SDK (~200 identificadores tipo `BARBELL_B
 `PLANK_GENERIC`). openGym tiene **1.324 ejercicios** más los que el usuario se invente. Así que
 hay que decidir qué pasa con lo que no mapea, y un mapeo mal hecho registra en Strava un ejercicio
 equivocado para siempre, en silencio.
+
+## Lo que NO está verificado (probado contra un doble, nunca contra Strava de verdad)
+
+Se subió **un** entrenamiento real, de dos ejercicios. Eso demuestra el camino completo, no todo
+lo que hay en él:
+- **Los nombres de los ejercicios en Strava**, con muestra real. El mapeo costó 5 rondas y solo se
+  han visto dos ejercicios en el feed. Si alguno sale mal, se pincha ese caso en `STRAVA_OVERRIDES`.
+- **El refresco del token.** Los de Strava duran ~6 h; el primer refresco real ocurrirá pasado ese
+  tiempo. La decisión de refrescar está testeada, el intercambio real no.
+- **La revocación al desconectar**, contra un token válido.
+- **Un entrenamiento que agote los 3 intentos.** No hay forma de reintentarlo desde la app: el
+  contador vive en el `localStorage` del móvil y el servidor no puede tocarlo. Si aparece el caso,
+  la solución es un botón en Ajustes, no que el dueño abra una consola.
+
+## Al mudar el servidor (mini PC o dominio propio)
+
+- `RP_ID` **no puede cambiar** o mueren todas las passkeys.
+- El **dominio de callback de la app de Strava** hay que actualizarlo en `strava.com/settings/api`,
+  o dejará de poder conectarse.
+- El `client_secret` vive solo en `.env`, que está en `.gitignore`. Nunca se ha commiteado.
 
 ## Bloqueantes abiertos
 
