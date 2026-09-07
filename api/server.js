@@ -47,6 +47,12 @@ const STRAVA_ENABLED = !!(STRAVA_CLIENT_ID && STRAVA_CLIENT_SECRET);
 // party's uptime or posting fabricated tokens to it. Trailing slash stripped so `base + '/oauth/x'`
 // never ends up with a doubled slash regardless of how the value was set.
 const STRAVA_API_BASE = (process.env.STRAVA_API_BASE || 'https://www.strava.com').trim().replace(/\/+$/, '');
+// OAuth (authorize/token/deauthorize) lives at the root of strava.com, but the REST API — right now
+// just POST /uploads — is namespaced under /api/v3 (see https://developers.strava.com/docs/reference/:
+// base https://www.strava.com/api/v3, e.g. https://www.strava.com/api/v3/uploads). Derived from
+// STRAVA_API_BASE rather than a second env var, so pointing STRAVA_API_BASE at a local stub (tests)
+// still sends every call — oauth AND v3 — to that one server, just on different paths.
+const STRAVA_API_V3_BASE = STRAVA_API_BASE + '/api/v3';
 // Strava failing fast is not the dangerous case — every fetch below already has a catch/!r.ok
 // branch for that. Strava HANGING is: Node's fetch has no default timeout, and since the refresh
 // call now lives inside GET /api/strava/status (the route the Settings screen polls), a hung
@@ -1257,7 +1263,7 @@ if (STRAVA_ENABLED) {
       // Left unset, Strava guesses from the data, and a strength session filed as something else
       // defeats the point of uploading it.
       form.set('sport_type', 'WeightTraining');
-      r = await fetch(STRAVA_API_BASE + '/uploads', {
+      r = await fetch(STRAVA_API_V3_BASE + '/uploads', {
         method: 'POST',
         // No Content-Type here on purpose: fetch derives it from the FormData, including the
         // multipart boundary. Setting it by hand produces a header with no boundary and a body
