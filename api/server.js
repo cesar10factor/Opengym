@@ -91,6 +91,12 @@ db.invites = db.invites || [];
 // starts empty rather than throwing. See api/link.js for the pure logic these back.
 db.links = db.links || [];
 db.linkFails = db.linkFails || [];
+// Scheduled rest-over alerts, one entry `{ uid, at }` per user. Additive like the two above, so an
+// older db.json just starts empty. These live on disk (not only in the in-memory `restTimers` Map)
+// because a container restart mid-rest used to lose the alert outright — and losing it is silent:
+// nothing throws, nothing logs, the user simply never learns their rest ended. See the re-arm block
+// further down, next to scheduleRestTimer/cancelRestTimer.
+db.restTimers = db.restTimers || [];
 const isAdmin = user => !!user && (user.admin === true || ADMIN_UIDS.includes(user.id));
 function saveDb() { atomicWrite(dbFile, JSON.stringify(db, null, 2)); }
 function atomicWrite(file, content) {
@@ -191,6 +197,18 @@ catch { vapid = webpush.generateVAPIDKeys(); fs.writeFileSync(vapidFile, JSON.st
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || (SECURE ? ORIGIN : 'mailto:admin@localhost');
 webpush.setVapidDetails(VAPID_SUBJECT, vapid.publicKey, vapid.privateKey);
 
+/* INVARIANT — every push sent from here MUST result in a user-visible notification.
+   This is not a style preference, it is a platform rule with teeth:
+     - iOS/Safari revokes the push subscription when a delivered push does not show a notification
+       (reports put the cut-off at 3 breaches), and it does so SILENTLY — no error, no event, the
+       endpoint simply stops working and the user never hears another alert.
+     - Chrome enforces the same contract through `userVisibleOnly: true`, which the client already
+       passes when subscribing (frontend/src/lib/push.js), and shows its own "site updated in the
+       background" notification if the service worker shows none.
+   Consequence, binding on anything built on top of sendPush: NO silent/data-only pushes, and no
+   design that relies on a push arriving without painting something. In particular this rules out
+   the "silent notification replaced by tag" pattern for a live next-exercise banner. If you need
+   background state without an alert, it does not go through Web Push. */
 async function sendPush(userId, payload) {
   const subs = db.subs.filter(s => s.userId === userId);
   if (!subs.length) return;
@@ -216,17 +234,61 @@ async function sendPush(userId, payload) {
 // Rest-timer alerts: client schedules on start/extend, cancels on skip or on-screen completion —
 // this only fires when the tab was backgrounded/suspended and never got to cancel it itself.
 const restTimers = new Map(); // userId -> Timeout
-function scheduleRestTimer(userId, sec) {
+
+/* How late a rest alert may be and still be worth firing after the server was down.
+   A restart of the api container takes seconds, so every normal restart lands well inside this.
+   Rests themselves run 60-180s: an alert up to 2 minutes late still arrives during the same
+   exercise and is the reminder it was meant to be. Past that the user is already mid-next-set or
+   has left the gym, and a stale "rest over" is pure noise — worse, it would break the one-push-
+   per-rest correspondence the notification design depends on. So: fire once if barely late,
+   drop it otherwise. Never fire twice, and never keep it around for the next boot. */
+const REST_TIMER_MAX_LATE_MS = 2 * 60 * 1000;
+
+// Keeps at most one persisted entry per user (`at === null` removes it) — this is the cleanup that
+// stops db.json growing a row per rest ever taken.
+function persistRestTimer(userId, at) {
+  db.restTimers = db.restTimers.filter(r => r.uid !== userId);
+  if (at !== null) db.restTimers.push({ uid: userId, at });
+  saveDb();
+}
+function armRestTimer(userId, delayMs) {
   const t = restTimers.get(userId);
   if (t) clearTimeout(t);
   restTimers.set(userId, setTimeout(() => {
     restTimers.delete(userId);
+    // Drop the persisted entry BEFORE sending: a crash mid-send must not leave a row that a later
+    // boot would re-arm and fire a second time.
+    persistRestTimer(userId, null);
     sendPush(userId, { title: 'Rest over 💪', body: 'Time for your next set.', tag: 'rest-timer' });
-  }, sec * 1000));
+  }, Math.max(0, delayMs)));
+}
+function scheduleRestTimer(userId, sec) {
+  const at = Date.now() + sec * 1000;
+  persistRestTimer(userId, at);
+  armRestTimer(userId, sec * 1000);
 }
 function cancelRestTimer(userId) {
   const t = restTimers.get(userId);
   if (t) { clearTimeout(t); restTimers.delete(userId); }
+  if (db.restTimers.some(r => r.uid === userId)) persistRestTimer(userId, null);
+}
+
+// Re-arm the rests that were pending when the process last stopped. Placed here rather than up with
+// the db.links pruning because `restTimers` is a const declared just above — reading it earlier
+// would hit the temporal dead zone. Same write discipline as the links pruning: only touch disk if
+// something actually changed, so a read-only db.json still boots.
+{
+  const now = Date.now();
+  const kept = [];
+  for (const r of db.restTimers) {
+    if (!r || typeof r.uid !== 'string' || !Number.isFinite(r.at)) continue; // malformed row, drop
+    const late = now - r.at;
+    if (late <= 0) { kept.push(r); armRestTimer(r.uid, r.at - now); }
+    else if (late <= REST_TIMER_MAX_LATE_MS) { kept.push(r); armRestTimer(r.uid, 0); }
+    // else: too stale to be useful — dropped, never fired.
+  }
+  if (kept.length !== db.restTimers.length) { db.restTimers = kept; saveDb(); }
+  else db.restTimers = kept;
 }
 
 // "Workout planned today" reminder — one per user per day, at their chosen time.
