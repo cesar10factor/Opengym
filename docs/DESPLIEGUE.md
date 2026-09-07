@@ -247,13 +247,18 @@ docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d --build
 Si lo haces así, actualiza también `.git/auto-deploy/last-sha` con ese `$sha`, o la siguiente
 ejecución del script creerá que hay algo pendiente que en realidad ya está servido.
 
-**Por qué es manual por ahora:** el script está pensado para correr desde el Programador de
-tareas de Windows sin vigilancia (cada pocos minutos), pero en un PC de uso diario eso abre una
-ventana de consola de fondo constantemente, lo cual molesta. En el mini PC del paso 8, que no se
-usa de forma interactiva, no hay ese problema — ahí sí merece la pena registrar la tarea
-programada (`schtasks /create /tn "OpenGym AutoDeploy" /tr "powershell -NoProfile
--ExecutionPolicy Bypass -WindowStyle Hidden -File <ruta>\scripts\auto-deploy.ps1" /sc minute /mo
-5`) para que cada merge a `main` se refleje solo, sin tocar nada a mano.
+**El despliegue es manual, y se queda así** (decidido el 2026-09-07). El script nació pensando en
+correr desatendido desde el Programador de tareas, también en el mini PC del paso 8. Esa idea
+queda descartada, por dos razones:
+
+- Los cambios son cada vez más espaciados. Un sondeo cada pocos minutos no haría nada el 99% de
+  las veces, y en un PC de uso diario abre una ventana de consola en cada tick.
+- Más importante: desatendido, un merge malo se publica solo mientras no estás mirando. Manual,
+  despliegas cuando estás listo para comprobar el resultado — y la verificación de arriba es
+  precisamente lo que hace falta, porque los fallos de este despliegue son silenciosos.
+
+Así que el flujo es siempre el mismo: fusionas a `main`, ejecutas el script, y compruebas. No hay
+tarea programada que registrar.
 
 ---
 
