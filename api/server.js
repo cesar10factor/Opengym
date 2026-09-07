@@ -1255,8 +1255,27 @@ if (STRAVA_ENABLED) {
           return out;
         })
       };
+      // The file part's filename becomes this upload's external_id unless overridden — Strava's own
+      // docs: "data filename will be used by default but should be a unique identifier", and it is
+      // this id, not the 201 from POST /uploads, that Strava uses to recognise (or reject) an
+      // activity during its async processing. A constant name here ("workout.json" on every
+      // upload) means every upload shares one external_id: once the first activity under that id is
+      // deleted, Strava associates the identifier itself with "deleted" and immediately kills every
+      // later upload that reuses it — silently, since /uploads still answers 201 either way.
+      //
+      // workoutId is the stable, per-activity identifier this route already has (assigned once,
+      // client-side, when the workout is created — see frontend/src/lib/format.js#uid). Deriving
+      // the filename from it means a RETRY of the same failed workout keeps the same external_id
+      // (so Strava can recognise a retried upload rather than filing a duplicate), while two
+      // different workouts always get two different ones. A timestamp or random value at upload
+      // time would satisfy uniqueness too, but would mint a fresh external_id on every retry and
+      // give up that recognition for no benefit.
+      //
+      // Sanitised because workoutId rides in from the client as a free-form string (only checked
+      // for non-empty), and it is about to become both a filename and a multipart header value.
+      const safeWorkoutId = workoutId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 200) || 'workout';
       const form = new FormData();
-      form.set('file', new Blob([JSON.stringify(doc)], { type: 'application/json' }), 'workout.json');
+      form.set('file', new Blob([JSON.stringify(doc)], { type: 'application/json' }), `opengym-${safeWorkoutId}.json`);
       form.set('data_type', 'json');
       // Which of Strava's four JSON-eligible activity types this is. Every session this app logs
       // is weight training, so it is a constant rather than something the client gets to choose.

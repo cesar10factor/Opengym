@@ -316,6 +316,18 @@ describe('POST /api/strava/upload with Strava configured', () => {
     assert.equal(uploadCall.parts.fields.sport_type, 'WeightTraining',
       'sport_type must be declared so Strava does not guess the activity type');
     assert.ok(uploadCall.parts.files.file, 'the training document must travel as the `file` part');
+    // Strava echoes the file part's filename back as the upload's external_id and uses it to
+    // recognise the activity across the async processing that follows the 201 — see the upload
+    // docs: "data filename will be used by default but should be a unique identifier." A constant
+    // filename on every upload means every workout shares one external_id; once Strava associates
+    // that id with a deleted activity (the owner deleted his first test upload), every later upload
+    // reusing the same name is silently killed during processing while POST /uploads still answers
+    // 201. The filename must therefore derive from workoutId (so a retry of the SAME workout keeps
+    // recognising it) and two different workoutIds must never collide.
+    assert.match(uploadCall.parts.files.file.filename, /w-success-1/,
+      'the file part filename must derive from workoutId, not a constant name');
+    assert.notEqual(uploadCall.parts.files.file.filename, 'workout.json',
+      'a constant filename on every upload is exactly the bug: one deleted activity poisons the shared external_id for all future uploads');
 
     const doc = JSON.parse(uploadCall.parts.files.file.content);
     assert.equal(doc.version, '1.0', 'version is the string "1.0"');
@@ -385,6 +397,10 @@ describe('POST /api/strava/upload with Strava configured', () => {
     });
     assert.equal(r.status, 200);
     assert.equal(uploadCall.headers['authorization'], 'Bearer ' + newAccess, 'the freshly refreshed access token must be the one forwarded to /uploads');
+    // Two different workouts must never produce the same external_id/filename — that would just
+    // trade "every upload shares one id" for "these two happen to share one".
+    assert.match(uploadCall.parts.files.file.filename, /w-refresh/, 'the filename must derive from this request\'s own workoutId');
+    assert.notEqual(uploadCall.parts.files.file.filename, 'workout.json');
   });
 
   it('an empty request body -> 400, not a 500', async () => {
