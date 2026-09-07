@@ -3,12 +3,19 @@ import { uid } from '../lib/format.js'
 import { beep, vibrate } from '../lib/sound.js'
 import { api } from '../lib/api.js'
 import { t } from '../lib/i18n.js'
+import { ensurePushSubscription } from '../lib/push.js'
 import { useStore } from './useStore.js'
 
 // Fire-and-forget: lets the server push a "rest over" alert if this tab gets suspended
 // before the local timer completes. No-ops for guests / offline.
 const pushRestTimer = sec => { if (useStore.getState().user) api('/api/push/rest-timer', { method: 'POST', body: JSON.stringify({ seconds: sec }) }).catch(() => {}) }
 const cancelPushRestTimer = () => { if (useStore.getState().user) api('/api/push/rest-timer/cancel', { method: 'POST', body: '{}' }).catch(() => {}) }
+// Scheduling that push is worthless if no subscription is registered — that combination is exactly
+// how the alert failed silently before. Repair it here, best-effort and prompt-free; guests are
+// skipped because /api/push/subscribe is session-only (401).
+// (ensurePushSubscription already resolves rather than rejects; the catch is belt-and-braces so a
+// future change there can never surface as an unhandled rejection mid-workout.)
+const repairPushSubscription = () => { if (useStore.getState().user) ensurePushSubscription()?.catch?.(() => {}) }
 
 const notificationsSupported = () => typeof window !== 'undefined' && 'Notification' in window
 let requestRestNotificationPermissionP = null
@@ -81,6 +88,7 @@ export const useUI = create((set, get) => ({
     const endsAt = Date.now() + sec * 1000
     set({ timer: { left: sec, total: sec, endsAt } })
     requestRestNotificationPermission()
+    repairPushSubscription()
     pushRestTimer(sec)
     timerTick = () => {
       const tm = get().timer
