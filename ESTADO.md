@@ -148,12 +148,36 @@ sale de un vocabulario cerrado del FIT SDK (~200 identificadores tipo `BARBELL_B
 hay que decidir qué pasa con lo que no mapea, y un mapeo mal hecho registra en Strava un ejercicio
 equivocado para siempre, en silencio.
 
+## Limitaciones conocidas, decididas a conciencia (2026-09-07)
+
+- **Un entrenamiento que agote sus 3 intentos no se puede reintentar desde la app.** El contador
+  vive en `localStorage` del móvil (`gym_strava_attempts`) y el servidor no lo ve. La única salida
+  hoy es una consola de navegador. **Ocurrió dos veces la misma tarde**, las dos por fallos
+  transitorios ajenos al entrenamiento (una URL mal, un fichero corrompido a mano).
+  Arreglo propuesto y **descartado por ahora a petición del dueño**: una fila en Ajustes → Strava,
+  visible solo si hay entrenamientos abandonados, que borre sus contadores. Si vuelve a molestar,
+  es lo primero que hay que hacer.
+- **Dos dispositivos subiendo el mismo entrenamiento a la vez**: el segundo recibe 409 y gasta un
+  intento en lugar de esperar sin coste. Requiere que el móvil entienda una respuesta nueva, así
+  que toca frontend y backend a la vez; se dejó fuera para no mezclar capas en una misma tanda.
+
+## Aviso para quien edite los ficheros de `data/` a mano
+
+**No uses `Set-Content -Encoding utf8` de Windows PowerShell: añade un BOM invisible** y
+`JSON.parse` lo rechaza. Pasó el 2026-09-07 al desmarcar un entrenamiento: el fichero de subidas
+quedó ilegible y el servidor **se negó a subir nada** durante un rato — correctamente, porque la
+guarda prefiere no subir antes que arriesgar un duplicado que no podría registrar. Usa Node, o
+`[System.IO.File]::WriteAllText` con `UTF8Encoding($false)`.
+Mismo error tumbó `api/server.js` antes en la sesión. Es un tropiezo de la herramienta, no del
+código.
+
 ## Lo que NO está verificado (probado contra un doble, nunca contra Strava de verdad)
 
 Se subió **un** entrenamiento real, de dos ejercicios. Eso demuestra el camino completo, no todo
 lo que hay en él:
-- **Los nombres de los ejercicios en Strava**, con muestra real. El mapeo costó 5 rondas y solo se
-  han visto dos ejercicios en el feed. Si alguno sale mal, se pincha ese caso en `STRAVA_OVERRIDES`.
+- ~~Los nombres de los ejercicios en Strava~~ — **verificado el 2026-09-07**: un entrenamiento de
+  **6 ejercicios** subió y el dueño confirmó que salen bien. El mapeo funciona con datos reales.
+  Si alguno sale mal en el futuro, se pincha ese caso en `STRAVA_OVERRIDES`, una línea.
 - **El refresco del token.** Los de Strava duran ~6 h; el primer refresco real ocurrirá pasado ese
   tiempo. La decisión de refrescar está testeada, el intercambio real no.
 - **La revocación al desconectar**, contra un token válido.
