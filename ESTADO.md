@@ -251,7 +251,7 @@ lo que hay en él:
 | N1 | No cancelar la push cuando el descanso termina solo | `fix/rest-push-race` | **hecho** | `5b9db8f` (521 tests) |
 | N2 | Que no vuelva a fallar en silencio: auto-suscripción + timers persistidos | `fix/push-reliability` | **hecho** | `950f750` (539 front + 165 api) |
 | N3 | Payload dual (Declarative Web Push) — habilita iPhone | `feat/declarative-web-push` | **hecho** | `0df4b35` (539 front + 169 api) |
-| N4 | "Qué toca ahora" en la notificación + salto a la app | `feat/next-up-notification` | abierto | — |
+| N4 | "Qué toca ahora" en la notificación + salto a la app | `feat/next-up-notification` | **hecho** | `63898cd` (564 front + 179 api) |
 | N5 | Aceptación manual (Android ahora, iPhone al cambiar) | — | abierto | — |
 
 Decisiones del ciclo 4 (no reabrir):
@@ -277,6 +277,16 @@ Decisiones del ciclo 4 (no reabrir):
   deja, no molesta.
 - **No se toca `sound.js`.** Probado en Android: el sonido de la notificación push ya se oye bien
   con cascos, y al dueño le basta. Subir la ganancia del pitido WebAudio era innecesario.
+- **La app usa `HashRouter`: el destino es `/#/workout`, no `/workout`.** Equivocarse aquí falla en
+  silencio — abre la app en la pantalla de inicio y parece que "casi funciona".
+- **`nextUp()` no lee el puntero `active.cur`.** `Workout.jsx` marca la serie y **luego** arranca el
+  descanso, avanzando `cur` después: una respuesta basada en el cursor anunciaría la serie que
+  acaba de terminar. Camina las series en el orden real de ejecución (round-robin en superserie) y
+  numera los calentamientos dentro de su propia fase, para que el número coincida con la fila que
+  se ve en pantalla.
+- **El cuerpo de la notificación es contenido de usuario** (el nombre del ejercicio lo puede haber
+  escrito el dueño). El servidor lo valida y recorta **dos veces**: al entrar y al rearmar desde
+  disco, porque `db.json` es un fichero editable.
 - **`web-push` no necesita nada especial para el modo declarativo.** Ya cifra en `aes128gcm`
   (RFC 8291) y WebKit solo mira el JSON descifrado: basta con que lleve `web_push: 8030`. No hay
   content-type ni encoding que conmutar. Comprobado contra la fuente de la librería.
