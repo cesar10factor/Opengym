@@ -71,6 +71,26 @@ const STRAVA_TIMEOUT_MS = +(process.env.STRAVA_TIMEOUT_MS || 8000) || 8000;
 // the added wait is not noticeable on top of the upload itself. Configurable only for the test
 // suite, same convention as STRAVA_TIMEOUT_MS above — a real deployment should leave it alone.
 const STRAVA_UPLOAD_POLL_DELAY_MS = +(process.env.STRAVA_UPLOAD_POLL_DELAY_MS || 2000) || 2000;
+// Version marker (N6): which commit this container was built from. The image has no .git, so the
+// values arrive as build args promoted to ENV in api/Dockerfile — see docker-compose.yml and
+// scripts/auto-deploy.ps1 for who fills them in. Everything here is optional: an image built
+// without them (a plain `docker compose up --build`, `node server.js` in a checkout) reports
+// nulls, and the Settings screen then shows nothing rather than a placeholder.
+//
+// Both values are validated, not just trimmed, because the Dockerfiles' own ARG defaults are the
+// placeholder strings 'dev' and 'unknown' — printing those as if they were a commit would be
+// worse than printing nothing. A short hash is hex, so 'dev' can never pass ('v' isn't a hex
+// digit); a date has to be one Date.parse understands.
+const versionRef = v => {
+  const s = String(v || '').trim().toLowerCase();
+  return /^[0-9a-f]{7,40}$/.test(s) ? s : null;
+};
+const versionDate = v => {
+  const s = String(v || '').trim();
+  return s && !Number.isNaN(Date.parse(s)) ? s : null;
+};
+const SERVER_VERSION = { ref: versionRef(process.env.VCS_REF), date: versionDate(process.env.BUILD_DATE) };
+
 const MAX_BODY = 5 * 1024 * 1024;
 // Secure cookies require HTTPS; over plain http://localhost the flag would drop the cookie
 const SECURE = /^https:/i.test(ORIGIN) ? ' Secure;' : '';
@@ -613,7 +633,10 @@ if (AUDIT_ON) {
 
 /* ---------- routes ---------- */
 const routes = {
-  'GET /api/health': async (req, res) => json(res, 200, { ok: true, users: db.users.length }),
+  // `ok` and `users` are load-bearing (the Dockerfile HEALTHCHECK probes this route, and every
+  // integration suite waits on it), so `version` is purely additive. Its shape is constant —
+  // `{ ref, date }` with nulls when unknown — so a client never has to branch on the key existing.
+  'GET /api/health': async (req, res) => json(res, 200, { ok: true, users: db.users.length, version: SERVER_VERSION }),
 
   // Public config the login screen needs before anyone is signed in.
   'GET /api/config': async (req, res) => json(res, 200, { invite_only: INVITE_ONLY, allow_guest: ALLOW_GUEST }),
