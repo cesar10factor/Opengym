@@ -81,3 +81,23 @@ export async function listDevices() {
 export async function removeDevice(id) {
   return api('/api/devices?id=' + encodeURIComponent(id), { method: 'DELETE' })
 }
+
+// { connected, athleteId }. On an instance with no Strava credentials the route isn't even
+// registered — the rejected promise's `e.status` is 404, which the caller must tell apart from
+// "signed in but not connected" (a normal 200 with connected:false) and from any other failure
+// (offline, 5xx): 404 means "this instance doesn't do Strava at all", nothing else does.
+export async function stravaStatus() {
+  return api('/api/strava/status')
+}
+// Revokes the token on Strava's side and forgets it locally. Same 404-means-unconfigured rule
+// as stravaStatus — callers only reach this once a status check has already shown the feature
+// exists, but the rule still holds if that assumption is ever wrong.
+export async function stravaDisconnect() {
+  return api('/api/strava/disconnect', { method: 'POST', body: '{}' })
+}
+// Uploads one already-built payload (lib/strava-payload.js's buildStravaPayload) for a given
+// workout id. The server is the dedup authority: a repeat of an id it already recorded comes
+// back as { ok: true, duplicate: true } rather than an error.
+export async function stravaUpload(workoutId, payload) {
+  return api('/api/strava/upload', { method: 'POST', body: JSON.stringify({ workoutId, payload }) })
+}
