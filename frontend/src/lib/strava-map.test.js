@@ -57,8 +57,8 @@ describe('strava-exercises vocabulary', () => {
 });
 
 describe('stravaExerciseFor — the test that matters', () => {
-  it('resolves ALL 1324 EXDB entries to a member of the fetched vocabulary', () => {
-    expect(EXDB.length).toBe(1324);
+  it('resolves ALL 1325 EXDB entries to a member of the fetched vocabulary', () => {
+    expect(EXDB.length).toBe(1325);
     const bad = [];
     for (const ex of EXDB) {
       const id = stravaExerciseFor(ex);
@@ -70,9 +70,9 @@ describe('stravaExerciseFor — the test that matters', () => {
   });
 
   it('the resolutions are actually varied, not a resolver that always returns one generic', () => {
-    // "All 1324 resolve to a member of the vocabulary" passes trivially for a resolver that
+    // "All 1325 resolve to a member of the vocabulary" passes trivially for a resolver that
     // always returns TOTAL_BODY_GENERIC — it's a member too. A distinct-identifier floor catches
-    // that degenerate case: 1324 real exercises across 10 body parts must land on considerably
+    // that degenerate case: 1325 real exercises across 10 body parts must land on considerably
     // more than a handful of identifiers.
     const distinct = new Set(EXDB.map((ex) => stravaExerciseFor(ex)));
     expect(distinct.size).toBeGreaterThanOrEqual(150);
@@ -233,7 +233,7 @@ describe('the muscle-domain guard — the other thing that must never merely be 
   // Mirrors the equipment sweep above, but for muscle group: independently re-derive, for every
   // EXDB entry that resolved to a SPECIFIC (non-generic) identifier, the category that identifier
   // belongs to and the domain(s) that category is anchored to, and confirm the exercise's own `tg`
-  // domain is one of them. This re-verifies the guard actually held across all 1324 — not just
+  // domain is one of them. This re-verifies the guard actually held across all 1325 — not just
   // the couple of cases that motivated writing it — and would fail if the guard were ever
   // accidentally bypassed or weakened for a whole category.
   it('no EXDB entry with a known tg resolves to a specific identifier outside that muscle\'s domain', () => {
@@ -450,7 +450,7 @@ describe('FIX (rarity vs. thin evidence) — single-token candidates must never 
 
   it('every EXDB exercise whose name ends in "stretch" resolves into the same family', () => {
     // The consistency check that would have caught the QUAD regression without anyone reading all
-    // 1324 rows: ~30+ stretches in EXDB, and every one of them must land on either the bare STRETCH
+    // 1325 rows: ~30+ stretches in EXDB, and every one of them must land on either the bare STRETCH
     // identifier, a more specific *_STRETCH identifier (LAT_STRETCH, OVERHEAD_TRICEP_STRETCH, ...,
     // all in the WARM_UP category), or the WARM_UP_GENERIC fallback — never a specific identifier
     // from some unrelated category (SQUAT's QUAD, ROW's SUPERMAN, or anything else) just because a
@@ -482,14 +482,14 @@ describe('FIX (PLYO domain) — a chest exercise must never resolve to a lower-b
 });
 
 describe('coverage accounting', () => {
-  it('counts how many of the 1324 land in each tier, with a floor on name matches and a ceiling on generic', () => {
+  it('counts how many of the 1325 land in each tier, with a floor on name matches and a ceiling on generic', () => {
     const counts = { override: 0, name: 0, generic: 0 };
     for (const ex of EXDB) {
       counts[stravaResolutionTier(ex)] += 1;
     }
-    expect(counts.override + counts.name + counts.generic).toBe(1324);
+    expect(counts.override + counts.name + counts.generic).toBe(1325);
 
-    // A regression from ~671 name matches down to 3 would still satisfy "sums to 1324" and
+    // A regression from ~671 name matches down to 3 would still satisfy "sums to 1325" and
     // "generic > 0" — these two bounds are what actually catch that. Set from the current result
     // (4 override / 671 name / 649 generic) with a small margin either side, not tight enough to
     // fail on the normal give-and-take of a future name-match improvement, but tight enough that a
