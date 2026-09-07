@@ -85,8 +85,14 @@ function createStravaStub() {
       };
       requests.push(record);
       let result;
+      // The upload endpoint lives under Strava's /api/v3 namespace (unlike /oauth/token, which sits
+      // at the root) — see https://developers.strava.com/docs/reference/. Asserting the EXACT path
+      // here, rather than answering whatever path arrives, is the point: a stub that agrees with
+      // whatever the code happens to send certifies nothing, which is how this codebase shipped a
+      // request to the wrong URL (/uploads instead of /api/v3/uploads) and only found out from a
+      // real 404 in production.
       if (url.pathname === '/oauth/token') result = tokenHandler(record);
-      else if (url.pathname === '/uploads') result = uploadHandler(record);
+      else if (url.pathname === '/api/v3/uploads') result = uploadHandler(record);
       else result = { status: 404, body: { error: 'stub: unknown path ' + url.pathname } };
       res.writeHead(result.status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result.body));
@@ -296,6 +302,10 @@ describe('POST /api/strava/upload with Strava configured', () => {
 
     assert.ok(uploadCall, 'the stub must have received the upload request');
     assert.equal(uploadCall.method, 'POST');
+    // The exact path, not just "the stub got something": Strava's upload endpoint lives at
+    // /api/v3/uploads, not /uploads — a real 404 in production is exactly what a wrong base URL
+    // here would still get through a stub that merely echoed back whatever path it was asked.
+    assert.equal(uploadCall.pathname, '/api/v3/uploads', 'the upload must POST to /api/v3/uploads, not /uploads');
     assert.equal(uploadCall.headers['authorization'], 'Bearer REAL_ACCESS_TOKEN_VALUE');
     // The shape Strava actually documents: multipart/form-data, the training document as the
     // `file` part, data_type and sport_type as sibling FIELDS — not keys inside that document.
