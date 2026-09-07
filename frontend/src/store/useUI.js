@@ -4,11 +4,32 @@ import { beep, vibrate } from '../lib/sound.js'
 import { api } from '../lib/api.js'
 import { t } from '../lib/i18n.js'
 import { ensurePushSubscription } from '../lib/push.js'
+import { nextUpBody } from '../lib/next-up.js'
 import { useStore } from './useStore.js'
+
+/* What the alert will say, composed HERE and not on the server: the server knows neither the
+   user's language nor the state of the workout, and both are needed to say "Bench press — set
+   3/4 · 8 reps × 60 kg". It travels with the schedule request and comes back out as the
+   notification body.
+
+   Read at schedule time on purpose. Workout.jsx marks the set done and only then calls
+   startRest(), so the store already reflects the set just completed — computing it any later
+   (or from a `cur` pointer) would announce the set that was already finished.
+
+   Best-effort like everything else on this path: a throw here must never take the rest timer
+   with it, and no body at all is fine — the server falls back to its generic text. */
+const restBody = () => {
+  try {
+    const S = useStore.getState().S
+    return nextUpBody(S.active, S.unit) || undefined
+  } catch { return undefined }
+}
 
 // Fire-and-forget: lets the server push a "rest over" alert if this tab gets suspended
 // before the local timer completes. No-ops for guests / offline.
-const pushRestTimer = sec => { if (useStore.getState().user) api('/api/push/rest-timer', { method: 'POST', body: JSON.stringify({ seconds: sec }) }).catch(() => {}) }
+// `body` is dropped from the JSON when undefined, which is exactly the "nothing to announce" case
+// (the last set of the workout) — one push per rest either way, never one per set.
+const pushRestTimer = sec => { if (useStore.getState().user) api('/api/push/rest-timer', { method: 'POST', body: JSON.stringify({ seconds: sec, body: restBody() }) }).catch(() => {}) }
 const cancelPushRestTimer = () => { if (useStore.getState().user) api('/api/push/rest-timer/cancel', { method: 'POST', body: '{}' }).catch(() => {}) }
 // Scheduling that push is worthless if no subscription is registered — that combination is exactly
 // how the alert failed silently before. Repair it here, best-effort and prompt-free; guests are

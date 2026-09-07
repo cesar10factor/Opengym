@@ -276,14 +276,35 @@ const restTimers = new Map(); // userId -> Timeout
    drop it otherwise. Never fire twice, and never keep it around for the next boot. */
 const REST_TIMER_MAX_LATE_MS = 2 * 60 * 1000;
 
+/* The "what's next" line the client composes (frontend/src/lib/next-up.js) and ships with the
+   schedule request, e.g. "Bench press — set 3/4 · 8 reps × 60 kg". The server never builds it: it
+   knows neither the user's language nor the state of the workout.
+
+   It is USER CONTENT — the exercise name can be one the owner typed — so it is validated and capped
+   here rather than trusted, and it is never interpolated into HTML anywhere: its only destination is
+   the `body` field of a notification payload, which is JSON-encoded plain text. Same treatment on
+   the way back off disk, since db.json is editable by anything with filesystem access.
+   The cap is the server's own and deliberately above the client's NEXT_UP_MAX (140): both phone
+   OSes truncate a notification body long before either number, so this only exists to stop an
+   absurd string bloating db.json and the push payload. */
+const REST_BODY_MAX = 160;
+function sanitizeRestBody(v) {
+  if (typeof v !== 'string') return '';                        // number, object, null — all "absent"
+  // Control characters (newlines included) have no meaning in a notification body and only serve to
+  // break log lines and layouts.
+  return v.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, REST_BODY_MAX);
+}
+const REST_BODY_FALLBACK = 'Time for your next set.';
+
 // Keeps at most one persisted entry per user (`at === null` removes it) — this is the cleanup that
-// stops db.json growing a row per rest ever taken.
-function persistRestTimer(userId, at) {
+// stops db.json growing a row per rest ever taken. `body` rides along so a restart mid-rest re-arms
+// an alert that still says what is next, instead of degrading to the generic line.
+function persistRestTimer(userId, at, body = '') {
   db.restTimers = db.restTimers.filter(r => r.uid !== userId);
-  if (at !== null) db.restTimers.push({ uid: userId, at });
+  if (at !== null) db.restTimers.push(body ? { uid: userId, at, body } : { uid: userId, at });
   saveDb();
 }
-function armRestTimer(userId, delayMs) {
+function armRestTimer(userId, delayMs, body = '') {
   const t = restTimers.get(userId);
   if (t) clearTimeout(t);
   restTimers.set(userId, setTimeout(() => {
@@ -291,13 +312,20 @@ function armRestTimer(userId, delayMs) {
     // Drop the persisted entry BEFORE sending: a crash mid-send must not leave a row that a later
     // boot would re-arm and fire a second time.
     persistRestTimer(userId, null);
-    sendPush(userId, { title: 'Rest over 💪', body: 'Time for your next set.', tag: 'rest-timer' });
+    sendPush(userId, {
+      title: 'Rest over 💪',
+      body: body || REST_BODY_FALLBACK,
+      tag: 'rest-timer',
+      // The app is a HashRouter (frontend/src/App.jsx), so the workout screen is /#/workout —
+      // "/workout" would 404 into the app root and look like the deep link almost worked.
+      navigate: '/#/workout'
+    });
   }, Math.max(0, delayMs)));
 }
-function scheduleRestTimer(userId, sec) {
+function scheduleRestTimer(userId, sec, body = '') {
   const at = Date.now() + sec * 1000;
-  persistRestTimer(userId, at);
-  armRestTimer(userId, sec * 1000);
+  persistRestTimer(userId, at, body);
+  armRestTimer(userId, sec * 1000, body);
 }
 function cancelRestTimer(userId) {
   const t = restTimers.get(userId);
@@ -315,8 +343,11 @@ function cancelRestTimer(userId) {
   for (const r of db.restTimers) {
     if (!r || typeof r.uid !== 'string' || !Number.isFinite(r.at)) continue; // malformed row, drop
     const late = now - r.at;
-    if (late <= 0) { kept.push(r); armRestTimer(r.uid, r.at - now); }
-    else if (late <= REST_TIMER_MAX_LATE_MS) { kept.push(r); armRestTimer(r.uid, 0); }
+    // Re-sanitized rather than trusted: this came off disk, and a row with a non-string or
+    // control-character body must degrade to the generic text, not into the payload.
+    const body = sanitizeRestBody(r.body);
+    if (late <= 0) { kept.push(r); armRestTimer(r.uid, r.at - now, body); }
+    else if (late <= REST_TIMER_MAX_LATE_MS) { kept.push(r); armRestTimer(r.uid, 0, body); }
     // else: too stale to be useful — dropped, never fired.
   }
   if (kept.length !== db.restTimers.length) { db.restTimers = kept; saveDb(); }
@@ -993,7 +1024,9 @@ const routes = {
     const body = await readBody(req);
     const sec = Math.max(1, Math.min(3600, Math.round(+body.seconds || 0)));
     if (!sec) return json(res, 400, { error: 'seconds required' });
-    scheduleRestTimer(user.id, sec);
+    // `body` is the client-composed "what's next" line; absent, empty or not a string all mean
+    // "nothing to announce" and fall back to the generic text inside armRestTimer.
+    scheduleRestTimer(user.id, sec, sanitizeRestBody(body.body));
     json(res, 200, { ok: true });
   },
 
