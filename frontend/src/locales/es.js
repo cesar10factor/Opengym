@@ -599,5 +599,9 @@ export default {
   'secondary': 'secundario',
   'No exercises with an estimated 1RM yet.': 'Aún no hay ejercicios con 1RM estimado.',
   'Tap a muscle to see its exercises.': 'Toca un músculo para ver sus ejercicios.',
-  'Unpair': 'Desvincular'
+  'Unpair': 'Desvincular',
+  'Version': 'Versión',
+  'App': 'App',
+  'Server': 'Servidor',
+  'App and server are on different builds — close openGym and open it again.': 'La app y el servidor tienen versiones distintas: cierra openGym y vuelve a abrirla.'
 }

@@ -12,6 +12,16 @@ WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci 2>/dev/null || npm install
 COPY frontend/ ./
+# The version marker has to be baked into the bundle, so it must reach THIS stage — an ARG is
+# scoped to the stage that declares it, and the ones further down belong to the nginx stage's
+# OCI labels only. Declared here (after the npm install layer, so a new commit hash doesn't
+# re-run the install) and promoted to ENV because vite.config.js reads process.env. Left with no
+# default: an un-parameterised build gets empty strings, which the app treats as "no version"
+# and shows nothing at all.
+ARG VCS_REF
+ARG BUILD_DATE
+ENV VCS_REF=$VCS_REF
+ENV BUILD_DATE=$BUILD_DATE
 RUN npm run build
 
 FROM nginx:alpine

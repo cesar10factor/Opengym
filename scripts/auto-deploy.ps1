@@ -81,6 +81,22 @@ try {
     exit 1
   }
 
+  # Version marker: the containers have no .git, so the commit being deployed can only reach
+  # them as build args. docker-compose.yml forwards VCS_REF/BUILD_DATE to both services from the
+  # environment, which is why they are set here rather than passed on the command line (compose
+  # only accepts --build-arg for a single service). BUILD_DATE is the COMMIT date (%cI, strict
+  # ISO 8601), not the build clock: it answers "how old is what I'm running", which is the
+  # question, and it stays identical if the same commit is ever rebuilt.
+  $shortSha = $remoteSha.Substring(0, 7)
+  # Out-String before Trim: if git ever failed here it would emit nothing, and calling .Trim()
+  # on the resulting $null throws — which inside this try block would abort the whole deploy over
+  # a cosmetic date.
+  $commitDate = (git show -s --format=%cI $remoteSha | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0) { $commitDate = '' }   # date is optional; the hash alone still works
+  $env:VCS_REF = $shortSha
+  $env:BUILD_DATE = $commitDate
+  Log "building $shortSha (committed $commitDate)"
+
   docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d --build
   $buildOk = $LASTEXITCODE -eq 0
 
