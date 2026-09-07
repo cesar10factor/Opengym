@@ -137,6 +137,66 @@ export function isCompleteToken(tok) {
   return !!(tok && tok.access && tok.refresh);
 }
 
+/* ---------- upload status classification (T14) ---------- */
+// POST /uploads answering 201 means "accepted for processing", NOT "activity created" — Strava
+// processes the upload asynchronously afterwards and can still destroy the resulting activity
+// (observed live: an upload that got a clean 201 was deleted moments later during processing).
+// The real outcome lives at GET /uploads/{id}, whose body is `{ id, id_str, external_id, error,
+// status, activity_id }`. Two terminal states observed live:
+//   { error: null, status: "The created activity has been deleted.", activity_id: null }
+//   { error: null, status: "Your activity is ready.", activity_id: 20071984970 }
+// The first matters most: `error` is null there too, so "error === null" is NOT a success
+// signal — only a real activity_id is. Strava's own docs list four status strings ("...still
+// being processed.", "...has been deleted.", "There was an error processing your activity.",
+// "...is ready.") and document `error` as populated on other failures — including their own
+// worked example, "Test_Walk.gpx duplicate of activity 21234316" — that neither live sample
+// happened to show.
+//
+// A duplicate is deliberately NOT a failure: it means the activity already exists (Strava is
+// refusing to file a second copy of something it already has), so the honest reading is success
+// — "it is up there, we are done with it". Classifying it as failure instead would 502 the
+// request, skip recordStravaUpload, and the client would retry (and eventually give up on) a
+// workout that was never actually lost. Our own dedup (the workoutId check earlier in the route)
+// is what should have caught this before the retry ever reached Strava anyway — a duplicate this
+// classifier sees is that safety net having already failed once, not a reason to fail again.
+// Strava's docs don't pin the exact phrase as a stable contract, so this matches loosely (a
+// case-insensitive "duplicate" substring) rather than the literal example string, to survive
+// their wording changing.
+//
+// Any OTHER non-empty `error` (malformed file, etc.) is a genuine failure — only "duplicate" is
+// carved out. Pure: given just the parsed JSON body (or null/garbage), no fetch, no timers, no
+// server.js import — so the subtleties that actually bit this app in production are covered
+// directly, with literal bodies, in api/strava.test.js.
+export const UPLOAD_STATUS_SUCCESS = 'success';
+export const UPLOAD_STATUS_FAILURE = 'failure';
+export const UPLOAD_STATUS_UNKNOWN = 'unknown'; // still processing, or a body we don't recognise
+
+// Known terminal-failure status phrases from Strava's own docs. "still being processed" and
+// "is ready" are deliberately NOT here — the former is UNKNOWN (not yet decided), the latter is
+// SUCCESS (decided via activity_id, not via status text, since status text alone is exactly the
+// signal the deleted-activity case proved unreliable).
+const TERMINAL_FAILURE_STATUS_PATTERNS = [
+  /has been deleted/i,
+  /there was an error processing/i
+];
+
+// Loose on purpose (see the block comment above) — not tied to Strava's exact example wording.
+const DUPLICATE_ERROR_PATTERN = /duplicate/i;
+
+export function classifyUploadStatus(body) {
+  if (!body || typeof body !== 'object') return UPLOAD_STATUS_UNKNOWN;
+  const error = typeof body.error === 'string' ? body.error.trim() : '';
+  if (error && DUPLICATE_ERROR_PATTERN.test(error)) return UPLOAD_STATUS_SUCCESS;
+  if (typeof body.activity_id === 'number' && Number.isFinite(body.activity_id) && body.activity_id > 0) {
+    return UPLOAD_STATUS_SUCCESS;
+  }
+  const status = typeof body.status === 'string' ? body.status : '';
+  if (error || TERMINAL_FAILURE_STATUS_PATTERNS.some(re => re.test(status))) {
+    return UPLOAD_STATUS_FAILURE;
+  }
+  return UPLOAD_STATUS_UNKNOWN;
+}
+
 /* ---------- granted scope check ---------- */
 // Strava's consent screen lets the user untick individual permissions; the callback's `scope`
 // query param reports what was actually granted (comma-separated), which can be narrower than

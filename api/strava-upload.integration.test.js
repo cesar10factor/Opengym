@@ -63,10 +63,21 @@ function parseMultipart(contentType, rawBody) {
   return out;
 }
 
+// A handler may return `{ hang: true }` instead of `{ status, body }` — the stub accepts the TCP
+// connection but never writes a response, so the client's own AbortSignal.timeout has to be what
+// gives up. Mirrors api/strava.integration.test.js's HANG convention (see that file), reused here
+// to simulate a poll that never comes back — the "poll itself failed" case the brief requires.
+const HANG = { hang: true };
+
 function createStravaStub() {
   const requests = [];
+  const openSockets = new Set();
   let tokenHandler = () => ({ status: 200, body: { access_token: 'stub_access', refresh_token: 'stub_refresh', expires_at: Math.floor(Date.now() / 1000) + 21600, athlete: { id: 1 } } });
   let uploadHandler = () => ({ status: 201, body: { id: 999, id_str: '999', external_id: null, status: 'Your activity is still being processed.' } });
+  // GET /uploads/{id} — the poll that carries the REAL outcome of a 201. Defaults to "still
+  // processing" so tests that don't care about the poll (older assertions written before this
+  // existed) see the same "record as today" behaviour they always did.
+  let pollHandler = () => ({ status: 200, body: { id: 999, id_str: '999', external_id: null, error: null, status: 'Your activity is still being processed.', activity_id: null } });
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', c => chunks.push(c));
@@ -93,15 +104,22 @@ function createStravaStub() {
       // real 404 in production.
       if (url.pathname === '/oauth/token') result = tokenHandler(record);
       else if (url.pathname === '/api/v3/uploads') result = uploadHandler(record);
+      else if (/^\/api\/v3\/uploads\/[^/]+$/.test(url.pathname) && req.method === 'GET') result = pollHandler(record);
       else result = { status: 404, body: { error: 'stub: unknown path ' + url.pathname } };
+      if (result.hang) return; // deliberately never respond — see HANG above
       res.writeHead(result.status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result.body));
     });
+  });
+  server.on('connection', socket => {
+    openSockets.add(socket);
+    socket.on('close', () => openSockets.delete(socket));
   });
   return {
     requests,
     setTokenHandler(fn) { tokenHandler = fn; },
     setUploadHandler(fn) { uploadHandler = fn; },
+    setPollHandler(fn) { pollHandler = fn; },
     listen() {
       return new Promise((resolve, reject) => {
         server.on('error', reject);
@@ -109,7 +127,13 @@ function createStravaStub() {
       });
     },
     base() { return `http://127.0.0.1:${server.address().port}`; },
-    close() { return new Promise(resolve => server.close(() => resolve())); }
+    close() {
+      // A HANG response never completes on its own — force-destroy any still-open sockets (the
+      // client's own AbortSignal.timeout should have already given up on them) so the stub server
+      // can actually close instead of waiting forever for a connection nobody will finish.
+      for (const s of openSockets) s.destroy();
+      return new Promise(resolve => server.close(() => resolve()));
+    }
   };
 }
 
@@ -232,7 +256,10 @@ describe('POST /api/strava/upload with Strava configured', () => {
     cookie = signCookie(secret, uid);
     freshCookie = signCookie(secret, freshUid);
     proc = spawnServer(dataDir, port, origin, {
-      STRAVA_CLIENT_ID: 'cid', STRAVA_CLIENT_SECRET: 'csecret', STRAVA_API_BASE: stub.base()
+      STRAVA_CLIENT_ID: 'cid', STRAVA_CLIENT_SECRET: 'csecret', STRAVA_API_BASE: stub.base(),
+      // Both shrunk purely to keep this suite fast (same convention as
+      // api/strava.integration.test.js's hang test) — a real deployment leaves both alone.
+      STRAVA_UPLOAD_POLL_DELAY_MS: '20', STRAVA_TIMEOUT_MS: '300'
     });
     await waitReady(origin);
   });
@@ -373,7 +400,9 @@ describe('POST /api/strava/upload with Strava configured', () => {
       body: JSON.stringify({ workoutId: 'w-fails', payload: samplePayload() })
     });
     assert.equal(r2.status, 200);
-    assert.equal(stub.requests.length, before2 + 2, 'the retry after a failure must reach the stub');
+    // +1 for the retry's upload POST, +1 for the post-201 poll GET it now triggers (default
+    // pollHandler answers "still processing", so this records exactly as it always did).
+    assert.equal(stub.requests.length, before2 + 3, 'the retry after a failure must reach the stub (upload POST + status poll GET)');
     const recorded = JSON.parse(fs.readFileSync(uploadsFilePath(uid), 'utf8'));
     assert.ok(recorded.includes('w-fails'), 'the retried, now-successful upload must be recorded');
   });
@@ -409,5 +438,114 @@ describe('POST /api/strava/upload with Strava configured', () => {
       body: ''
     });
     assert.equal(r.status, 400);
+  });
+
+  // T14: the 201 from POST /uploads only means "accepted for processing" — the REAL outcome is
+  // GET /uploads/{id}, polled once after a short delay. These four cases are the full decision
+  // table from the brief: confirmed success, confirmed failure, still processing, and a poll that
+  // itself fails — with only the confirmed-failure case changing behaviour from before this poll
+  // existed (see the "FAILS on the pre-change code" note below).
+  describe('the post-201 poll of GET /uploads/{id}', () => {
+    it('poll confirms SUCCESS (activity_id present) -> recorded, and the response carries the real activity_id', async () => {
+      stub.setUploadHandler(() => ({ status: 201, body: { id: 8001, external_id: null, status: 'Your activity is still being processed.' } }));
+      stub.setPollHandler(() => ({ status: 200, body: { id: 8001, id_str: '8001', external_id: null, error: null, status: 'Your activity is ready.', activity_id: 20071984970 } }));
+
+      const r = await fetch(origin + '/api/strava/upload', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ workoutId: 'w-poll-success', payload: samplePayload() })
+      });
+      assert.equal(r.status, 200);
+      const body = await r.json();
+      assert.equal(body.recorded, true);
+      assert.equal(body.upload.activity_id, 20071984970, 'the confirmed activity_id must reach the response');
+      const recorded = JSON.parse(fs.readFileSync(uploadsFilePath(uid), 'utf8'));
+      assert.ok(recorded.includes('w-poll-success'), 'a confirmed success must be recorded');
+    });
+
+    // A "duplicate of activity N" error means the activity ALREADY EXISTS — Strava is refusing to
+    // file a second copy. Recording nothing here (treating it as a failure) would 502 a workout
+    // that is actually sitting in the user's feed, burn a client retry attempt, and eventually
+    // abandon a workout that was never lost. This must record as a success, no activity_id
+    // required — the poll response never carries one for a duplicate.
+    it('poll reports a DUPLICATE error -> recorded as success (the activity already exists)', async () => {
+      stub.setUploadHandler(() => ({ status: 201, body: { id: 8010, external_id: null, status: 'Your activity is still being processed.' } }));
+      stub.setPollHandler(() => ({ status: 200, body: { id: 8010, id_str: '8010', external_id: null, error: 'opengym-w-poll-dup.json duplicate of activity 21234316', status: 'Your activity is still being processed.', activity_id: null } }));
+
+      const r = await fetch(origin + '/api/strava/upload', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ workoutId: 'w-poll-dup', payload: samplePayload() })
+      });
+      assert.equal(r.status, 200, 'a duplicate must be reported as a normal success, not a 502');
+      const body = await r.json();
+      assert.equal(body.recorded, true, 'a duplicate means the activity already exists — this must be recorded');
+      const recorded = JSON.parse(fs.readFileSync(uploadsFilePath(uid), 'utf8'));
+      assert.ok(recorded.includes('w-poll-dup'), 'a duplicate-reported workout must be recorded, so it is never retried');
+    });
+
+    // The exact live incident from the brief: `error` is null, there is no activity_id, and the
+    // ONLY signal this failed is the status text. This is the case that must NOT be recorded.
+    it('poll confirms FAILURE (activity deleted, error:null) -> NOT recorded, reason surfaced, and a retry reaches the stub again', async () => {
+      stub.setUploadHandler(() => ({ status: 201, body: { id: 8002, external_id: null, status: 'Your activity is still being processed.' } }));
+      stub.setPollHandler(() => ({ status: 200, body: { id: 8002, id_str: '8002', external_id: null, error: null, status: 'The created activity has been deleted.', activity_id: null } }));
+      const before2 = stub.requests.length;
+
+      const r1 = await fetch(origin + '/api/strava/upload', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ workoutId: 'w-poll-deleted', payload: samplePayload() })
+      });
+      assert.equal(r1.status, 502, 'a confirmed-deleted activity must surface as a failed upload, not a 200');
+      const body1 = await r1.json();
+      assert.match(body1.error, /deleted/i, 'the reason must explain WHY it failed');
+      assert.equal(
+        fs.existsSync(uploadsFilePath(uid)) ? JSON.parse(fs.readFileSync(uploadsFilePath(uid), 'utf8')).includes('w-poll-deleted') : false,
+        false,
+        'a workout Strava deleted during processing must NEVER be recorded as uploaded'
+      );
+      // Both the initial POST and the poll GET must have reached the stub.
+      assert.ok(stub.requests.length >= before2 + 2, 'both the upload POST and the status GET must have reached the stub');
+
+      // Not recorded -> a retry of the same workoutId must reach the stub again, not be deduped.
+      stub.setUploadHandler(() => ({ status: 201, body: { id: 8003, external_id: null, status: 'Your activity is still being processed.' } }));
+      stub.setPollHandler(() => ({ status: 200, body: { id: 8003, id_str: '8003', external_id: null, error: null, status: 'Your activity is ready.', activity_id: 8003 } }));
+      const before3 = stub.requests.length;
+      const r2 = await fetch(origin + '/api/strava/upload', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ workoutId: 'w-poll-deleted', payload: samplePayload() })
+      });
+      assert.equal(r2.status, 200);
+      assert.ok(stub.requests.length > before3, 'the retry must actually reach the stub, not be treated as a duplicate');
+      const recorded = JSON.parse(fs.readFileSync(uploadsFilePath(uid), 'utf8'));
+      assert.ok(recorded.includes('w-poll-deleted'), 'the retried, now-successful upload must be recorded');
+    });
+
+    it('poll says STILL PROCESSING -> recorded exactly as before this poll existed (no worse than today)', async () => {
+      stub.setUploadHandler(() => ({ status: 201, body: { id: 8004, external_id: null, status: 'Your activity is still being processed.' } }));
+      stub.setPollHandler(() => ({ status: 200, body: { id: 8004, id_str: '8004', external_id: null, error: null, status: 'Your activity is still being processed.', activity_id: null } }));
+
+      const r = await fetch(origin + '/api/strava/upload', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ workoutId: 'w-poll-processing', payload: samplePayload() })
+      });
+      assert.equal(r.status, 200);
+      const body = await r.json();
+      assert.equal(body.recorded, true, 'still-processing must record, same as today — refusing to record risks a double upload on retry');
+      const recorded = JSON.parse(fs.readFileSync(uploadsFilePath(uid), 'utf8'));
+      assert.ok(recorded.includes('w-poll-processing'));
+    });
+
+    it('the poll itself fails (hangs / times out) -> recorded exactly as before this poll existed', async () => {
+      stub.setUploadHandler(() => ({ status: 201, body: { id: 8005, external_id: null, status: 'Your activity is still being processed.' } }));
+      stub.setPollHandler(() => HANG);
+
+      const r = await fetch(origin + '/api/strava/upload', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ workoutId: 'w-poll-hangs', payload: samplePayload() })
+      });
+      assert.equal(r.status, 200);
+      const body = await r.json();
+      assert.equal(body.recorded, true, 'a poll that itself fails must not regress today\'s behaviour — it records, same as today');
+      const recorded = JSON.parse(fs.readFileSync(uploadsFilePath(uid), 'utf8'));
+      assert.ok(recorded.includes('w-poll-hangs'));
+    });
   });
 });
