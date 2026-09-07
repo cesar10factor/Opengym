@@ -75,7 +75,9 @@ export const useUI = create((set, get) => ({
   },
 
   startRest(sec) {
-    get().stopRest()
+    // `endRest`, not `stopRest`: a rest replacing another is about to reschedule the push two
+    // lines down, and a cancel racing that schedule can call off the new one instead of the old.
+    get().endRest()
     const endsAt = Date.now() + sec * 1000
     set({ timer: { left: sec, total: sec, endsAt } })
     requestRestNotificationPermission()
@@ -88,7 +90,7 @@ export const useUI = create((set, get) => ({
       const snd = useStore.getState().S.sound
       if (left <= 0) {
         beep(snd, 880, 0.15); beep(snd, 880, 0.15, 0.25); beep(snd, 1320, 0.4, 0.5)
-        vibrate([200, 100, 200]); maybeRestNotification(); get().toast(t('Rest over — next set!')); get().stopRest(); return
+        vibrate([200, 100, 200]); maybeRestNotification(); get().toast(t('Rest over — next set!')); get().endRest(); return
       }
       if (left <= 3) beep(snd, 660, 0.1)
       set({ timer: { ...tm, left } })
@@ -106,11 +108,28 @@ export const useUI = create((set, get) => ({
     set({ timer: { ...tm, left, total: tm.total + sec, endsAt: tm.endsAt + sec * 1000 } })
     pushRestTimer(left)
   },
-  stopRest() {
+  /* A rest ends one of two ways and they must not be confused.
+
+     `endRest` is "the clock ran out". The pending server push is deliberately left to fire: with
+     headphones on, that notification — not the WebAudio beep, which competes with the music on
+     the same channel — is the alert actually heard. It used to be cancelled here too, and only
+     sounded because the server won the race against the cancel request; a slightly fast clock
+     would have silenced it with no way to tell.
+
+     `stopRest` is "ended early" — skipped, wound down to zero, workout discarded — where the
+     alert is no longer wanted and the push has to be called off.
+
+     Two entry points rather than one flag, because `<Button onClick={stopRest}>` would hand a
+     positional argument the click event and read it as truthy. */
+  endRest() {
     if (timerInt) clearInterval(timerInt); timerInt = null
     if (timerTick) document.removeEventListener('visibilitychange', timerTick); timerTick = null
-    if (get().timer) cancelPushRestTimer()
     set({ timer: null })
+  },
+  stopRest() {
+    const pending = !!get().timer
+    get().endRest()
+    if (pending) cancelPushRestTimer()
   },
 
   /* ---- work timer (issue #16) ----
