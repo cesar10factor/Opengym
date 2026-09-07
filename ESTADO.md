@@ -252,7 +252,8 @@ lo que hay en él:
 | N2 | Que no vuelva a fallar en silencio: auto-suscripción + timers persistidos | `fix/push-reliability` | **hecho** | `950f750` (539 front + 165 api) |
 | N3 | Payload dual (Declarative Web Push) — habilita iPhone | `feat/declarative-web-push` | **hecho** | `0df4b35` (539 front + 169 api) |
 | N4 | "Qué toca ahora" en la notificación + salto a la app | `feat/next-up-notification` | **hecho** | `63898cd` (564 front + 179 api) |
-| N5 | Aceptación manual (Android ahora, iPhone al cambiar) | — | abierto | — |
+| N5 | Aceptación manual (Android ahora, iPhone al cambiar) | — | **Android confirmado** por el dueño; iPhone pendiente del cambio de móvil | — |
+| NX | Limpieza: borrar `api/n4-baseline/` y `frontend/src/n4-baseline/` | — | abierto | — |
 
 Decisiones del ciclo 4 (no reabrir):
 - **Solo PWA.** Nada de shell nativa: el cambio a iPhone sigue previsto en pocos meses y el
@@ -277,6 +278,15 @@ Decisiones del ciclo 4 (no reabrir):
   deja, no molesta.
 - **No se toca `sound.js`.** Probado en Android: el sonido de la notificación push ya se oye bien
   con cascos, y al dueño le basta. Subir la ganancia del pitido WebAudio era innecesario.
+- **Pendiente NX: sobran `api/n4-baseline/` y `frontend/src/n4-baseline/`.** Son copias que un agente
+  dejó al verificar "esto falla sin mi cambio". Están sin seguir por git, pero **los dos ejecutores
+  de tests las recogen**: con ellas presentes salen 3 fallos en frontend y 1 en api que son falsos
+  positivos (contienen el código viejo a propósito). Para una tanda limpia mientras sigan ahí:
+  `npx vitest run --exclude "**/n4-baseline/**"` y `node --test *.test.js`.
+- **Lo que queda por comprobar en iPhone (N5).** Si las notificaciones de PWA en iOS llegan mudas,
+  es limitación de plataforma y no hay arreglo por vía PWA: las fuentes se contradicen y la
+  documentación de WebKit no menciona sonido. Requisito no negociable: la app **añadida a la
+  pantalla de inicio**; en pestaña de Safari no existe `PushManager`.
 - **La app usa `HashRouter`: el destino es `/#/workout`, no `/workout`.** Equivocarse aquí falla en
   silencio — abre la app en la pantalla de inicio y parece que "casi funciona".
 - **`nextUp()` no lee el puntero `active.cur`.** `Workout.jsx` marca la serie y **luego** arranca el
