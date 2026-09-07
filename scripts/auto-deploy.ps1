@@ -1,6 +1,11 @@
 # Watches origin/main; when it moves, rebuilds and redeploys the local docker compose
-# stack from it. Meant to be run every few minutes from Windows Task Scheduler (see
-# docs/DESPLIEGUE.md for how it's registered).
+# stack from it. Run manually after a push to main:
+#
+#   powershell -File scripts\auto-deploy.ps1
+#
+# Safe to also register as a Windows Scheduled Task (every few minutes, unattended) once
+# this runs on a headless box — see docs/DESPLIEGUE.md §12. Not registered as one on a
+# daily-use PC: Task Scheduler flashes a console window on every tick, which gets old fast.
 #
 # Safety rules, in order:
 #  - Never touches anything if origin/main hasn't moved since the last successful deploy

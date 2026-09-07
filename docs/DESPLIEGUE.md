@@ -170,6 +170,29 @@ fijado (paso 2) y el stack respondiendo (paso 3) — el callback de Strava tiene
 URL real. El `client_secret` no sale nunca del servidor, igual que el fichero `data/secret` que
 firma las cookies de sesión: ni la app cliente ni ninguna respuesta HTTP lo ven jamás.
 
+## 12. Desplegar cambios nuevos (después de un merge a `main`)
+
+Un `git push` a `main` no llega solo al servidor — este es un despliegue por Docker Compose
+construido en la propia máquina (ver paso 3), así que hay que decirle explícitamente que baje lo
+nuevo y reconstruya:
+
+```powershell
+powershell -File scripts\auto-deploy.ps1
+```
+
+Este script hace exactamente eso, a mano: `git fetch`, comprueba que `origin/main` tiene algo
+nuevo y que el árbol de trabajo está limpio, hace `git checkout main` + `git merge --ff-only`,
+reconstruye con `docker compose up -d --build` y vuelve a la rama en la que estabas. Si no hay
+nada nuevo que desplegar, no hace nada. El progreso queda en `.git/auto-deploy/deploy.log`.
+
+**Por qué es manual por ahora:** el script está pensado para correr desde el Programador de
+tareas de Windows sin vigilancia (cada pocos minutos), pero en un PC de uso diario eso abre una
+ventana de consola de fondo constantemente, lo cual molesta. En el mini PC del paso 8, que no se
+usa de forma interactiva, no hay ese problema — ahí sí merece la pena registrar la tarea
+programada (`schtasks /create /tn "OpenGym AutoDeploy" /tr "powershell -NoProfile
+-ExecutionPolicy Bypass -WindowStyle Hidden -File <ruta>\scripts\auto-deploy.ps1" /sc minute /mo
+5`) para que cada merge a `main` se refleje solo, sin tocar nada a mano.
+
 ---
 
 ## Limitaciones conocidas
