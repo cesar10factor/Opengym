@@ -106,6 +106,40 @@ function readStrava(uid) {
 }
 function writeStrava(uid, tok) { atomicWrite(stravaFile(uid), JSON.stringify(tok)); }
 function deleteStrava(uid) { try { fs.unlinkSync(stravaFile(uid)); } catch { /* already gone */ } }
+// Dedup store for uploaded workouts (T12): one file per user, same convention as stravaFile
+// above, holding a plain array of workout ids already sent to Strava. This is deliberately
+// server-side, not client state — client sync is last-writer-wins, which is exactly the wrong
+// place to decide "have I already uploaded this" when a phone can sync the same workout twice
+// (e.g. after a flaky connection retries a request whose response never arrived).
+const stravaUploadsFile = uid => path.join(DATA, 'strava-uploads-' + uid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
+// Returns the recorded ids, [] when the file does not exist yet, or NULL when it exists but
+// cannot be read. That third case must not collapse into [] : an unreadable file would then be
+// rewritten with a single id, silently discarding every previous upload and making the user's
+// whole history re-uploadable. Losing the ability to record one upload beats losing the record.
+function readStravaUploads(uid) {
+  let raw;
+  try { raw = fs.readFileSync(stravaUploadsFile(uid), 'utf8'); }
+  catch (e) { return e.code === 'ENOENT' ? [] : null; }
+  try {
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : null;
+  } catch { return null; }
+}
+function recordStravaUpload(uid, workoutId) {
+  const ids = readStravaUploads(uid);
+  if (ids === null) return false;          // refuse to overwrite what we could not read
+  if (!ids.includes(workoutId)) ids.push(workoutId);
+  atomicWrite(stravaUploadsFile(uid), JSON.stringify(ids));
+  return true;
+}
+// The recorded ids only land after Strava accepts the upload, so between the duplicate check and
+// that write there are two awaits (the token refresh and the upload itself) during which a second
+// request for the same workout would pass the same check and upload it again — precisely the
+// flaky-connection retry this store exists to stop. Reserving the id in memory for the duration
+// closes that window. Memory-only on purpose: a reservation that outlived a crash would block a
+// workout that never actually uploaded.
+const stravaInFlight = new Set();
+const inFlightKey = (uid, workoutId) => uid + ' ' + workoutId;
 // Refreshes the stored token if it's expired (or close enough — see strava.js's REFRESH_MARGIN_MS)
 // and persists the new one. Not called by any route in T11 (there is no upload route yet — T12
 // adds it); kept here so T12 can call it directly rather than re-deriving the exchange call.
@@ -1141,6 +1175,117 @@ if (STRAVA_ENABLED) {
     if (fresh) return json(res, 200, { connected: true, athleteId: fresh.athleteId });
     const stale = readStrava(user.id);
     json(res, 200, { connected: !!stale, athleteId: stale ? stale.athleteId : null });
+  };
+
+  // POST /api/strava/upload (T12): the phone builds the JSON body (frontend/src/lib/
+  // strava-payload.js — it owns the exercise data and the exercise_type mapping), and this route
+  // only attaches the token and forwards it. The client secret never reaches the browser, and the
+  // browser never sees an access/refresh token — same split as every other route in this file.
+  //
+  // Dedup is enforced HERE, not trusted from the client: client sync is last-writer-wins, so a
+  // phone that syncs twice (e.g. a retried request after a flaky connection) must not upload the
+  // same workout twice. The duplicate check runs BEFORE any token refresh or network call — a
+  // repeat upload of an already-recorded workout never reaches Strava at all.
+  //
+  // A failure at Strava (network, timeout, or a non-2xx response) is surfaced with its reason and
+  // the workout id is NEVER recorded — marking on failure would silently lose that workout for
+  // good, since the client only retries what the server hasn't already claimed as done.
+  routes['POST /api/strava/upload'] = async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    const body = await readBody(req);
+    const workoutId = typeof body.workoutId === 'string' ? body.workoutId.trim() : '';
+    const payload = body.payload;
+    if (!workoutId) return json(res, 400, { error: 'workoutId required' });
+    if (!payload || typeof payload !== 'object' || !Array.isArray(payload.sets) || !payload.sets.length) {
+      return json(res, 400, { error: 'invalid payload' });
+    }
+
+    const already = readStravaUploads(user.id);
+    if (already === null) {
+      // Uploading now would risk a duplicate we could never record. Say so rather than guessing.
+      audit(req, 'strava.upload.fail', { ok: false, user, msg: 'uploads-file-unreadable' });
+      return json(res, 500, { error: 'upload history unreadable — not uploading, to avoid a duplicate' });
+    }
+    if (already.includes(workoutId)) return json(res, 200, { ok: true, duplicate: true });
+
+    const key = inFlightKey(user.id, workoutId);
+    if (stravaInFlight.has(key)) return json(res, 200, { ok: true, duplicate: true });
+    stravaInFlight.add(key);
+    try {
+      return await uploadToStrava(req, res, user, workoutId, payload);
+    } finally {
+      stravaInFlight.delete(key);
+    }
+  };
+
+  // Split out only so the reservation above can wrap it in try/finally — everything from the token
+  // refresh onward lives here.
+  async function uploadToStrava(req, res, user, workoutId, payload) {
+    const tok = await ensureFreshStravaToken(user.id);
+    if (!tok) return json(res, 409, { error: 'not connected to strava' });
+
+    let r;
+    try {
+      // /uploads is a multipart/form-data POST: the training document travels as the `file` part,
+      // and data_type and sport_type are sibling FORM FIELDS, not keys inside that document.
+      // Sending the document as a JSON body with those two mixed into it — the shape this started
+      // as — is not a request Strava accepts, and it fails in a way no test against our own stub
+      // can see, because a stub written to match our code agrees with our code by construction.
+      //
+      // Rebuild the document from named fields rather than forwarding the client's object: the
+      // browser is authenticated but the server should not be an open proxy into the caller's own
+      // Strava account, where an injected `name`, `description` or `creator` would land.
+      const doc = {
+        version: '1.0',                      // a string, per the upload docs, not the number 1.0
+        start_time: payload.start_time,
+        utc_offset: payload.utc_offset,
+        elapsed_time: payload.elapsed_time,
+        sets: payload.sets.map(s => {
+          const out = { exercise_type: s.exercise_type };
+          if (typeof s.repetitions === 'number') out.repetitions = s.repetitions;
+          if (typeof s.weight === 'number') out.weight = s.weight;
+          if (typeof s.duration === 'number') out.duration = s.duration;
+          return out;
+        })
+      };
+      const form = new FormData();
+      form.set('file', new Blob([JSON.stringify(doc)], { type: 'application/json' }), 'workout.json');
+      form.set('data_type', 'json');
+      // Which of Strava's four JSON-eligible activity types this is. Every session this app logs
+      // is weight training, so it is a constant rather than something the client gets to choose.
+      // Left unset, Strava guesses from the data, and a strength session filed as something else
+      // defeats the point of uploading it.
+      form.set('sport_type', 'WeightTraining');
+      r = await fetch(STRAVA_API_BASE + '/uploads', {
+        method: 'POST',
+        // No Content-Type here on purpose: fetch derives it from the FormData, including the
+        // multipart boundary. Setting it by hand produces a header with no boundary and a body
+        // Strava cannot parse.
+        headers: { Authorization: 'Bearer ' + tok.access },
+        body: form,
+        signal: AbortSignal.timeout(STRAVA_TIMEOUT_MS)
+      });
+    } catch (e) {
+      audit(req, 'strava.upload.fail', { ok: false, user, msg: 'network-error' });
+      return json(res, 502, { error: 'strava upload failed: ' + e.message });
+    }
+
+    let data = null;
+    try { data = await r.json(); } catch { /* not every response body is JSON */ }
+
+    if (!r.ok) {
+      audit(req, 'strava.upload.fail', { ok: false, user, msg: 'upload-' + r.status });
+      const reason = (data && (data.message || data.error)) || ('strava responded ' + r.status);
+      return json(res, 502, { error: 'strava upload failed: ' + reason });
+    }
+
+    // Strava has it. If the record cannot be written now (the file went unreadable between the
+    // check above and here), say so rather than reporting a clean success: the upload happened and
+    // a later retry WOULD duplicate it, which is the one thing the caller needs to know.
+    const recorded = recordStravaUpload(user.id, workoutId);
+    audit(req, 'strava.uploaded', { user, msg: recorded ? null : 'not-recorded' });
+    json(res, 200, { ok: true, upload: data, recorded });
   };
 }
 
