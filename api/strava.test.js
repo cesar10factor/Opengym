@@ -4,7 +4,8 @@ import crypto from 'node:crypto';
 import {
   STATE_TTL_MS, REFRESH_MARGIN_MS, REQUIRED_SCOPE,
   needsRefresh, createState, signState, verifyStateSig, validateState, burnState, pruneStates,
-  tokenFromExchange, tokenFromRefresh, isCompleteToken, hasRequiredScope
+  tokenFromExchange, tokenFromRefresh, isCompleteToken, hasRequiredScope,
+  classifyUploadStatus, UPLOAD_STATUS_SUCCESS, UPLOAD_STATUS_FAILURE, UPLOAD_STATUS_UNKNOWN
 } from './strava.js';
 
 const SECRET = 'test-secret-do-not-use-in-prod';
@@ -337,5 +338,69 @@ describe('no accidental token/secret leakage — checked against REAL success/fa
     assert.equal(tok.expiresAt, 1000);
     assert.equal(Object.values(tok).filter(v => v === 'SECRET_ACCESS').length, 1);
     assert.equal(Object.values(tok).filter(v => v === 'SECRET_REFRESH').length, 1);
+  });
+});
+
+describe('classifyUploadStatus', () => {
+  it('a real activity_id is success, regardless of status text', () => {
+    const result = classifyUploadStatus({ error: null, status: 'Your activity is ready.', activity_id: 20071984970 });
+    assert.equal(result, UPLOAD_STATUS_SUCCESS);
+  });
+
+  // The exact live sample from the incident this classifier exists to prevent: `error` is null,
+  // there is no activity_id, and the ONLY signal that this failed lives in the status text.
+  // Treating `error === null` as success here is precisely the bug that lost a workout.
+  it('a deleted activity with error:null and no activity_id is a terminal FAILURE, not success', () => {
+    const result = classifyUploadStatus({ error: null, status: 'The created activity has been deleted.', activity_id: null });
+    assert.equal(result, UPLOAD_STATUS_FAILURE);
+  });
+
+  // A duplicate means the activity already exists — Strava is refusing to file a second copy of
+  // something it already has, so this is a SUCCESS (we're done with it), not a failure. Getting
+  // this wrong 502s a workout that is actually sitting in the user's feed, burns a client retry
+  // attempt, and after enough retries abandons a workout that was never lost. Matched loosely
+  // (case-insensitive "duplicate" substring) rather than Strava's exact worked-example wording
+  // ("Test_Walk.gpx duplicate of activity 21234316", per their docs), to survive their phrasing
+  // changing.
+  it('a duplicate-activity error is a SUCCESS (the activity already exists), even with no activity_id', () => {
+    const result = classifyUploadStatus({ error: 'w1.json duplicate of activity 12345', status: 'Your activity is still being processed.', activity_id: null });
+    assert.equal(result, UPLOAD_STATUS_SUCCESS);
+  });
+
+  it("Strava's own documented duplicate wording is a SUCCESS", () => {
+    const result = classifyUploadStatus({ error: 'Test_Walk.gpx duplicate of activity 21234316', status: null, activity_id: null });
+    assert.equal(result, UPLOAD_STATUS_SUCCESS);
+  });
+
+  it('a non-duplicate, non-empty error string (e.g. a malformed file) is still a terminal FAILURE', () => {
+    const result = classifyUploadStatus({ error: 'unable to parse uploaded file', status: 'There was an error processing your activity.', activity_id: null });
+    assert.equal(result, UPLOAD_STATUS_FAILURE);
+  });
+
+  it('the documented generic processing-error status is a terminal FAILURE', () => {
+    const result = classifyUploadStatus({ error: null, status: 'There was an error processing your activity.', activity_id: null });
+    assert.equal(result, UPLOAD_STATUS_FAILURE);
+  });
+
+  it('still processing is UNKNOWN (not yet decided), not a failure', () => {
+    const result = classifyUploadStatus({ error: null, status: 'Your activity is still being processed.', activity_id: null });
+    assert.equal(result, UPLOAD_STATUS_UNKNOWN);
+  });
+
+  it('a malformed/empty/non-object body is UNKNOWN, not a failure', () => {
+    assert.equal(classifyUploadStatus(null), UPLOAD_STATUS_UNKNOWN);
+    assert.equal(classifyUploadStatus(undefined), UPLOAD_STATUS_UNKNOWN);
+    assert.equal(classifyUploadStatus('not an object'), UPLOAD_STATUS_UNKNOWN);
+    assert.equal(classifyUploadStatus({}), UPLOAD_STATUS_UNKNOWN);
+  });
+
+  it('an unrecognised status string with no error and no activity_id is UNKNOWN, not a failure', () => {
+    const result = classifyUploadStatus({ error: null, status: 'Some future status Strava has not documented yet.', activity_id: null });
+    assert.equal(result, UPLOAD_STATUS_UNKNOWN);
+  });
+
+  it('activity_id: 0 or a non-numeric activity_id is not treated as success', () => {
+    assert.equal(classifyUploadStatus({ error: null, status: 'Your activity is ready.', activity_id: 0 }), UPLOAD_STATUS_UNKNOWN);
+    assert.equal(classifyUploadStatus({ error: null, status: 'Your activity is ready.', activity_id: '12345' }), UPLOAD_STATUS_UNKNOWN);
   });
 });
