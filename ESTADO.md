@@ -243,8 +243,48 @@ lo que hay en él:
   añadirlo al `COPY`**, y ningún test lo detectará. Es la razón por la que la Fase A no es
   opcional: fue lo primero que encontró, antes incluso del primer clic.
 
+## Ciclo 4 — notificaciones de entrenamiento (plan: `PLAN-NOTIFICACIONES.md`)
+
+| # | Tarea | Rama | Estado | Commit de merge |
+|---|-------|------|--------|-----------------|
+| N0 | Diagnóstico en el móvil | — | **hecho** | — (sin código, ver decisiones ↓) |
+| N1 | No cancelar la push cuando el descanso termina solo | `fix/rest-push-race` | **hecho** | `5b9db8f` (521 tests) |
+| N2 | Que no vuelva a fallar en silencio: auto-suscripción + timers persistidos | `fix/push-reliability` | abierto | — |
+| N3 | Payload dual (Declarative Web Push) — habilita iPhone | `feat/declarative-web-push` | abierto | — |
+| N4 | "Qué toca ahora" en la notificación + salto a la app | `feat/next-up-notification` | abierto | — |
+| N5 | Aceptación manual (Android ahora, iPhone al cambiar) | — | abierto | — |
+
+Decisiones del ciclo 4 (no reabrir):
+- **Solo PWA.** Nada de shell nativa: el cambio a iPhone sigue previsto en pocos meses y el
+  trabajo Android nativo no se amortizaría. Se acepta que **no habrá barra de descanso viva ni
+  isla de HyperOS 3**: ninguna de las dos existe en la plataforma web.
+- **La causa del "no me entero" era el opt-in apagado**, no un fallo de entrega. `Push
+  notifications` en Ajustes es un interruptor separado de `Sounds`; con él apagado, `sendPush()`
+  no encuentra suscripciones y sale sin error ni traza. Activado, en Android funciona.
+- **El ducking de la música no se programa.** No hay API de audio focus en la web. Lo hace el SO
+  al reproducir el tono de notificación. Por eso la push no es el plan B del pitido: es **el**
+  mecanismo para enterarse con cascos puestos.
+- **Prohibido el patrón de notificación `silent` reemplazada por `tag`**, que era el diseño
+  inicial para "siguiente ejercicio". Safari revoca la suscripción si una push no muestra
+  notificación visible (reportes de corte tras 3), y lo hace en silencio.
+- Por lo anterior, "siguiente ejercicio" y "fin de descanso" se funden en **una sola notificación
+  por descanso**, no una por serie marcada.
+- **El texto de la notificación lo compone el cliente**, no el servidor: el servidor no conoce ni
+  el idioma ni el estado del entreno.
+- El cronómetro **no derivaba**: `startRest` ya usa `endsAt` de reloj de pared y reengancha en
+  `visibilitychange`. No se toca.
+- `navigator.vibrate` no existe en iOS: el `vibrate(30)` al marcar serie no hará nada allí. Se
+  deja, no molesta.
+- **No se toca `sound.js`.** Probado en Android: el sonido de la notificación push ya se oye bien
+  con cascos, y al dueño le basta. Subir la ganancia del pitido WebAudio era innecesario.
+- **El aviso audible depende hoy de una carrera.** `stopRest()` cancela la push del servidor
+  también cuando el descanso termina solo, así que suena únicamente porque el servidor envía antes
+  de que llegue el cancel. N1 lo convierte en garantía: solo se cancela si el descanso se para
+  antes de tiempo.
+
 ## Registro
 
 | Fecha | Qué |
 |-------|-----|
 | 2026-09-04 | Rama `develop` creada desde `main`. `PLAN.md` y `ESTADO.md` escritos. |
+| 2026-09-07 | Ciclo 4 planificado: `PLAN-NOTIFICACIONES.md`. N0 cerrado en el móvil. N1 fusionado. |
