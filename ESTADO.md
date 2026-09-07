@@ -249,7 +249,7 @@ lo que hay en él:
 |---|-------|------|--------|-----------------|
 | N0 | Diagnóstico en el móvil | — | **hecho** | — (sin código, ver decisiones ↓) |
 | N1 | No cancelar la push cuando el descanso termina solo | `fix/rest-push-race` | **hecho** | `5b9db8f` (521 tests) |
-| N2 | Que no vuelva a fallar en silencio: auto-suscripción + timers persistidos | `fix/push-reliability` | abierto | — |
+| N2 | Que no vuelva a fallar en silencio: auto-suscripción + timers persistidos | `fix/push-reliability` | **hecho** | `950f750` (539 front + 165 api) |
 | N3 | Payload dual (Declarative Web Push) — habilita iPhone | `feat/declarative-web-push` | abierto | — |
 | N4 | "Qué toca ahora" en la notificación + salto a la app | `feat/next-up-notification` | abierto | — |
 | N5 | Aceptación manual (Android ahora, iPhone al cambiar) | — | abierto | — |
@@ -277,6 +277,19 @@ Decisiones del ciclo 4 (no reabrir):
   deja, no molesta.
 - **No se toca `sound.js`.** Probado en Android: el sonido de la notificación push ya se oye bien
   con cascos, y al dueño le basta. Subir la ganancia del pitido WebAudio era innecesario.
+- **El opt-out de push vive en `localStorage` (`gym.push.optout`), no en `S`.** Una suscripción Web
+  Push pertenece a **un navegador en un dispositivo**, así que el "lo he apagado a propósito" tiene
+  que tener el mismo ámbito. En `S` viajaría al servidor y a todos los dispositivos vinculados:
+  apagarlo en el móvil lo apagaría en el portátil, y dos dispositivos con el interruptor en
+  posiciones distintas se pisarían por la regla "último gana" de la sincronización.
+- **La auto-reparación no puede revertir una decisión del usuario.** Desuscribirse **no** revoca el
+  permiso del navegador: sin la marca de opt-out, `Notification.permission` sigue en `granted` tras
+  `disablePush()` y el siguiente descanso volvía a suscribir a quien acababa de apagarlo. El
+  interruptor quedaba imposible de apagar. `disablePush()` registra el opt-out lo primero y sin
+  condiciones, antes de cualquier `await`.
+- **Umbral `REST_TIMER_MAX_LATE_MS` = 2 min** para un aviso caducado tras un reinicio del servidor.
+  Un reinicio del contenedor tarda segundos; los descansos duran 60-180 s. Más tarde de eso ya
+  estás en la serie siguiente y el aviso es ruido.
 - **El aviso audible depende hoy de una carrera.** `stopRest()` cancela la push del servidor
   también cuando el descanso termina solo, así que suena únicamente porque el servidor envía antes
   de que llegue el cancel. N1 lo convierte en garantía: solo se cancela si el descanso se para
