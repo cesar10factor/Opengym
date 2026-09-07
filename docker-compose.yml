@@ -36,7 +36,14 @@ services:
   # image: prebuilt (docker compose pull). build: from source (docker compose up --build).
   api:
     image: registry.gitlab.com/duartesantos8/opengym/api:latest
-    build: ./api
+    build:
+      context: ./api
+      # Which commit this image was built from. scripts/auto-deploy.ps1 exports both before
+      # calling compose; anyone building by hand leaves them unset, which interpolates to the
+      # empty string — the app then reports no version instead of a made-up one.
+      args:
+        VCS_REF: ${VCS_REF:-}
+        BUILD_DATE: ${BUILD_DATE:-}
     restart: unless-stopped
     env_file: .env
     environment:
@@ -54,6 +61,11 @@ services:
     build:
       context: .
       dockerfile: web/Dockerfile
+      # Same pair as the api service: here they reach the build stage, so the commit hash ends
+      # up inside the JS bundle (see web/Dockerfile and frontend/vite.config.js).
+      args:
+        VCS_REF: ${VCS_REF:-}
+        BUILD_DATE: ${BUILD_DATE:-}
     restart: unless-stopped
     depends_on:
       media:

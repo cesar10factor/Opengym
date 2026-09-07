@@ -71,6 +71,26 @@ const STRAVA_TIMEOUT_MS = +(process.env.STRAVA_TIMEOUT_MS || 8000) || 8000;
 // the added wait is not noticeable on top of the upload itself. Configurable only for the test
 // suite, same convention as STRAVA_TIMEOUT_MS above — a real deployment should leave it alone.
 const STRAVA_UPLOAD_POLL_DELAY_MS = +(process.env.STRAVA_UPLOAD_POLL_DELAY_MS || 2000) || 2000;
+// Version marker (N6): which commit this container was built from. The image has no .git, so the
+// values arrive as build args promoted to ENV in api/Dockerfile — see docker-compose.yml and
+// scripts/auto-deploy.ps1 for who fills them in. Everything here is optional: an image built
+// without them (a plain `docker compose up --build`, `node server.js` in a checkout) reports
+// nulls, and the Settings screen then shows nothing rather than a placeholder.
+//
+// Both values are validated, not just trimmed, because the Dockerfiles' own ARG defaults are the
+// placeholder strings 'dev' and 'unknown' — printing those as if they were a commit would be
+// worse than printing nothing. A short hash is hex, so 'dev' can never pass ('v' isn't a hex
+// digit); a date has to be one Date.parse understands.
+const versionRef = v => {
+  const s = String(v || '').trim().toLowerCase();
+  return /^[0-9a-f]{7,40}$/.test(s) ? s : null;
+};
+const versionDate = v => {
+  const s = String(v || '').trim();
+  return s && !Number.isNaN(Date.parse(s)) ? s : null;
+};
+const SERVER_VERSION = { ref: versionRef(process.env.VCS_REF), date: versionDate(process.env.BUILD_DATE) };
+
 const MAX_BODY = 5 * 1024 * 1024;
 // Secure cookies require HTTPS; over plain http://localhost the flag would drop the cookie
 const SECURE = /^https:/i.test(ORIGIN) ? ' Secure;' : '';
@@ -91,6 +111,12 @@ db.invites = db.invites || [];
 // starts empty rather than throwing. See api/link.js for the pure logic these back.
 db.links = db.links || [];
 db.linkFails = db.linkFails || [];
+// Scheduled rest-over alerts, one entry `{ uid, at }` per user. Additive like the two above, so an
+// older db.json just starts empty. These live on disk (not only in the in-memory `restTimers` Map)
+// because a container restart mid-rest used to lose the alert outright — and losing it is silent:
+// nothing throws, nothing logs, the user simply never learns their rest ended. See the re-arm block
+// further down, next to scheduleRestTimer/cancelRestTimer.
+db.restTimers = db.restTimers || [];
 const isAdmin = user => !!user && (user.admin === true || ADMIN_UIDS.includes(user.id));
 function saveDb() { atomicWrite(dbFile, JSON.stringify(db, null, 2)); }
 function atomicWrite(file, content) {
@@ -191,10 +217,54 @@ catch { vapid = webpush.generateVAPIDKeys(); fs.writeFileSync(vapidFile, JSON.st
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || (SECURE ? ORIGIN : 'mailto:admin@localhost');
 webpush.setVapidDetails(VAPID_SUBJECT, vapid.publicKey, vapid.privateKey);
 
+/* INVARIANT — every push sent from here MUST result in a user-visible notification.
+   This is not a style preference, it is a platform rule with teeth:
+     - iOS/Safari revokes the push subscription when a delivered push does not show a notification
+       (reports put the cut-off at 3 breaches), and it does so SILENTLY — no error, no event, the
+       endpoint simply stops working and the user never hears another alert.
+     - Chrome enforces the same contract through `userVisibleOnly: true`, which the client already
+       passes when subscribing (frontend/src/lib/push.js), and shows its own "site updated in the
+       background" notification if the service worker shows none.
+   Consequence, binding on anything built on top of sendPush: NO silent/data-only pushes, and no
+   design that relies on a push arriving without painting something. In particular this rules out
+   the "silent notification replaced by tag" pattern for a live next-exercise banner. If you need
+   background state without an alert, it does not go through Web Push. */
+
+/* Where a notification takes you when tapped. Declarative Web Push makes this MANDATORY: Safari
+   paints the notification itself, without ever running the service worker, so there is no code
+   left to decide the destination at click time — it has to travel inside the payload, absolute.
+   Anything unusable (missing, malformed, or pointing off this origin — a notification must never
+   be a redirect to somewhere else) falls back to the app root rather than shipping a broken link. */
+function pushNavigate(target) {
+  const root = new URL('/', ORIGIN).href;
+  if (!target) return root;
+  try {
+    const u = new URL(target, ORIGIN);
+    return u.origin === new URL(ORIGIN).origin ? u.href : root;
+  } catch { return root; }
+}
+
+/* Dual-format payload (Declarative Web Push, Safari 18.4+ / iOS 18.4+). One message serves both:
+     - Safari reads `web_push: 8030` and renders `notification` itself, with no service worker
+       involved at all — which is what makes push work on an iPhone PWA.
+     - Chrome/Android ignores the envelope and goes through sw.js, which reads either shape.
+   `title` and `navigate` are required in declarative mode, so both are always filled in here; the
+   defaults match the ones sw.js applies, so both renderings say the same thing.
+   web-push needs nothing special for this: it already encrypts with the standard aes128gcm
+   (RFC 8291) and WebKit only cares about the decrypted JSON — checked against the library source
+   and WebKit's documentation, there is no content-type or encoding switch to set. */
 async function sendPush(userId, payload) {
   const subs = db.subs.filter(s => s.userId === userId);
   if (!subs.length) return;
-  const body = JSON.stringify(payload);
+  const body = JSON.stringify({
+    web_push: 8030,
+    notification: {
+      title: payload.title || 'openGym',
+      body: payload.body || '',
+      tag: payload.tag || 'opengym',
+      navigate: pushNavigate(payload.navigate)
+    }
+  });
   let dirty = false;
   await Promise.all(subs.map(async sub => {
     // urgency 'high' is the one lever we have over delivery speed — iOS/Android throttle
@@ -216,17 +286,92 @@ async function sendPush(userId, payload) {
 // Rest-timer alerts: client schedules on start/extend, cancels on skip or on-screen completion —
 // this only fires when the tab was backgrounded/suspended and never got to cancel it itself.
 const restTimers = new Map(); // userId -> Timeout
-function scheduleRestTimer(userId, sec) {
+
+/* How late a rest alert may be and still be worth firing after the server was down.
+   A restart of the api container takes seconds, so every normal restart lands well inside this.
+   Rests themselves run 60-180s: an alert up to 2 minutes late still arrives during the same
+   exercise and is the reminder it was meant to be. Past that the user is already mid-next-set or
+   has left the gym, and a stale "rest over" is pure noise — worse, it would break the one-push-
+   per-rest correspondence the notification design depends on. So: fire once if barely late,
+   drop it otherwise. Never fire twice, and never keep it around for the next boot. */
+const REST_TIMER_MAX_LATE_MS = 2 * 60 * 1000;
+
+/* The "what's next" line the client composes (frontend/src/lib/next-up.js) and ships with the
+   schedule request, e.g. "Bench press — set 3/4 · 8 reps × 60 kg". The server never builds it: it
+   knows neither the user's language nor the state of the workout.
+
+   It is USER CONTENT — the exercise name can be one the owner typed — so it is validated and capped
+   here rather than trusted, and it is never interpolated into HTML anywhere: its only destination is
+   the `body` field of a notification payload, which is JSON-encoded plain text. Same treatment on
+   the way back off disk, since db.json is editable by anything with filesystem access.
+   The cap is the server's own and deliberately above the client's NEXT_UP_MAX (140): both phone
+   OSes truncate a notification body long before either number, so this only exists to stop an
+   absurd string bloating db.json and the push payload. */
+const REST_BODY_MAX = 160;
+function sanitizeRestBody(v) {
+  if (typeof v !== 'string') return '';                        // number, object, null — all "absent"
+  // Control characters (newlines included) have no meaning in a notification body and only serve to
+  // break log lines and layouts.
+  return v.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, REST_BODY_MAX);
+}
+const REST_BODY_FALLBACK = 'Time for your next set.';
+
+// Keeps at most one persisted entry per user (`at === null` removes it) — this is the cleanup that
+// stops db.json growing a row per rest ever taken. `body` rides along so a restart mid-rest re-arms
+// an alert that still says what is next, instead of degrading to the generic line.
+function persistRestTimer(userId, at, body = '') {
+  db.restTimers = db.restTimers.filter(r => r.uid !== userId);
+  if (at !== null) db.restTimers.push(body ? { uid: userId, at, body } : { uid: userId, at });
+  saveDb();
+}
+function armRestTimer(userId, delayMs, body = '') {
   const t = restTimers.get(userId);
   if (t) clearTimeout(t);
   restTimers.set(userId, setTimeout(() => {
     restTimers.delete(userId);
-    sendPush(userId, { title: 'Rest over 💪', body: 'Time for your next set.', tag: 'rest-timer' });
-  }, sec * 1000));
+    // Drop the persisted entry BEFORE sending: a crash mid-send must not leave a row that a later
+    // boot would re-arm and fire a second time.
+    persistRestTimer(userId, null);
+    sendPush(userId, {
+      title: 'Rest over 💪',
+      body: body || REST_BODY_FALLBACK,
+      tag: 'rest-timer',
+      // The app is a HashRouter (frontend/src/App.jsx), so the workout screen is /#/workout —
+      // "/workout" would 404 into the app root and look like the deep link almost worked.
+      navigate: '/#/workout'
+    });
+  }, Math.max(0, delayMs)));
+}
+function scheduleRestTimer(userId, sec, body = '') {
+  const at = Date.now() + sec * 1000;
+  persistRestTimer(userId, at, body);
+  armRestTimer(userId, sec * 1000, body);
 }
 function cancelRestTimer(userId) {
   const t = restTimers.get(userId);
   if (t) { clearTimeout(t); restTimers.delete(userId); }
+  if (db.restTimers.some(r => r.uid === userId)) persistRestTimer(userId, null);
+}
+
+// Re-arm the rests that were pending when the process last stopped. Placed here rather than up with
+// the db.links pruning because `restTimers` is a const declared just above — reading it earlier
+// would hit the temporal dead zone. Same write discipline as the links pruning: only touch disk if
+// something actually changed, so a read-only db.json still boots.
+{
+  const now = Date.now();
+  const kept = [];
+  for (const r of db.restTimers) {
+    if (!r || typeof r.uid !== 'string' || !Number.isFinite(r.at)) continue; // malformed row, drop
+    const late = now - r.at;
+    // Re-sanitized rather than trusted: this came off disk, and a row with a non-string or
+    // control-character body must degrade to the generic text, not into the payload.
+    const body = sanitizeRestBody(r.body);
+    if (late <= 0) { kept.push(r); armRestTimer(r.uid, r.at - now, body); }
+    else if (late <= REST_TIMER_MAX_LATE_MS) { kept.push(r); armRestTimer(r.uid, 0, body); }
+    // else: too stale to be useful — dropped, never fired.
+  }
+  if (kept.length !== db.restTimers.length) { db.restTimers = kept; saveDb(); }
+  else db.restTimers = kept;
 }
 
 // "Workout planned today" reminder — one per user per day, at their chosen time.
@@ -488,7 +633,10 @@ if (AUDIT_ON) {
 
 /* ---------- routes ---------- */
 const routes = {
-  'GET /api/health': async (req, res) => json(res, 200, { ok: true, users: db.users.length }),
+  // `ok` and `users` are load-bearing (the Dockerfile HEALTHCHECK probes this route, and every
+  // integration suite waits on it), so `version` is purely additive. Its shape is constant —
+  // `{ ref, date }` with nulls when unknown — so a client never has to branch on the key existing.
+  'GET /api/health': async (req, res) => json(res, 200, { ok: true, users: db.users.length, version: SERVER_VERSION }),
 
   // Public config the login screen needs before anyone is signed in.
   'GET /api/config': async (req, res) => json(res, 200, { invite_only: INVITE_ONLY, allow_guest: ALLOW_GUEST }),
@@ -899,7 +1047,9 @@ const routes = {
     const body = await readBody(req);
     const sec = Math.max(1, Math.min(3600, Math.round(+body.seconds || 0)));
     if (!sec) return json(res, 400, { error: 'seconds required' });
-    scheduleRestTimer(user.id, sec);
+    // `body` is the client-composed "what's next" line; absent, empty or not a string all mean
+    // "nothing to announce" and fall back to the generic text inside armRestTimer.
+    scheduleRestTimer(user.id, sec, sanitizeRestBody(body.body));
     json(res, 200, { ok: true });
   },
 

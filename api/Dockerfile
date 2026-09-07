@@ -29,6 +29,14 @@ RUN rm -f *.test.js
 
 ENV NODE_ENV=production
 ENV PORT=3000
+# The image has no .git, so the only way the running process can name the commit it was built
+# from is for the build to hand it over. The ARGs above already exist for the OCI labels, but an
+# ARG is build-time only — promoting them to ENV is what makes them readable from server.js
+# (GET /api/health reports them). Their ARG defaults ('dev'/'unknown') are placeholders for
+# "nobody passed one" and server.js rejects anything that isn't a real commit hash, so an
+# un-parameterised `docker build` reports no version rather than a fake one.
+ENV VCS_REF=$VCS_REF
+ENV BUILD_DATE=$BUILD_DATE
 
 EXPOSE 3000
 CMD ["node", "server.js"]

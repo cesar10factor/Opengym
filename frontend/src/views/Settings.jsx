@@ -9,7 +9,7 @@ import { formatCode, remaining } from '../lib/link.js'
 import { canRemove, deviceLabel } from '../lib/devices.js'
 import { pushSupported, enablePush, disablePush, sendTestPush } from '../lib/push.js'
 import { wakeLockSupported } from '../lib/wakelock.js'
-import { t, LANGS, INSTR_LANGS } from '../lib/i18n.js'
+import { t, LANGS, INSTR_LANGS, dateLocale } from '../lib/i18n.js'
 import { DEMO, REPO } from '../lib/demo.js'
 import { MOBILE, shareExport, syncReminder } from '../lib/mobile.js'
 import { loadStarterPlan, confirmSheet, importFromApp } from '../sheets.jsx'
@@ -215,7 +215,73 @@ export default function Settings() {
       <a href="https://gitlab.com/DuarteSantos8/opengym" target="_blank" rel="noopener">source code</a> · exercise data: hasaneyldrm/exercises-dataset (MIT)<br />
       exercise images and animations © <a href="https://gymvisual.com/" target="_blank" rel="noopener">Gym visual</a>
     </div>
+
+    {/* Last thing on the screen, on purpose: it is a reference you go looking for, not something
+        to read on the way past. */}
+    <VersionMarker />
   </div>
+}
+
+/* ---------- version marker (N6) ----------------------------------------------------------
+   Answers "is this the build I deployed?" from the phone, without an SSH session. Two versions
+   are involved and they are not the same thing: the BUNDLE running in this browser (baked in at
+   build time by vite.config.js) and the SERVER answering /api/health. A PWA's service worker can
+   serve a months-old bundle against a server updated minutes ago, and that gap is exactly the
+   confusion this exists to remove — so when they disagree, both are shown. */
+
+// A commit hash or nothing. The Dockerfiles' ARG defaults are the placeholders 'dev'/'unknown'
+// and an unparameterised build leaves the values empty, so this validates rather than trims:
+// showing 'dev' where a hash belongs would be worse than showing no version row at all. Mirrors
+// versionRef/versionDate in api/server.js — same rule on both sides, so the two are comparable.
+export function normalizeVersion(v) {
+  const ref = String(v?.ref || '').trim().toLowerCase()
+  if (!/^[0-9a-f]{7,40}$/.test(ref)) return null
+  const raw = String(v?.date || '').trim()
+  const date = raw && !Number.isNaN(Date.parse(raw)) ? raw : null
+  return { ref, date }
+}
+
+// What to print, given the two (possibly unknown) versions. Pure, so the rule is testable without
+// rendering: nothing known → nothing shown; both known and equal → one unlabelled line, because
+// two identical lines would only invite reading a difference into them; otherwise one labelled
+// line each, and `mismatch` only when both are known and actually differ (one side merely being
+// unknown is not evidence of a mismatch).
+export function versionRows(bundle, server) {
+  const b = normalizeVersion(bundle)
+  const s = normalizeVersion(server)
+  if (b && s && b.ref === s.ref) return { rows: [{ key: 'both', ...b }], mismatch: false }
+  const rows = []
+  if (b) rows.push({ key: 'app', ...b })
+  if (s) rows.push({ key: 'server', ...s })
+  return { rows, mismatch: !!(b && s) }
+}
+
+// Human-readable and language-aware — a raw ISO timestamp is for machines. dateLocale() is the
+// same source the rest of the app formats dates from, so this follows the language setting.
+const fmtVersionDate = iso => new Date(iso).toLocaleDateString(dateLocale(), { day: 'numeric', month: 'short', year: 'numeric' })
+
+const versionLabel = key => (key === 'app' ? t('App') : key === 'server' ? t('Server') : t('Version'))
+
+function VersionMarker() {
+  // null until /api/health answers, and stays null forever if it never does (offline, the demo,
+  // the native build) — one line for the bundle is still worth more than nothing.
+  const [server, setServer] = useState(null)
+  useEffect(() => {
+    if (MOBILE) return                       // native build: no server to ask
+    api('/api/health').then(h => setServer(h?.version || null)).catch(() => {})
+  }, [])
+
+  const { rows, mismatch } = versionRows({ ref: __VCS_REF__, date: __BUILD_DATE__ }, server)
+  if (!rows.length) return null              // built without the build args: show nothing at all
+
+  return (
+    <div className="dim small" style={{ textAlign: 'center', marginTop: 10, lineHeight: 1.6 }}>
+      {rows.map(r => (
+        <div key={r.key}>{versionLabel(r.key)} {r.ref}{r.date ? ' · ' + fmtVersionDate(r.date) : ''}</div>
+      ))}
+      {mismatch && <div>{t('App and server are on different builds — close openGym and open it again.')}</div>}
+    </div>
+  )
 }
 
 // The whole point is that the two scales are one judgement counted from opposite ends, and a

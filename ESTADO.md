@@ -243,8 +243,106 @@ lo que hay en él:
   añadirlo al `COPY`**, y ningún test lo detectará. Es la razón por la que la Fase A no es
   opcional: fue lo primero que encontró, antes incluso del primer clic.
 
+## Ciclo 4 — notificaciones de entrenamiento (plan: `PLAN-NOTIFICACIONES.md`)
+
+| # | Tarea | Rama | Estado | Commit de merge |
+|---|-------|------|--------|-----------------|
+| N0 | Diagnóstico en el móvil | — | **hecho** | — (sin código, ver decisiones ↓) |
+| N1 | No cancelar la push cuando el descanso termina solo | `fix/rest-push-race` | **hecho** | `5b9db8f` (521 tests) |
+| N2 | Que no vuelva a fallar en silencio: auto-suscripción + timers persistidos | `fix/push-reliability` | **hecho** | `950f750` (539 front + 165 api) |
+| N3 | Payload dual (Declarative Web Push) — habilita iPhone | `feat/declarative-web-push` | **hecho** | `0df4b35` (539 front + 169 api) |
+| N4 | "Qué toca ahora" en la notificación + salto a la app | `feat/next-up-notification` | **hecho** | `63898cd` (564 front + 179 api) |
+| N5 | Aceptación manual (Android ahora, iPhone al cambiar) | — | **abierto** — la prueba del 2026-09-07 se hizo contra la versión vieja (nada estaba desplegado), así que **no vale**. Repetir tras el despliegue | — |
+| N6 | Marcador de versión (hash + fecha) en `/api/health` y al pie de Ajustes | `feat/version-marker` | **hecho** | `93a067e` (574 front + 183 api) |
+| NX | Limpieza: borrar `api/n4-baseline/` y `frontend/src/n4-baseline/` | — | abierto | — |
+| ND | **Desplegar: `develop` → `main`.** Nada del ciclo 4 está publicado | — | abierto | — |
+
+Decisiones del ciclo 4 (no reabrir):
+- **Solo PWA.** Nada de shell nativa: el cambio a iPhone sigue previsto en pocos meses y el
+  trabajo Android nativo no se amortizaría. Se acepta que **no habrá barra de descanso viva ni
+  isla de HyperOS 3**: ninguna de las dos existe en la plataforma web.
+- **La causa del "no me entero" era el opt-in apagado**, no un fallo de entrega. `Push
+  notifications` en Ajustes es un interruptor separado de `Sounds`; con él apagado, `sendPush()`
+  no encuentra suscripciones y sale sin error ni traza. Activado, en Android funciona.
+- **El ducking de la música no se programa.** No hay API de audio focus en la web. Lo hace el SO
+  al reproducir el tono de notificación. Por eso la push no es el plan B del pitido: es **el**
+  mecanismo para enterarse con cascos puestos.
+- **Prohibido el patrón de notificación `silent` reemplazada por `tag`**, que era el diseño
+  inicial para "siguiente ejercicio". Safari revoca la suscripción si una push no muestra
+  notificación visible (reportes de corte tras 3), y lo hace en silencio.
+- Por lo anterior, "siguiente ejercicio" y "fin de descanso" se funden en **una sola notificación
+  por descanso**, no una por serie marcada.
+- **El texto de la notificación lo compone el cliente**, no el servidor: el servidor no conoce ni
+  el idioma ni el estado del entreno.
+- El cronómetro **no derivaba**: `startRest` ya usa `endsAt` de reloj de pared y reengancha en
+  `visibilitychange`. No se toca.
+- `navigator.vibrate` no existe en iOS: el `vibrate(30)` al marcar serie no hará nada allí. Se
+  deja, no molesta.
+- **No se toca `sound.js`.** Probado en Android: el sonido de la notificación push ya se oye bien
+  con cascos, y al dueño le basta. Subir la ganancia del pitido WebAudio era innecesario.
+- **Pendiente ND: el ciclo 4 NO está desplegado.** `auto-deploy.ps1` vigila `origin/main`, y todo
+  el ciclo vive en `develop`. Lo último servido es `76f89fc` (17:56 del 2026-09-07), anterior a N1.
+  Para publicar: `develop` → `main`, push, y `powershell -File scripts\auto-deploy.ps1`. Ojo: el
+  script **se salta el despliegue si el árbol está sucio**, y `plans/` tiene cambios sin commitear.
+- **`ARG` es de ámbito de etapa.** En `web/Dockerfile` los `ARG` estaban en la etapa `nginx`, así
+  que la etapa `build` (donde corre `npm run build`) no los veía: hay que declararlos otra vez
+  allí, y después de `COPY frontend/ ./` para no invalidar la capa de `npm ci` en cada commit.
+- **El marcador de versión se valida, no se recorta.** Los defaults de los `ARG` existentes son
+  `dev`/`unknown`, así que un test hexadecimal los rechaza y una construcción sin parametrizar no
+  muestra versión en vez de inventarse una.
+- **Dos líneas en Ajustes significan bundle y servidor desparejados**, que en una PWA es el service
+  worker sirviendo un bundle viejo contra un servidor nuevo. Es la señal útil, no un fallo.
+- **Pendiente NX: sobran `api/n4-baseline/` y `frontend/src/n4-baseline/`.** Son copias que un agente
+  dejó al verificar "esto falla sin mi cambio". Están sin seguir por git, pero **los dos ejecutores
+  de tests las recogen**: con ellas presentes salen 3 fallos en frontend y 1 en api que son falsos
+  positivos (contienen el código viejo a propósito). Para una tanda limpia mientras sigan ahí:
+  `npx vitest run --exclude "**/n4-baseline/**"` y `node --test *.test.js`.
+- **Lo que queda por comprobar en iPhone (N5).** Si las notificaciones de PWA en iOS llegan mudas,
+  es limitación de plataforma y no hay arreglo por vía PWA: las fuentes se contradicen y la
+  documentación de WebKit no menciona sonido. Requisito no negociable: la app **añadida a la
+  pantalla de inicio**; en pestaña de Safari no existe `PushManager`.
+- **La app usa `HashRouter`: el destino es `/#/workout`, no `/workout`.** Equivocarse aquí falla en
+  silencio — abre la app en la pantalla de inicio y parece que "casi funciona".
+- **`nextUp()` no lee el puntero `active.cur`.** `Workout.jsx` marca la serie y **luego** arranca el
+  descanso, avanzando `cur` después: una respuesta basada en el cursor anunciaría la serie que
+  acaba de terminar. Camina las series en el orden real de ejecución (round-robin en superserie) y
+  numera los calentamientos dentro de su propia fase, para que el número coincida con la fila que
+  se ve en pantalla.
+- **El cuerpo de la notificación es contenido de usuario** (el nombre del ejercicio lo puede haber
+  escrito el dueño). El servidor lo valida y recorta **dos veces**: al entrar y al rearmar desde
+  disco, porque `db.json` es un fichero editable.
+- **`web-push` no necesita nada especial para el modo declarativo.** Ya cifra en `aes128gcm`
+  (RFC 8291) y WebKit solo mira el JSON descifrado: basta con que lleve `web_push: 8030`. No hay
+  content-type ni encoding que conmutar. Comprobado contra la fuente de la librería.
+- **`navigate` es obligatorio y absoluto, y va dentro del payload.** Bajo el pintado declarativo de
+  Safari no se ejecuta el service worker, así que no queda código que decida el destino en el
+  momento del clic. `pushNavigate()` exige mismo origen y repliega a la raíz: una notificación
+  nunca puede convertirse en un redirect a otro sitio.
+- **`sw.js` lee las dos formas, en ambos sentidos.** Un service worker ya instalado puede ser más
+  viejo que el servidor que le envía, o más nuevo que uno sin redesplegar. El caso "SW viejo +
+  servidor nuevo" se degrada a "openGym" con cuerpo vacío: peor, pero **visible**, así que el
+  invariante de iOS se respeta y Chrome actualiza el SW en la primera navegación.
+- **El opt-out de push vive en `localStorage` (`gym.push.optout`), no en `S`.** Una suscripción Web
+  Push pertenece a **un navegador en un dispositivo**, así que el "lo he apagado a propósito" tiene
+  que tener el mismo ámbito. En `S` viajaría al servidor y a todos los dispositivos vinculados:
+  apagarlo en el móvil lo apagaría en el portátil, y dos dispositivos con el interruptor en
+  posiciones distintas se pisarían por la regla "último gana" de la sincronización.
+- **La auto-reparación no puede revertir una decisión del usuario.** Desuscribirse **no** revoca el
+  permiso del navegador: sin la marca de opt-out, `Notification.permission` sigue en `granted` tras
+  `disablePush()` y el siguiente descanso volvía a suscribir a quien acababa de apagarlo. El
+  interruptor quedaba imposible de apagar. `disablePush()` registra el opt-out lo primero y sin
+  condiciones, antes de cualquier `await`.
+- **Umbral `REST_TIMER_MAX_LATE_MS` = 2 min** para un aviso caducado tras un reinicio del servidor.
+  Un reinicio del contenedor tarda segundos; los descansos duran 60-180 s. Más tarde de eso ya
+  estás en la serie siguiente y el aviso es ruido.
+- **El aviso audible depende hoy de una carrera.** `stopRest()` cancela la push del servidor
+  también cuando el descanso termina solo, así que suena únicamente porque el servidor envía antes
+  de que llegue el cancel. N1 lo convierte en garantía: solo se cancela si el descanso se para
+  antes de tiempo.
+
 ## Registro
 
 | Fecha | Qué |
 |-------|-----|
 | 2026-09-04 | Rama `develop` creada desde `main`. `PLAN.md` y `ESTADO.md` escritos. |
+| 2026-09-07 | Ciclo 4 planificado: `PLAN-NOTIFICACIONES.md`. N0 cerrado en el móvil. N1 fusionado. |

@@ -172,6 +172,11 @@ export default {
   'Freestyle workout — add your first exercise.': 'Entrenamiento libre — añade tu primer ejercicio.',
   'Finish workout early · {0} exercises': 'Terminar antes · {0} ejercicios',
   'Rest over — next set!': '¡Descanso terminado — siguiente serie!',
+  // Pieces of the rest-over notification body (frontend/src/lib/next-up.js), Spanish only —
+  // every other pack falls back to the English key, as t() does for any missing string.
+  'set {0}/{1}': 'serie {0}/{1}',
+  'warm-up {0}/{1}': 'calentamiento {0}/{1}',
+  '{0} reps': '{0} reps',
   'Hi {0}': 'Hola {0}',
   'This week': 'Esta semana',
   '{0} — in progress': '{0} — en curso',
@@ -594,5 +599,9 @@ export default {
   'secondary': 'secundario',
   'No exercises with an estimated 1RM yet.': 'Aún no hay ejercicios con 1RM estimado.',
   'Tap a muscle to see its exercises.': 'Toca un músculo para ver sus ejercicios.',
-  'Unpair': 'Desvincular'
+  'Unpair': 'Desvincular',
+  'Version': 'Versión',
+  'App': 'App',
+  'Server': 'Servidor',
+  'App and server are on different builds — close openGym and open it again.': 'La app y el servidor tienen versiones distintas: cierra openGym y vuelve a abrirla.'
 }
