@@ -252,7 +252,7 @@ lo que hay en él:
 | N2 | Que no vuelva a fallar en silencio: auto-suscripción + timers persistidos | `fix/push-reliability` | **hecho** | `950f750` (539 front + 165 api) |
 | N3 | Payload dual (Declarative Web Push) — habilita iPhone | `feat/declarative-web-push` | **hecho** | `0df4b35` (539 front + 169 api) |
 | N4 | "Qué toca ahora" en la notificación + salto a la app | `feat/next-up-notification` | **hecho** | `63898cd` (564 front + 179 api) |
-| N5 | Aceptación manual (Android ahora, iPhone al cambiar) | — | **Android confirmado** por el dueño; iPhone pendiente del cambio de móvil | — |
+| N5 | Aceptación manual (Android ahora, iPhone al cambiar) | — | **abierto** — la prueba del 2026-09-07 se hizo contra la versión vieja (nada estaba desplegado), así que **no vale**. Repetir tras el despliegue | — |
 | N6 | Marcador de versión (hash + fecha) en `/api/health` y al pie de Ajustes | `feat/version-marker` | **hecho** | `93a067e` (574 front + 183 api) |
 | NX | Limpieza: borrar `api/n4-baseline/` y `frontend/src/n4-baseline/` | — | abierto | — |
 | ND | **Desplegar: `develop` → `main`.** Nada del ciclo 4 está publicado | — | abierto | — |
