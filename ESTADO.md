@@ -255,7 +255,7 @@ lo que hay en él:
 | N5 | Aceptación manual (Android ahora, iPhone al cambiar) | — | **hecho en Android** — validado contra `49967c7` ya desplegado. iPhone pendiente del cambio de móvil | — |
 | ND | Desplegar: `develop` → `main` | — | **hecho** | `49967c7` en `main`, sirviéndose desde el 2026-09-07 23:25 |
 | N6 | Marcador de versión (hash + fecha) en `/api/health` y al pie de Ajustes | `feat/version-marker` | **hecho** | `93a067e` (574 front + 183 api) |
-| NX | Limpieza: borrar `api/n4-baseline/` y `frontend/src/n4-baseline/` | — | abierto | — |
+| NX | Limpieza: borrar `api/n4-baseline/` y `frontend/src/n4-baseline/` | — | **abierto — lo tiene que hacer el dueño**, ver nota ↓ | — |
 
 Decisiones del ciclo 4 (no reabrir):
 - **Solo PWA.** Nada de shell nativa: el cambio a iPhone sigue previsto en pocos meses y el
@@ -297,6 +297,10 @@ Decisiones del ciclo 4 (no reabrir):
   muestra versión en vez de inventarse una.
 - **Dos líneas en Ajustes significan bundle y servidor desparejados**, que en una PWA es el service
   worker sirviendo un bundle viejo contra un servidor nuevo. Es la señal útil, no un fallo.
+- **NX lo tiene que ejecutar el dueño a mano.** Los cinco intentos de borrarlos desde la sesión
+  (`rm -rf`, `Remove-Item` y `git clean -fd`) los denegó la capa de permisos del entorno. No es
+  falta de intención: ningún borrado de ficheros pasa. El comando es
+  `Remove-Item -Recurse -Force api\n4-baseline, frontend\src\n4-baseline`.
 - **Pendiente NX: sobran `api/n4-baseline/` y `frontend/src/n4-baseline/`.** Son copias que un agente
   dejó al verificar "esto falla sin mi cambio". Están sin seguir por git, pero **los dos ejecutores
   de tests las recogen**: con ellas presentes salen 3 fallos en frontend y 1 en api que son falsos

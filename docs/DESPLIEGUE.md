@@ -185,6 +185,68 @@ nuevo y que el árbol de trabajo está limpio, hace `git checkout main` + `git m
 reconstruye con `docker compose up -d --build` y vuelve a la rama en la que estabas. Si no hay
 nada nuevo que desplegar, no hace nada. El progreso queda en `.git/auto-deploy/deploy.log`.
 
+### Procedimiento completo, en orden
+
+El script **solo mira `origin/main`**. Trabajar en `develop` y dar por hecho que eso despliega es
+el error que cuesta horas, así que la secuencia entera es:
+
+```powershell
+# 1. El árbol tiene que estar LIMPIO — ficheros sin seguir incluidos
+git status --porcelain            # no debe imprimir NADA
+
+# 2. Llevar el trabajo a main (el script no mira develop)
+git checkout main
+git merge --no-ff develop -m "merge: <qué entra>"
+git push origin main
+
+# 3. Desplegar
+powershell -File scripts\auto-deploy.ps1
+```
+
+### Las dos formas de que "no pase nada" sin enterarte
+
+1. **El trabajo sigue en `develop`.** Fusionado, con los tests en verde, subido — y sin desplegar.
+   El script no lo mira siquiera. No hay aviso: simplemente sigues usando la versión anterior.
+2. **El árbol está sucio.** El script comprueba `git status --porcelain`, y eso **incluye ficheros
+   sin seguir** (un directorio temporal olvidado basta). En ese caso se salta el despliegue y lo
+   dice solo en `.git/auto-deploy/deploy.log`. Un despliegue que no hizo nada es indistinguible
+   de uno que no lanzaste salvo mirando ese fichero.
+
+Por eso el paso de verificación no es opcional.
+
+### Verificar que se desplegó de verdad
+
+```powershell
+Get-Content .git\auto-deploy\deploy.log -Tail 3       # ¿"deploy OK" o "skipping"?
+(Invoke-RestMethod http://localhost:8080/api/health).version
+```
+
+`version` devuelve `{ref, date}` con el commit que está sirviendo el servidor. Si `ref` no coincide
+con `git rev-parse --short origin/main`, no se desplegó.
+
+**Desde el móvil**, sin tocar el PC: al final del todo de Ajustes aparece el hash y la fecha.
+
+- **Una línea** → bundle y servidor coinciden, estás al día.
+- **Dos líneas** (`App` / `Servidor`) → el service worker te está sirviendo un bundle viejo contra
+  un servidor ya actualizado. Cierra la app y vuelve a abrirla; no hace falta reinstalar la PWA.
+- **Ninguna línea** → la imagen se construyó sin los build args de versión (un `docker compose up
+  --build` a pelo, en vez del script). Se muestra nada antes que un valor inventado.
+
+### Si hay que desplegar con el árbol sucio
+
+Solo cuando sepas exactamente qué está sucio y por qué. Salta la comprobación del script haciendo
+a mano lo que él haría, con los mismos build args:
+
+```powershell
+$sha = (git rev-parse origin/main).Trim()
+$env:VCS_REF = $sha.Substring(0,7)
+$env:BUILD_DATE = ((git show -s --format=%cI $sha) | Out-String).Trim()
+docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d --build
+```
+
+Si lo haces así, actualiza también `.git/auto-deploy/last-sha` con ese `$sha`, o la siguiente
+ejecución del script creerá que hay algo pendiente que en realidad ya está servido.
+
 **Por qué es manual por ahora:** el script está pensado para correr desde el Programador de
 tareas de Windows sin vigilancia (cada pocos minutos), pero en un PC de uso diario eso abre una
 ventana de consola de fondo constantemente, lo cual molesta. En el mini PC del paso 8, que no se
