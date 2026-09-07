@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useStore, DEF, hasData } from '../store/useStore.js'
+import { useStore, DEF, hasData, forgetStravaConnection } from '../store/useStore.js'
 import { useUI } from '../store/useUI.js'
 import { ACCENTS, todayISO, localTZ } from '../lib/format.js'
 import { effortOf } from '../lib/history.js'
-import { api, webauthnOK, passkeyLogin, passkeyRegister, linkCode, listDevices, removeDevice, IS_ANDROID } from '../lib/api.js'
+import { api, webauthnOK, passkeyLogin, passkeyRegister, linkCode, listDevices, removeDevice, stravaStatus, stravaDisconnect, IS_ANDROID } from '../lib/api.js'
 import { formatCode, remaining } from '../lib/link.js'
 import { canRemove, deviceLabel } from '../lib/devices.js'
 import { pushSupported, enablePush, disablePush, sendTestPush } from '../lib/push.js'
@@ -109,6 +109,10 @@ export default function Settings() {
 
     {/* ---------- devices: see and revoke the passkeys on this profile ---------- */}
     {user && <DevicesCard toast={toast} />}
+
+    {/* ---------- strava: only for a signed-in profile, and only when the server has the
+        feature configured (StravaCard itself renders nothing until it knows that) ---------- */}
+    {user && <StravaCard toast={toast} />}
 
     {/* ---------- general ---------- */}
     <Section title={t('General')} footer={t('Note: switching units only changes the label — logged numbers are not converted.')}>
@@ -406,6 +410,65 @@ function DevicesCard({ toast }) {
           </Row>
         )
       })}
+    </Section>
+  )
+}
+
+// A real 404 from THIS server's own dispatcher — the one that fires when a route simply isn't
+// registered, exactly what an instance with no STRAVA_CLIENT_ID/SECRET produces for every
+// /api/strava/* path (api/server.js: `if (!handler) return json(res, 404, { error: 'not found' })`,
+// the same fallback every unknown route gets). api.js's api() sets e.message from the response's
+// own `error` field when the body parses as JSON, and falls back to a bare 'HTTP <status>' when
+// it doesn't (e.g. an HTML 404 page from a misconfigured reverse proxy in front of this server).
+// Requiring BOTH the status and that exact message is what tells "this instance doesn't do
+// Strava" apart from "something in front of this server returned an unrelated 404" — the latter
+// must not be read as "unconfigured, hide forever" (review fix, 2026-09-07).
+const isUnconfiguredStrava = e => !!e && e.status === 404 && e.message === 'not found'
+
+// Connect/status/disconnect for Strava auto-upload (T13). Only ever mounted for a signed-in
+// profile (see the call site above); on top of that it renders nothing at all — not even an
+// empty section — while loading, while genuinely unconfigured, AND while the status check simply
+// failed for some other reason (offline, a proxy hiccup, an unrelated 404). That last case used
+// to be folded into "configured" with connected:false, which painted a "Connect Strava" row that
+// could never work while offline — `configured` is a tri-state (true/false/null) precisely so
+// "don't know" never gets treated as "yes, and not connected" (review fix, 2026-09-07). Unlike
+// DevicesCard, which always has something to show once signed in, Strava is optional per
+// instance and its status check can fail in ways that mean nothing at all — so silence is the
+// only safe default here, not an error message.
+function StravaCard({ toast }) {
+  const [state, setState] = useState({ loading: true, configured: null, connected: false })
+
+  const load = () => {
+    setState(s => ({ ...s, loading: true }))
+    stravaStatus()
+      .then(r => setState({ loading: false, configured: true, connected: !!r.connected }))
+      .catch(e => setState({ loading: false, configured: isUnconfiguredStrava(e) ? false : null, connected: false }))
+  }
+  useEffect(load, [])
+
+  if (state.loading || state.configured !== true) return null
+
+  const disconnect = () => confirmSheet({
+    title: t('Disconnect Strava?'),
+    message: t('openGym will stop uploading finished workouts to your Strava account. Anything already there stays.'),
+    confirmText: t('Disconnect'), danger: true,
+    onConfirm: async () => {
+      try { await stravaDisconnect(); forgetStravaConnection(); toast(t('Disconnected from Strava')); load() }
+      catch (e) { toast(e.message || t('Could not disconnect from Strava')) }
+    },
+  })
+
+  return (
+    <Section title={t('Strava')}>
+      {state.connected ? <>
+        <Row icon="link" iconTint="var(--orange)" title={t('Connected to Strava')}
+          subtitle={t('Finished workouts upload automatically.')} />
+        <Row icon="signOut" iconTint="var(--red)" title={t('Disconnect')} danger onClick={disconnect} />
+      </> : (
+        <Row icon="link" iconTint="var(--orange)" title={t('Connect Strava')}
+          subtitle={t('Upload finished workouts automatically.')} accessory="chevron"
+          onClick={() => { window.location.href = '/api/strava/connect' }} />
+      )}
     </Section>
   )
 }
