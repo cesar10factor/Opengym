@@ -250,7 +250,7 @@ lo que hay en él:
 | N0 | Diagnóstico en el móvil | — | **hecho** | — (sin código, ver decisiones ↓) |
 | N1 | No cancelar la push cuando el descanso termina solo | `fix/rest-push-race` | **hecho** | `5b9db8f` (521 tests) |
 | N2 | Que no vuelva a fallar en silencio: auto-suscripción + timers persistidos | `fix/push-reliability` | **hecho** | `950f750` (539 front + 165 api) |
-| N3 | Payload dual (Declarative Web Push) — habilita iPhone | `feat/declarative-web-push` | abierto | — |
+| N3 | Payload dual (Declarative Web Push) — habilita iPhone | `feat/declarative-web-push` | **hecho** | `0df4b35` (539 front + 169 api) |
 | N4 | "Qué toca ahora" en la notificación + salto a la app | `feat/next-up-notification` | abierto | — |
 | N5 | Aceptación manual (Android ahora, iPhone al cambiar) | — | abierto | — |
 
@@ -277,6 +277,17 @@ Decisiones del ciclo 4 (no reabrir):
   deja, no molesta.
 - **No se toca `sound.js`.** Probado en Android: el sonido de la notificación push ya se oye bien
   con cascos, y al dueño le basta. Subir la ganancia del pitido WebAudio era innecesario.
+- **`web-push` no necesita nada especial para el modo declarativo.** Ya cifra en `aes128gcm`
+  (RFC 8291) y WebKit solo mira el JSON descifrado: basta con que lleve `web_push: 8030`. No hay
+  content-type ni encoding que conmutar. Comprobado contra la fuente de la librería.
+- **`navigate` es obligatorio y absoluto, y va dentro del payload.** Bajo el pintado declarativo de
+  Safari no se ejecuta el service worker, así que no queda código que decida el destino en el
+  momento del clic. `pushNavigate()` exige mismo origen y repliega a la raíz: una notificación
+  nunca puede convertirse en un redirect a otro sitio.
+- **`sw.js` lee las dos formas, en ambos sentidos.** Un service worker ya instalado puede ser más
+  viejo que el servidor que le envía, o más nuevo que uno sin redesplegar. El caso "SW viejo +
+  servidor nuevo" se degrada a "openGym" con cuerpo vacío: peor, pero **visible**, así que el
+  invariante de iOS se respeta y Chrome actualiza el SW en la primera navegación.
 - **El opt-out de push vive en `localStorage` (`gym.push.optout`), no en `S`.** Una suscripción Web
   Push pertenece a **un navegador en un dispositivo**, así que el "lo he apagado a propósito" tiene
   que tener el mismo ámbito. En `S` viajaría al servidor y a todos los dispositivos vinculados:
