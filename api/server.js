@@ -12,7 +12,8 @@ import webpush from 'web-push';
 import { createLink, validateLink, burnLink, pruneLinks, recordFailure, isThrottled } from './link.js';
 import {
   createState, signState, validateState, burnState, pruneStates,
-  needsRefresh, tokenFromExchange, tokenFromRefresh, isCompleteToken, hasRequiredScope
+  needsRefresh, tokenFromExchange, tokenFromRefresh, isCompleteToken, hasRequiredScope,
+  classifyUploadStatus, UPLOAD_STATUS_SUCCESS, UPLOAD_STATUS_FAILURE
 } from './strava.js';
 
 const PORT = +(process.env.PORT || 3000);
@@ -62,6 +63,14 @@ const STRAVA_API_V3_BASE = STRAVA_API_BASE + '/api/v3';
 // Configurable only so the test suite can shrink it to keep the "Strava hangs" test fast — a real
 // deployment should leave this at its default.
 const STRAVA_TIMEOUT_MS = +(process.env.STRAVA_TIMEOUT_MS || 8000) || 8000;
+// A 201 from POST /uploads means "accepted for processing", not "activity created" — Strava can
+// still destroy the activity during async processing afterwards (see uploadToStrava below). This
+// is how long to wait before the ONE follow-up poll of GET /uploads/{id} that checks whether that
+// already happened. 2s is "a couple of seconds": long enough that a small JSON manual-entry
+// activity (no GPS/streams to crunch) has usually moved off "still processing", short enough that
+// the added wait is not noticeable on top of the upload itself. Configurable only for the test
+// suite, same convention as STRAVA_TIMEOUT_MS above — a real deployment should leave it alone.
+const STRAVA_UPLOAD_POLL_DELAY_MS = +(process.env.STRAVA_UPLOAD_POLL_DELAY_MS || 2000) || 2000;
 const MAX_BODY = 5 * 1024 * 1024;
 // Secure cookies require HTTPS; over plain http://localhost the flag would drop the cookie
 const SECURE = /^https:/i.test(ORIGIN) ? ' Secure;' : '';
@@ -1215,8 +1224,24 @@ if (STRAVA_ENABLED) {
     }
     if (already.includes(workoutId)) return json(res, 200, { ok: true, duplicate: true });
 
+    // A collision with a request already in flight for this exact workoutId is NOT the same
+    // thing as "already uploaded" — it means "still being decided", and since T14 that window
+    // is no longer ~0s: the request in flight may be 2s (poll delay) + up to STRAVA_TIMEOUT_MS
+    // (the poll itself) away from an answer, during which it can still end in a genuine failure
+    // (a deleted activity) that records nothing. Answering this the same way as the `already`
+    // branch above — 200 { ok: true, duplicate: true } — would have the caller mark the workout
+    // uploaded before that outcome is even known, which is wrong whenever the in-flight request
+    // goes on to fail. A non-2xx response here is deliberately NOT treated as "done" by the one
+    // caller in this codebase (frontend/src/lib/api.js's api() throws on any non-ok response,
+    // and store/useStore.js only calls markStravaUploaded on success) — it lands as a real,
+    // counted attempt with a quiet retry-later toast instead, same as any other failed upload.
+    // That's the closest fit available without changing the client (a silent "come back in a
+    // few seconds, don't count this against maxAttempts" response would need frontend awareness
+    // of a new response shape — flagged, not built here; see the PR notes).
     const key = inFlightKey(user.id, workoutId);
-    if (stravaInFlight.has(key)) return json(res, 200, { ok: true, duplicate: true });
+    if (stravaInFlight.has(key)) {
+      return json(res, 409, { error: 'an upload for this workout is already in progress — try again shortly', inFlight: true });
+    }
     stravaInFlight.add(key);
     try {
       return await uploadToStrava(req, res, user, workoutId, payload);
@@ -1255,8 +1280,27 @@ if (STRAVA_ENABLED) {
           return out;
         })
       };
+      // The file part's filename becomes this upload's external_id unless overridden — Strava's own
+      // docs: "data filename will be used by default but should be a unique identifier", and it is
+      // this id, not the 201 from POST /uploads, that Strava uses to recognise (or reject) an
+      // activity during its async processing. A constant name here ("workout.json" on every
+      // upload) means every upload shares one external_id: once the first activity under that id is
+      // deleted, Strava associates the identifier itself with "deleted" and immediately kills every
+      // later upload that reuses it — silently, since /uploads still answers 201 either way.
+      //
+      // workoutId is the stable, per-activity identifier this route already has (assigned once,
+      // client-side, when the workout is created — see frontend/src/lib/format.js#uid). Deriving
+      // the filename from it means a RETRY of the same failed workout keeps the same external_id
+      // (so Strava can recognise a retried upload rather than filing a duplicate), while two
+      // different workouts always get two different ones. A timestamp or random value at upload
+      // time would satisfy uniqueness too, but would mint a fresh external_id on every retry and
+      // give up that recognition for no benefit.
+      //
+      // Sanitised because workoutId rides in from the client as a free-form string (only checked
+      // for non-empty), and it is about to become both a filename and a multipart header value.
+      const safeWorkoutId = workoutId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 200) || 'workout';
       const form = new FormData();
-      form.set('file', new Blob([JSON.stringify(doc)], { type: 'application/json' }), 'workout.json');
+      form.set('file', new Blob([JSON.stringify(doc)], { type: 'application/json' }), `opengym-${safeWorkoutId}.json`);
       form.set('data_type', 'json');
       // Which of Strava's four JSON-eligible activity types this is. Every session this app logs
       // is weight training, so it is a constant rather than something the client gets to choose.
@@ -1286,12 +1330,60 @@ if (STRAVA_ENABLED) {
       return json(res, 502, { error: 'strava upload failed: ' + reason });
     }
 
-    // Strava has it. If the record cannot be written now (the file went unreadable between the
-    // check above and here), say so rather than reporting a clean success: the upload happened and
-    // a later retry WOULD duplicate it, which is the one thing the caller needs to know.
+    // The 201 above only means "Strava accepted this for processing" — NOT "the activity exists".
+    // Processing is async and can still destroy the activity afterwards (observed live: a 201'd
+    // upload was deleted moments later). GET /uploads/{id} carries the real outcome, so poll it
+    // ONCE — after a short delay, inside its own bounded timeout, no retry loop — and use the
+    // result ONLY to decide whether to record. Anything short of a clear answer (still processing,
+    // or the poll itself failing) records exactly as before: that's no worse than today's
+    // behaviour, and refusing to record something Strava may still accept would risk uploading the
+    // same workout twice on the client's next retry.
+    let finalData = data;
+    let pollBody = null;
+    let verdict = null; // null covers "no id to poll" and "poll inconclusive" alike
+    if (data && data.id != null) {
+      await new Promise(resolve => setTimeout(resolve, STRAVA_UPLOAD_POLL_DELAY_MS));
+      try {
+        const pollRes = await fetch(STRAVA_API_V3_BASE + '/uploads/' + encodeURIComponent(data.id), {
+          headers: { Authorization: 'Bearer ' + tok.access },
+          signal: AbortSignal.timeout(STRAVA_TIMEOUT_MS)
+        });
+        if (pollRes.ok) {
+          try { pollBody = await pollRes.json(); } catch { /* not every response body is JSON */ }
+          verdict = classifyUploadStatus(pollBody);
+          // Only replace the response's `upload` body on a confirmed success — that's the one case
+          // where the poll body is strictly more informative (it carries the real activity_id).
+          // Anything else (still processing, or a failure handled separately below) keeps
+          // reporting the original 201 body, unchanged from before this poll existed.
+          if (verdict === UPLOAD_STATUS_SUCCESS) finalData = pollBody;
+        }
+        // A non-2xx poll response is treated the same as a poll that threw: inconclusive, falls
+        // through to "record as today" below.
+      } catch (e) {
+        // Network error or the poll's own timeout — inconclusive, not a failure of the upload
+        // itself. Falls through to "record as today".
+        audit(req, 'strava.upload.poll-failed', { ok: false, user, msg: e.message });
+      }
+    }
+
+    if (verdict === UPLOAD_STATUS_FAILURE) {
+      // Strava accepted the 201 and then killed the activity during processing. Do NOT record —
+      // the client must retry this workout later — and surface why, same error shape as a
+      // rejected 201 above. The reason comes from the POLL body (the real outcome), never from
+      // the original 201 body, which only ever said "accepted" or "still processing".
+      audit(req, 'strava.upload.fail', { ok: false, user, msg: 'poll-failure' });
+      const reason = (pollBody && (pollBody.error || pollBody.status)) || 'strava deleted the created activity during processing';
+      return json(res, 502, { error: 'strava upload failed: ' + reason });
+    }
+
+    // Terminal success (activity_id confirmed), still processing, or an inconclusive/failed poll
+    // all land here — every one of those records exactly as before this change. If the record
+    // cannot be written now (the file went unreadable between the check above and here), say so
+    // rather than reporting a clean success: the upload happened and a later retry WOULD duplicate
+    // it, which is the one thing the caller needs to know.
     const recorded = recordStravaUpload(user.id, workoutId);
     audit(req, 'strava.uploaded', { user, msg: recorded ? null : 'not-recorded' });
-    json(res, 200, { ok: true, upload: data, recorded });
+    json(res, 200, { ok: true, upload: finalData, recorded });
   };
 }
 

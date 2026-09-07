@@ -119,7 +119,9 @@ Lecciones que valen para cualquier retoque futuro del mapeo:
 
 **Resultado de T11:** las cuatro rutas de OAuth, con el token por perfil en `./data`. Variables
 `STRAVA_CLIENT_ID` y `STRAVA_CLIENT_SECRET`; sin ambas, las rutas dan 404 de verdad.
-Dos ganchos solo para pruebas, documentados como tales: `STRAVA_API_BASE` y `STRAVA_TIMEOUT_MS`.
+Tres ganchos solo para pruebas, documentados como tales: `STRAVA_API_BASE`, `STRAVA_TIMEOUT_MS` y
+`STRAVA_UPLOAD_POLL_DELAY_MS` (este último, T14: la espera antes del único sondeo de
+`GET /uploads/{id}` que confirma si un 201 sobrevivió al procesado asíncrono de Strava).
 
 Decisiones de T11 que conviene no deshacer:
 - **Todas las llamadas salientes llevan timeout (8 s).** Node no pone ninguno por defecto. Que
