@@ -209,10 +209,42 @@ webpush.setVapidDetails(VAPID_SUBJECT, vapid.publicKey, vapid.privateKey);
    design that relies on a push arriving without painting something. In particular this rules out
    the "silent notification replaced by tag" pattern for a live next-exercise banner. If you need
    background state without an alert, it does not go through Web Push. */
+
+/* Where a notification takes you when tapped. Declarative Web Push makes this MANDATORY: Safari
+   paints the notification itself, without ever running the service worker, so there is no code
+   left to decide the destination at click time — it has to travel inside the payload, absolute.
+   Anything unusable (missing, malformed, or pointing off this origin — a notification must never
+   be a redirect to somewhere else) falls back to the app root rather than shipping a broken link. */
+function pushNavigate(target) {
+  const root = new URL('/', ORIGIN).href;
+  if (!target) return root;
+  try {
+    const u = new URL(target, ORIGIN);
+    return u.origin === new URL(ORIGIN).origin ? u.href : root;
+  } catch { return root; }
+}
+
+/* Dual-format payload (Declarative Web Push, Safari 18.4+ / iOS 18.4+). One message serves both:
+     - Safari reads `web_push: 8030` and renders `notification` itself, with no service worker
+       involved at all — which is what makes push work on an iPhone PWA.
+     - Chrome/Android ignores the envelope and goes through sw.js, which reads either shape.
+   `title` and `navigate` are required in declarative mode, so both are always filled in here; the
+   defaults match the ones sw.js applies, so both renderings say the same thing.
+   web-push needs nothing special for this: it already encrypts with the standard aes128gcm
+   (RFC 8291) and WebKit only cares about the decrypted JSON — checked against the library source
+   and WebKit's documentation, there is no content-type or encoding switch to set. */
 async function sendPush(userId, payload) {
   const subs = db.subs.filter(s => s.userId === userId);
   if (!subs.length) return;
-  const body = JSON.stringify(payload);
+  const body = JSON.stringify({
+    web_push: 8030,
+    notification: {
+      title: payload.title || 'openGym',
+      body: payload.body || '',
+      tag: payload.tag || 'opengym',
+      navigate: pushNavigate(payload.navigate)
+    }
+  });
   let dirty = false;
   await Promise.all(subs.map(async sub => {
     // urgency 'high' is the one lever we have over delivery speed — iOS/Android throttle
