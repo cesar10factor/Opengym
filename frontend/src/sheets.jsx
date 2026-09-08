@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { useStore } from './store/useStore.js'
+import { useStore, isUploadedToStrava } from './store/useStore.js'
+import { stravaStatus } from './lib/api.js'
 import { useUI } from './store/useUI.js'
 import { EXDB, EXIDX, BODYPARTS, isCardio, isBodyweightEq, allExercises, equipmentOf, smOf, matchesQuery } from './lib/exercises.js'
 import { fmtDate, fmtNum, fmtVol, fmtDur, durPart, todayISO, uid, exCount, DAYN, MONTHS_LONG, ACCENTS } from './lib/format.js'
@@ -844,6 +845,36 @@ function DayAssign({ day, close }) {
 export const dayAssignSheet = day => ui().openSheet(close => <DayAssign day={day} close={close} />)
 
 /* ============================ workout detail ============================ */
+/* Sends one past workout to Strava by hand. Hidden unless the profile is actually connected —
+   offering a button that cannot work is worse than not offering one — and the connection is
+   probed once when the sheet opens rather than kept in the store, since it only matters here.
+   Deliberately still offered for a workout this device thinks it already sent: that cache can be
+   wrong (another device, cleared storage), and the server refuses a real duplicate on its own. */
+function StravaUploadButton({ w }) {
+  const [connected, setConnected] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [done, setDone] = useState(() => isUploadedToStrava(w.id))
+  useEffect(() => {
+    let alive = true
+    stravaStatus().then(s => { if (alive) setConnected(!!(s && s.connected)) }).catch(() => {})
+    return () => { alive = false }
+  }, [])
+  if (!connected) return null
+  const go = async () => {
+    setBusy(true)
+    const r = await useStore.getState().uploadWorkoutToStrava(w.id)
+    setBusy(false)
+    if (r === 'failed') return toast(t('Could not upload that workout to Strava.'))
+    setDone(true)
+    toast(r === 'duplicate' ? t('That workout was already on Strava.') : t('Uploaded to Strava'))
+  }
+  return <div style={{ marginBottom: 8 }}>
+    <Button icon="upload" disabled={busy} onClick={go}>
+      {busy ? t('Uploading…') : done ? t('Upload to Strava again') : t('Upload to Strava')}
+    </Button>
+  </div>
+}
+
 function WorkoutDetail({ w, close }) {
   const st = useStore(s => s.S)
   return <>
@@ -857,6 +888,7 @@ function WorkoutDetail({ w, close }) {
           <div className="ss">{e.sets.filter(s => s.done).map(s => setLabel(e.id, s, e.target)).join('  ·  ') || t('no sets')}</div></div>
       </div>
     })}
+    <StravaUploadButton w={w} />
     <Button variant="danger" onClick={() => confirmSheet({ title: t('Delete workout?'), message: t('This removes it from your history for good.'), confirmText: t('Delete'), danger: true, onConfirm: () => { update(s => { s.workouts = s.workouts.filter(x => x.id !== w.id) }); close(); toast(t('Workout deleted')) } })}>{t('Delete workout')}</Button>
   </>
 }

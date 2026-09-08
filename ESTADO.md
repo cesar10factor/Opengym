@@ -349,6 +349,34 @@ Decisiones del ciclo 4 (no reabrir):
   de que llegue el cancel. N1 lo convierte en garantía: solo se cancela si el descanso se para
   antes de tiempo.
 
+## Ciclo 5 — fallos encontrados entrenando (2026-09-08)
+
+| # | Tarea | Rama | Estado | Commit de merge |
+|---|-------|------|--------|-----------------|
+| B1 | El buscador de ejercicios tumbaba la pantalla | `fix/search-crash-custom-exercises` | **hecho** | `9d46ea3` (588 tests), desplegado en `cfa61fd` |
+| B2 | Strava: no sube y "conectar" da error | — | **abierto** — falta el mensaje de error exacto | — |
+| M1 | Mejora futura: añadir ejercicios a rutinas | — | **abierto, sin especificar** — el dueño dirá qué quiere | — |
+
+Hallazgos del ciclo 5 (no reabrir):
+
+- **B1, causa raíz: `mergePlan` escribía ejercicios personalizados incompletos.** Solo ponía
+  `id`/`n`/`bp`/`desc`, dejando `tg` y `eq` en `undefined`, mientras que el formulario de creación
+  siempre escribió la forma completa. Los dos buscadores (biblioteca y selector de "añadir a
+  rutina") compartían por copia la expresión `e.tg.includes(ql) || e.eq.includes(ql)`, con solo
+  `desc` protegido — así que importar un plan envenenaba el catálogo y la siguiente tecla lanzaba
+  `TypeError` al *error boundary*. **Confirmado en datos reales:** el perfil `ZOI4Pp…` tenía dos
+  filas así (`Dorsiflexión de tobillo en pared`, `Dominadas excéntricas`).
+- **`allExercises` normaliza al leer**, así que los perfiles ya dañados se reparan solos sin
+  migración ni tocar el estado sincronizado.
+- **Faltaba también `custom: true`** en las filas importadas: sin esa marca la hoja de detalle
+  oculta "Editar o borrar", así que un ejercicio importado tampoco se podía eliminar.
+- **La expresión vieja comparaba `tg` y `eq` en crudo** contra una consulta ya pasada a minúsculas:
+  esos dos campos eran, en la práctica, no buscables. `matchesQuery` los normaliza.
+- **B2 no es un fallo de Strava, son dos perfiles distintos.** `zRC-V…` (creado el 4 sept, 5
+  entrenos, perfil de pruebas) tiene Strava conectado; `ZOI4Pp…` (creado el 7 sept, **271
+  entrenos**, el que se usa de verdad) no. Por eso Ajustes dice que no está conectado y no se subió
+  nada. Los "dos dispositivos" son las 2 passkeys del perfil, y eso sí es normal.
+
 ## Registro
 
 | Fecha | Qué |

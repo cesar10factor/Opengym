@@ -262,6 +262,13 @@ export default {
   'Disconnected from Strava': 'Desconectado de Strava',
   'Could not disconnect from Strava': 'No se pudo desconectar Strava',
   'Could not upload to Strava — will retry later.': 'No se pudo subir a Strava — se reintentará más tarde.',
+  // Manual upload of a past workout — the way past the connection watermark.
+  'Upload to Strava': 'Subir a Strava',
+  'Upload to Strava again': 'Volver a subir a Strava',
+  'Uploading…': 'Subiendo…',
+  'Uploaded to Strava': 'Subido a Strava',
+  'That workout was already on Strava.': 'Ese entrenamiento ya estaba en Strava.',
+  'Could not upload that workout to Strava.': 'No se pudo subir ese entrenamiento a Strava.',
   'Could not upload that workout to Strava. It will not be tried again.': 'No se pudo subir ese entrenamiento a Strava. No se volverá a intentar.',
   'Guest mode — data lives only in this browser. Create a passkey profile to keep it safe and separate per person.': 'Modo invitado — los datos viven solo en este navegador. Crea un perfil con passkey para protegerlos y separarlos por persona.',
   'Create passkey profile': 'Crear perfil con passkey',

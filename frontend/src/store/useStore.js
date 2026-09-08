@@ -91,6 +91,10 @@ const ensureStravaWatermark = () => {
 // while disconnected are treated the same as older history: they stay put, not auto-uploaded in
 // a burst the moment the profile reconnects.
 export function forgetStravaConnection() { localStorage.removeItem(STRAVA_WATERMARK_KEY) }
+// Whether this device believes a workout already went up. A local cache, not the truth — the
+// server is the dedup authority — so it decides what a button *offers*, never what it is allowed
+// to do. If it is wrong, the upload comes back as a duplicate and nothing is sent twice.
+export function isUploadedToStrava(id) { return loadStravaUploaded().has(id) }
 
 // Drops cache entries for workout ids that no longer exist locally (deleted, or wiped by
 // "Reset everything" / a backup restore) — otherwise they accumulate forever. Cheap: bounded by
@@ -263,6 +267,28 @@ export const useStore = create((set, get) => {
       // session-scoped "don't bother asking" verdict does not carry across a sign-in.
       stravaProbe = null
       set({ user: u })
+    },
+
+    /* Upload one past workout on demand.
+
+       The automatic path deliberately never touches anything finished before the connection
+       watermark, so that connecting Strava does not dump an imported history onto someone's
+       feed. That is right, but it left no way back: a workout logged before you connected — or
+       one that spent its three automatic attempts — could never be uploaded at all. This is
+       that way back, and it is the only path that may cross the watermark, because here a person
+       asked for this specific workout by name.
+
+       Resolves 'uploaded' | 'duplicate' | 'failed' rather than throwing: the caller is a button
+       that has to say what happened either way. The server is the dedup authority and answers
+       200 {duplicate:true} without ever calling Strava, so pressing this twice is harmless. */
+    async uploadWorkoutToStrava(id) {
+      const w = (get().S.workouts || []).find(x => x.id === id)
+      if (!w || !(w.entries || []).length) return 'failed'
+      try {
+        const r = await stravaUpload(w.id, buildStravaPayload(w, EXIDX, get().S.unit))
+        markStravaUploaded(w.id)   // also stops the automatic pass from reconsidering it
+        return r && r.duplicate ? 'duplicate' : 'uploaded'
+      } catch (e) { return 'failed' }
     },
 
     async pushState() {
