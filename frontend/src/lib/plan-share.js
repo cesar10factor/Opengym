@@ -117,7 +117,10 @@ export function mergePlan(s, bundle, { schedule } = {}) {
     if (same) { exIdMap[c.id] = same.id; return }
     const nid = uid()
     exIdMap[c.id] = nid
-    s.customEx.push({ id: nid, n: c.n, bp: c.bp, ...(c.desc ? { desc: c.desc } : {}) })
+    // Same shape the create form writes (sheets.jsx). It used to stop at id/n/bp/desc, which left
+    // `tg`/`eq` undefined and crashed both search boxes on the first keystroke, and dropped
+    // `custom` so the exercise could no longer be edited or deleted.
+    s.customEx.push({ id: nid, n: c.n, bp: c.bp, tg: '', eq: 'custom', custom: true, ...(c.desc ? { desc: c.desc } : {}) })
   })
   const ridMap = {}
   bundle.routines.forEach(r => {
