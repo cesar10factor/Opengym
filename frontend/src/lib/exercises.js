@@ -43,8 +43,36 @@ export function registerCustom(list) {
   customIds = (list || []).map(e => e.id)
   ;(list || []).forEach(e => { EXIDX[e.id] = e })
 }
+/* A custom exercise is only guaranteed to carry an id, a name and a body part. The create form
+   fills in `tg`/`eq`/`custom` too, but the plan importer never did, so a plan shared between
+   profiles brought in rows missing them — and any search then threw on `e.tg.includes(...)`,
+   blanking the screen. Normalising here rather than at each use closes it for every reader at
+   once, and repairs rows already sitting in a synced profile without needing a migration.
+   `custom: true` is part of it: without that flag the detail sheet hides "Edit or delete this
+   exercise", so an imported custom exercise could not be removed. */
+export const normalizeCustom = e => ({
+  ...e,
+  n: typeof e.n === 'string' ? e.n : '',
+  bp: typeof e.bp === 'string' ? e.bp : '',
+  tg: typeof e.tg === 'string' ? e.tg : '',
+  eq: typeof e.eq === 'string' ? e.eq : 'custom',
+  custom: true
+})
+
 // Full searchable catalogue — customs first so your own exercises are easy to find.
-export const allExercises = st => [...(st.customEx || []), ...EXDB]
+export const allExercises = st => [...(st.customEx || []).filter(e => e && e.id).map(normalizeCustom), ...EXDB]
+
+/* Does one exercise match a lowercased, trimmed query? Shared by the library screen and the
+   add-to-routine picker, which each carried their own copy of this expression and so had to be
+   fixed twice for the same crash. Every field is treated as possibly absent: the catalogue is
+   complete today, but user-created and imported rows are not, and a search box must never be
+   able to take the screen down. */
+export const matchesQuery = (e, ql) => {
+  if (!ql) return true
+  if (!e) return false
+  const has = v => typeof v === 'string' && v.toLowerCase().includes(ql)
+  return has(e.n) || has(e.tg) || has(e.eq) || has(e.desc)
+}
 
 // Media normally sits next to the app (img/ and gif/, mounted into the web container).
 // A build can point them somewhere else — the demo build pulls them off a CDN instead of
