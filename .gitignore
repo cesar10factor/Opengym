@@ -4,6 +4,9 @@ media/gif/
 
 # Runtime data — users, passkeys, per-user state, session secret
 data/
+# Copies of the above taken before a risky change. Same contents, same secrets, so they must be
+# just as uncommittable — and an untracked directory here also makes auto-deploy skip the deploy.
+data-backup-*/
 
 # Local config
 .env
