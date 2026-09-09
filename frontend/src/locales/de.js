@@ -100,6 +100,11 @@ export default {
   'This removes the exercise from your current session.': 'Dadurch wird die Übung aus deiner aktuellen Einheit entfernt.',
   'Remove': 'Entfernen',
   'Which exercise in this superset do you want to remove?': 'Welche Übung in diesem Supersatz möchtest du entfernen?',
+  'Replace exercise': 'Übung ersetzen',
+  'Replace': 'Ersetzen',
+  'Replace {0}?': '{0} ersetzen?',
+  'Which exercise in this superset do you want to replace?': 'Welche Übung in diesem Supersatz möchtest du ersetzen?',
+  'Replaced {0} with {1}': '{0} durch {1} ersetzt',
   'Pick an icon': 'Symbol auswählen',
   // --- day planning / calendar ---
   'Back to weekly plan': 'Zurück zum Wochenplan',

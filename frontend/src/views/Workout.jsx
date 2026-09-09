@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useStore } from '../store/useStore.js'
 import { useUI } from '../store/useUI.js'
 import { exOr } from '../lib/exercises.js'
-import { effectiveRoutine, lastEntryFor, bestWeightFor, buildSets, freestyleConfig, defaultConfig, setsDoneActive, supersetUnits, unitOf, setLabel, modeOf, isBw, isPerSide, sideReps, repStep, EFFORT, effortOf, stepEffort, capEffort, cascadeWeight, insertWarmupRow, removeRowAt, pairAdjacent, unpairSuperset, cleanupSg } from '../lib/history.js'
+import { effectiveRoutine, lastEntryFor, bestWeightFor, setsDoneActive, supersetUnits, unitOf, setLabel, modeOf, isBw, isPerSide, sideReps, repStep, EFFORT, effortOf, stepEffort, capEffort, cascadeWeight, insertWarmupRow, removeRowAt, pairAdjacent, unpairSuperset, cleanupSg } from '../lib/history.js'
 import { fmtNum, fmtDate, todayISO, exCount, DAYN } from '../lib/format.js'
 import { beep, vibrate } from '../lib/sound.js'
 import { t } from '../lib/i18n.js'
@@ -14,9 +14,9 @@ import Media from '../components/Media.jsx'
 import { startFlow, exercisePicker, exConfigSheet, exerciseDetailSheet, topWeightSheet, finishWorkout, workoutCompleteSheet, confirmSheet } from '../sheets.jsx'
 import Icon from '../components/Icon.jsx'
 import { Button, Check, NumberField } from '../components/ui.jsx'
-import { nextPrescription, applyPrescription } from '../lib/progression.js'
 import { glyphOf } from '../lib/glyphs.js'
 import { isWarmupRow } from '../lib/workout-model.js'
+import { buildActiveEntry, seedConfigFor } from '../lib/session-entry.js'
 
 /* ---------- start chooser (no active workout) ---------- */
 function StartChooser() {
@@ -173,6 +173,23 @@ function ExerciseBlock({ entryIdx, compact, onToggle, onField, onAddSet, onRemov
 }
 
 /* ---------- active workout ---------- */
+// Swap one exercise of the running session for another — the machine is taken, today only.
+// The slot keeps its position and its superset pairing; everything else (sets, weights,
+// reps, rest, the progression line) is rebuilt for the incoming exercise from its own
+// history, exactly as "Add exercise" builds it. The plan is untouched: tomorrow it still
+// says what it said.
+export function replaceActiveExercise(idx, exId, cfg) {
+  // Same reason as removal: a timed hold in flight would write its elapsed seconds into
+  // whatever now sits at this index.
+  useUI.getState().stopWork()
+  useStore.getState().update(s => {
+    if (!s.active || !Array.isArray(s.active.entries)) return
+    const prev = s.active.entries[idx]
+    if (!prev) return
+    s.active.entries[idx] = buildActiveEntry(s, exId, cfg, prev.sg)
+  }, true)
+}
+
 export function removeActiveExercise(idx) {
   // Clear the work callback before indexes can shift. This also protects a confirmation sheet
   // that was opened first and confirmed after a timed hold started.
@@ -266,22 +283,52 @@ function ActiveWorkout() {
       confirmText: t('Remove'), danger: true, onConfirm: () => removeExercise(idx)
     })
   }
-  const removeExerciseSheet = () => {
+  // Which exercise of the current display unit an action applies to. On its own there is
+  // nothing to ask; inside a superset the group is on screen as one block, so the question
+  // has to be asked before anything is removed or swapped.
+  const pickInUnit = (title, question, onPick) => {
     if (unit.length > 1) {
       useUI.getState().openSheet(close => (
         <div>
-          <h3>{t('Remove exercise')}</h3>
-          <div className="muted small" style={{ marginBottom: 12 }}>{t('Which exercise in this superset do you want to remove?')}</div>
+          <h3>{title}</h3>
+          <div className="muted small" style={{ marginBottom: 12 }}>{question}</div>
           <div className="list">
-            {unit.map(idx => <div key={idx} className="item" onClick={() => { close(); confirmRemoveExercise(idx) }}>
+            {unit.map(idx => <div key={idx} className="item" onClick={() => { close(); onPick(idx) }}>
               <div className="grow"><div className="tt">{exOr(A.entries[idx]?.id).n}</div></div>
               <Icon name="chevronRight" />
             </div>)}
           </div>
         </div>
       ))
-    } else confirmRemoveExercise(cur)
+    } else onPick(cur)
   }
+  const removeExerciseSheet = () => pickInUnit(t('Remove exercise'), t('Which exercise in this superset do you want to remove?'), confirmRemoveExercise)
+
+  // Replace for today only: pick the stand-in, configure it, and it takes over the slot.
+  // The confirmation is only asked when there is logged work to lose — swapping an exercise
+  // you have not started yet is not a decision worth a dialog.
+  const replaceExercise = idx => exercisePicker(ex => {
+    const wasCalled = exOr(A.entries[idx]?.id).n   // read before the slot is overwritten
+    exConfigSheet(ex, null, cfg => {
+      replaceActiveExercise(idx, ex.id, cfg)
+      // The high-water marks are index-keyed and the list length does not change here, so the
+      // slot would otherwise keep the old exercise's progress and swallow the first set of the
+      // new one (no rest timer, no advance). See the effect that re-baselines on removal.
+      progressHighWater.current[idx] = 0
+      useUI.getState().toast(t('Replaced {0} with {1}', wasCalled, ex.n))
+    }, null, S.routines.find(r => r.id === A.routineId), seedConfigFor(S, ex.id), { saveLabel: t('Replace') })
+  }, { title: t('Replace exercise') })
+  const confirmReplaceExercise = idx => {
+    const e = A.entries[idx]
+    if (!e) return
+    if (!(e.sets || []).some(s => s.done)) return replaceExercise(idx)
+    confirmSheet({
+      title: t('Replace {0}?', exOr(e.id).n),
+      message: t('The sets you logged for this exercise in this session will be lost.'),
+      confirmText: t('Replace'), danger: true, onConfirm: () => replaceExercise(idx)
+    })
+  }
+  const replaceExerciseSheet = () => pickInUnit(t('Replace exercise'), t('Which exercise in this superset do you want to replace?'), confirmReplaceExercise)
 
   // A timed set is held, not typed. The work timer records what was actually held — an early
   // finish logs 0:38 of a 0:45 target rather than crediting the full prescription — and then
@@ -434,21 +481,17 @@ function ActiveWorkout() {
     <div style={{ height: 10 }} />
     <Button onClick={() => exercisePicker(ex => {
       const routine = S.routines.find(r => r.id === A.routineId)
-      const freestyle = !A.routineId
       // Freestyle has no routine prescription to apply: show the last target in the config
       // sheet and carry its completed rows forward. A planned session keeps its existing path.
-      const seed = freestyle ? freestyleConfig(S, { id: ex.id, ...defaultConfig(ex.id) }) : null
       exConfigSheet(ex, null, cfg => update(s => {
-        const full = { ...cfg, id: ex.id }
-        const plan = freestyle ? null : nextPrescription(s, full, s.routines.find(r => r.id === s.active.routineId))
-        const sets = buildSets(s, full, freestyle ? { preferLast: true } : undefined)
-        s.active.entries.push({ id: ex.id, target: { ...cfg }, plan, sets: freestyle ? sets : applyPrescription(sets, plan) })
+        s.active.entries.push(buildActiveEntry(s, ex.id, cfg))
         s.active.cur = s.active.entries.length - 1
-      }), null, routine, seed)
+      }), null, routine, seedConfigFor(S, ex.id))
     })} icon="plus">{t('Add exercise')}</Button>
     {A.entries.length > 0 && <>
       <div style={{ height: 6 }} />
-      <div style={{ display: 'flex', justifyContent: 'center' }}>
+      <div className="row" style={{ justifyContent: 'center', gap: 8 }}>
+        <Button size="sm" icon="shuffle" disabled={!!work} onClick={replaceExerciseSheet}>{t('Replace exercise')}</Button>
         <Button size="sm" icon="minus" style={{ color: 'var(--red)' }} disabled={!!work} onClick={removeExerciseSheet}>{t('Remove exercise')}</Button>
       </div>
     </>}
