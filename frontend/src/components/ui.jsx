@@ -15,6 +15,7 @@
 
 import { useRef, useState, useEffect, useCallback, forwardRef } from 'react'
 import Icon from './Icon.jsx'
+import { t } from '../lib/i18n.js'
 
 /* ============================ text ============================ */
 
@@ -248,10 +249,38 @@ export function Row({ icon, iconTint, title, subtitle, value, accessory = 'none'
 // theme entirely — on dark mode it flashes a white sheet — and can't show more
 // than a bare label per option. This opens our own sheet with a checkmark on the
 // current value, which is also how iOS itself handles a long option list.
-export function SelectRow({ icon, iconTint, title, value, options, onChange, sheetTitle }) {
+// Sheet body for a searchable SelectRow — a real component (not an inline closure) so it can
+// hold its own query state; a flat option list gets unusable once there are dozens of entries
+// (e.g. every exercise ever logged), so this adds a filter box on top of the same row list.
+function SelectSearchSheet({ title, options, value, onChange, close }) {
+  const [q, setQ] = useState('')
+  const ql = q.trim().toLowerCase()
+  const f = ql ? options.filter(o => o.label.toLowerCase().includes(ql) || (o.subtitle && o.subtitle.toLowerCase().includes(ql))) : options
+  return <>
+    <h3>{title}</h3>
+    <div className="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
+      <input className="input" placeholder={t('Search…')} value={q} onChange={e => setQ(e.target.value)} autoFocus /></div>
+    <div className="sect-b" style={{ marginTop: 10 }}>
+      {f.map(o => (
+        <button key={o.value} className="lrow tap" onClick={() => { close(); onChange(o.value) }}>
+          <span className="lrow-m"><span className="lrow-t">{o.label}</span>
+            {o.subtitle && <span className="lrow-s">{o.subtitle}</span>}</span>
+          {o.value === value && <Icon name="check" className="lrow-k" />}
+        </button>
+      ))}
+      {f.length === 0 && <div className="empty">{t('No results')}</div>}
+    </div>
+    <div style={{ height: 8 }} />
+  </>
+}
+
+export function SelectRow({ icon, iconTint, title, value, options, onChange, sheetTitle, searchable }) {
   const cur = options.find(o => o.value === value)
   const open = () => {
     const { openSheet } = require_ui()
+    if (searchable) {
+      return openSheet(close => <SelectSearchSheet title={sheetTitle || title} options={options} value={value} onChange={onChange} close={close} />)
+    }
     const h = openSheet(close => (
       <>
         <h3>{sheetTitle || title}</h3>

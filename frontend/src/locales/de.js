@@ -206,6 +206,7 @@ export default {
   'Activity — last 12 months': 'Aktivität — letzte 12 Monate',
   'by time trained': 'nach Trainingszeit',
   'Exercise progress': 'Übungs-Fortschritt',
+  'Exercise': 'Übung',
   'Top speed per workout': 'Top-Tempo pro Training',
   'Best set weight per workout': 'Bestes Satzgewicht pro Training',
   'Finish your first workout to see progress curves here.': 'Schliess dein erstes Training ab, um hier Fortschrittskurven zu sehen.',
@@ -230,6 +231,7 @@ export default {
   // --- library / history ---
   '{0} exercises with animations': '{0} Übungen mit Animationen',
   'Search…': 'Suchen…',
+  'No results': 'Keine Ergebnisse',
   'No workouts yet.': 'Noch keine Trainings.',
   'Starter plan loaded — Mon Push · Wed Pull · Fri Legs': 'Starterplan geladen — Mo Push · Mi Pull · Fr Beine',
   // --- login / account ---
