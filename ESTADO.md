@@ -95,6 +95,26 @@ estaba escrito para coincidir con nuestro código en lugar de con el contrato re
    están en la raíz, y por eso conectar funcionaba y subir daba 404.
 Ambos tests afirman ahora la forma y la ruta exactas, y el doble **responde 404 a rutas
 desconocidas** en vez de aceptar cualquier cosa. Un doble que dice que sí a todo no verifica nada.
+
+### El tercero: sin cobertura en el gimnasio, la subida automática se apagaba para siempre
+
+Detectado el **2026-09-17** con un entrenamiento real que nunca llegó a Strava. La sonda de
+`GET /api/strava/status` en `trySyncStrava` apagaba `stravaProbe` ante **cualquier** fallo, y eso
+mete en el mismo saco dos cosas que no se parecen:
+- **El servidor contestó** (404 sin Strava, 401 sesión caída): un veredicto que no cambia hasta
+  recargar o volver a entrar. Apagar está bien, y es justo para lo que existe `stravaProbe`.
+- **La petición no llegó a nadie** (modo avión, sin cobertura en el gimnasio, túnel caído): no se
+  aprendió nada del perfil. Apagar aquí **desactivaba la subida automática el resto de la sesión**
+  — y la sesión de una PWA instalada en el móvil dura días, no minutos. El entreno no subía ni
+  cuando volvía la red: solo con el botón manual o cerrando y abriendo la app del todo.
+
+Ahora solo apaga la sonda un error **con `status`**, es decir, una respuesta real del servidor. El
+caso sin red vuelve al camino que el diseño ya tenía previsto: el siguiente `pushState`/`pullState`
+es la siguiente oportunidad, y siempre hay una.
+
+La lección se parece a la de arriba: **el fallo de red no es un veredicto.** Un `catch` que trata
+"no hay respuesta" igual que "la respuesta fue que no" convierte un corte de cobertura en una
+decisión permanente.
 | T12 | Construir el JSON y subirlo | `feat/strava-upload` | abierto | — |
 | T13 | Interfaz y subida automática | `feat/strava-ui` | abierto | — |
 
@@ -122,6 +142,23 @@ Lecciones que valen para cualquier retoque futuro del mapeo:
 Tres ganchos solo para pruebas, documentados como tales: `STRAVA_API_BASE`, `STRAVA_TIMEOUT_MS` y
 `STRAVA_UPLOAD_POLL_DELAY_MS` (este último, T14: la espera antes del único sondeo de
 `GET /uploads/{id}` que confirma si un 201 sobrevivió al procesado asíncrono de Strava).
+
+**Silenciado en el feed (`STRAVA_HIDE_FROM_HOME`, activado por defecto):** tras subir, el servidor
+hace `PUT /api/v3/activities/{id}` con `{ hide_from_home: true }`, así el entreno sincronizado no
+aparece en el feed de tus seguidores. **No es privacidad, y no hay forma de que lo sea:** la API de
+Strava no expone la visibilidad de una actividad — `POST /uploads` no tiene parámetro para ello (el
+antiguo `private` desapareció en 2018) y `PUT /activities/{id}` solo acepta `name`, `description`,
+`type`/`sport_type`, `gear_id`, `commute`, `trainer` y `hide_from_home`. Para que salgan privadas de
+verdad hay que ponerlo en la cuenta (Ajustes → Controles de privacidad → Actividades → "Sólo tú").
+Dos decisiones que sostienen esto:
+- **Es lo último que pasa y nunca puede costar el entrenamiento.** Ocurre después de registrar la
+  subida como hecha, así que un silenciado fallido devuelve `200` con `muted: false` en vez de un
+  error: fallar aquí haría que el cliente reintentara y **subiera una segunda copia** para arreglar
+  algo que solo es cosmético.
+- **`STRAVA_MUTE_EXTRA_POLLS` (2) existe solo para esto.** Silenciar necesita el `activity_id`, que
+  no existe hasta que Strava termina de procesar; si el sondeo único de T14 llega pronto se hacen
+  como mucho dos sondeos más. Con el silenciado apagado no se hace ninguno — el comportamiento de
+  T14 queda intacto.
 
 Decisiones de T11 que conviene no deshacer:
 - **Todas las llamadas salientes llevan timeout (8 s).** Node no pone ninguno por defecto. Que

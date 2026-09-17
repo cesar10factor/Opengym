@@ -156,6 +156,34 @@ describe('trySyncStrava — stops asking once it knows there is nothing to ask a
     expect(mocks.stravaUpload).not.toHaveBeenCalled()
   })
 
+  // The bug this covers cost the workout of 2026-09-17: the phone lost coverage at the gym, the
+  // status probe rejected at the network level, and auto-upload stayed off for the rest of the
+  // session — which on an installed PWA is days, not minutes. Nothing was ever learnt about the
+  // profile, so a probe that never reached the server must not be a verdict about it.
+  it('keeps probing after a network-level failure, and uploads once the network is back', async () => {
+    const offline = new Error('Failed to fetch')   // no `status`: the fetch reached no one
+    mocks.stravaStatus.mockRejectedValue(offline)
+    mocks.stravaUpload.mockResolvedValue({ ok: true, upload: {}, recorded: true })
+    const now = Date.now()
+    localStorage.setItem('gym_strava_watermark', String(now - 1000 * 60 * 60))
+    useStore.setState(s => ({ S: { ...s.S, workouts: [workout('at-the-gym', now)] } }))
+
+    for (let i = 0; i < 3; i++) {
+      await useStore.getState().pushState()
+      await flush()
+    }
+    expect(mocks.stravaStatus).toHaveBeenCalledTimes(3)   // still asking, not written off
+    expect(mocks.stravaUpload).not.toHaveBeenCalled()
+    // No attempt was spent either: an unreachable server is not the workout's fault.
+    expect(localStorage.getItem('gym_strava_attempts')).toBeNull()
+
+    // Home, on wifi. The very next state sync uploads it — no reload, no manual button.
+    mocks.stravaStatus.mockResolvedValue({ connected: true, athleteId: 1 })
+    await useStore.getState().pushState()
+    await flush()
+    expect(mocks.stravaUpload).toHaveBeenCalledWith('at-the-gym', expect.anything())
+  })
+
   it('makes no request at all when every workout predates the connection', async () => {
     mocks.stravaStatus.mockResolvedValue({ connected: true, athleteId: 1 })
     const now = Date.now()
