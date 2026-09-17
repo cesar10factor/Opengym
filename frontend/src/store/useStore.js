@@ -152,10 +152,22 @@ export const useStore = create((set, get) => {
     stravaSyncBusy = true
     try {
       let status
-      // Any failure here — 404 (not configured), 401, offline, a flaky network — is a silent
-      // capability probe, not the upload itself: wait for the next opportunity, same as
-      // gym_dirty, and never surface a toast for it.
-      try { status = await stravaStatus() } catch (e) { stravaProbe = 'off'; return }
+      // Any failure here is a silent capability probe, not the upload itself: wait for the next
+      // opportunity, same as gym_dirty, and never surface a toast for it.
+      //
+      // Which failures are allowed to END the session's probing is the whole point, and the two
+      // cases are not the same (fix, 2026-09-17 — this cost a real workout):
+      //   - `e.status` set = the server ANSWERED. 404 (this deployment has no Strava), 401 (this
+      //     session is gone): a verdict that cannot change without a reload or a sign-in, so stop
+      //     asking, which is what stravaProbe exists for.
+      //   - no `e.status` = the fetch never reached anyone: airplane mode, no signal at the gym,
+      //     a dropped tunnel. Nothing was learnt about this profile, so the probe MUST stay armed.
+      //     Turning it off here silently disabled auto-upload for the rest of the session — and a
+      //     PWA session on a phone lasts days — so a workout finished with no coverage never
+      //     uploaded even once the network came back, exactly like the one on 2026-09-17. It is
+      //     also precisely the case the retry design already handles: the next pushState or
+      //     pullState is the next opportunity, and there is always one.
+      try { status = await stravaStatus() } catch (e) { if (e && e.status) stravaProbe = 'off'; return }
       if (!status || !status.connected) { stravaProbe = 'off'; return }
       ensureStravaWatermark()
       const w = nextWorkoutToUpload(get().S.workouts, loadStravaUploaded(), true, {
