@@ -71,6 +71,27 @@ const STRAVA_TIMEOUT_MS = +(process.env.STRAVA_TIMEOUT_MS || 8000) || 8000;
 // the added wait is not noticeable on top of the upload itself. Configurable only for the test
 // suite, same convention as STRAVA_TIMEOUT_MS above — a real deployment should leave it alone.
 const STRAVA_UPLOAD_POLL_DELAY_MS = +(process.env.STRAVA_UPLOAD_POLL_DELAY_MS || 2000) || 2000;
+// Mute uploaded activities: PUT /api/v3/activities/{id} { hide_from_home: true }, so a synced
+// workout does not land in followers' feeds.
+//
+// This is NOT privacy, and must not be described as if it were. Strava's API cannot set an
+// activity's visibility at all: POST /uploads has no such parameter (the old `private` flag was
+// removed in 2018) and UpdatableActivity — the body PUT /activities/{id} accepts — exposes only
+// name, description, type/sport_type, gear_id, commute, trainer and hide_from_home. A muted
+// activity is still visible on the athlete's profile to whoever can already see it; it just
+// doesn't get pushed into the feed. Real privacy is an account-level setting (Strava: Settings ->
+// Privacy Controls -> Activities), which no code here can reach.
+//
+// On by default — the whole point is "synced workouts are quiet by default" — and switched off
+// with STRAVA_HIDE_FROM_HOME=0 (also '', 'false', 'no', 'off').
+const STRAVA_HIDE_FROM_HOME = !/^(0|false|no|off)$/i.test(String(process.env.STRAVA_HIDE_FROM_HOME ?? '1').trim());
+// Muting needs the activity_id, which only exists once Strava has FINISHED processing the upload —
+// the single post-201 poll is often, but not always, late enough to see it. These are the extra
+// polls taken (spaced by STRAVA_UPLOAD_POLL_DELAY_MS, same bounded timeout each) purely to catch
+// an activity_id that had not appeared yet, and they run ONLY when muting is on and the first poll
+// was inconclusive. 2 extra attempts bounds the added wait at ~2x the poll delay on the slow path,
+// while the common case (a small JSON upload, already processed at the first poll) takes none.
+const STRAVA_MUTE_EXTRA_POLLS = Math.max(0, +(process.env.STRAVA_MUTE_EXTRA_POLLS ?? 2) || 0);
 // Version marker (N6): which commit this container was built from. The image has no .git, so the
 // values arrive as build args promoted to ENV in api/Dockerfile — see docker-compose.yml and
 // scripts/auto-deploy.ps1 for who fills them in. Everything here is optional: an image built
@@ -1491,28 +1512,52 @@ if (STRAVA_ENABLED) {
     let finalData = data;
     let pollBody = null;
     let verdict = null; // null covers "no id to poll" and "poll inconclusive" alike
-    if (data && data.id != null) {
-      await new Promise(resolve => setTimeout(resolve, STRAVA_UPLOAD_POLL_DELAY_MS));
+    const uploadId = data && data.id != null ? data.id : null;
+
+    // One GET /uploads/{id}. Returns the parsed body, or null for every flavour of "no answer"
+    // (network error, the poll's own timeout, a non-2xx, a body that isn't JSON) — all of which
+    // are inconclusive in exactly the same way and fall through to "record as today".
+    const pollUpload = async () => {
       try {
-        const pollRes = await fetch(STRAVA_API_V3_BASE + '/uploads/' + encodeURIComponent(data.id), {
+        const pollRes = await fetch(STRAVA_API_V3_BASE + '/uploads/' + encodeURIComponent(uploadId), {
           headers: { Authorization: 'Bearer ' + tok.access },
           signal: AbortSignal.timeout(STRAVA_TIMEOUT_MS)
         });
-        if (pollRes.ok) {
-          try { pollBody = await pollRes.json(); } catch { /* not every response body is JSON */ }
-          verdict = classifyUploadStatus(pollBody);
-          // Only replace the response's `upload` body on a confirmed success — that's the one case
-          // where the poll body is strictly more informative (it carries the real activity_id).
-          // Anything else (still processing, or a failure handled separately below) keeps
-          // reporting the original 201 body, unchanged from before this poll existed.
-          if (verdict === UPLOAD_STATUS_SUCCESS) finalData = pollBody;
-        }
-        // A non-2xx poll response is treated the same as a poll that threw: inconclusive, falls
-        // through to "record as today" below.
+        if (!pollRes.ok) return null;
+        try { return await pollRes.json(); } catch { return null; } // not every response body is JSON
       } catch (e) {
-        // Network error or the poll's own timeout — inconclusive, not a failure of the upload
-        // itself. Falls through to "record as today".
         audit(req, 'strava.upload.poll-failed', { ok: false, user, msg: e.message });
+        return null;
+      }
+    };
+    const applyPoll = body => {
+      if (!body) return;
+      pollBody = body;
+      verdict = classifyUploadStatus(body);
+      // Only replace the response's `upload` body on a confirmed success — that's the one case
+      // where the poll body is strictly more informative (it carries the real activity_id).
+      // Anything else (still processing, or a failure handled separately below) keeps
+      // reporting the original 201 body, unchanged from before this poll existed.
+      if (verdict === UPLOAD_STATUS_SUCCESS) finalData = body;
+    };
+
+    if (uploadId != null) {
+      await new Promise(resolve => setTimeout(resolve, STRAVA_UPLOAD_POLL_DELAY_MS));
+      applyPoll(await pollUpload());
+      // Extra polls exist for MUTING, not for the record decision: hide_from_home needs the
+      // activity_id, and an upload still being processed at the first poll has none yet. They run
+      // only while muting is on and nothing is decided — a verdict of success (we have the id) or
+      // failure (there is nothing to mute) stops immediately, and with muting off none run at all,
+      // leaving the single-poll behaviour exactly as it was.
+      //
+      // One knock-on, deliberate: a later poll that turns FAILURE is honoured like the first one
+      // (502, not recorded, so the client retries). That is the same judgement the first poll
+      // already made — an activity Strava deleted during processing must never be recorded as
+      // uploaded — applied to a verdict that simply arrived a few seconds later.
+      for (let i = 0; STRAVA_HIDE_FROM_HOME && i < STRAVA_MUTE_EXTRA_POLLS
+        && verdict !== UPLOAD_STATUS_SUCCESS && verdict !== UPLOAD_STATUS_FAILURE; i++) {
+        await new Promise(resolve => setTimeout(resolve, STRAVA_UPLOAD_POLL_DELAY_MS));
+        applyPoll(await pollUpload());
       }
     }
 
@@ -1533,8 +1578,49 @@ if (STRAVA_ENABLED) {
     // it, which is the one thing the caller needs to know.
     const recorded = recordStravaUpload(user.id, workoutId);
     audit(req, 'strava.uploaded', { user, msg: recorded ? null : 'not-recorded' });
-    json(res, 200, { ok: true, upload: finalData, recorded });
+
+    // Muting is the LAST thing that happens, and it is best-effort by construction: the upload has
+    // already succeeded and been recorded by this point, so a mute that fails (Strava down, the
+    // activity_id never showed up, a rejected PUT) must never turn a landed workout into an error
+    // the client would retry — that retry would upload a second copy to fix a cosmetic problem.
+    // `muted` reports honestly which of the two happened, and is absent entirely when the feature
+    // is switched off.
+    const body200 = { ok: true, upload: finalData, recorded };
+    if (STRAVA_HIDE_FROM_HOME) body200.muted = await muteStravaActivity(req, user, tok, finalData);
+    json(res, 200, body200);
   };
+
+  // PUT /api/v3/activities/{id} { hide_from_home: true } — keeps a synced workout out of
+  // followers' feeds. See STRAVA_HIDE_FROM_HOME at the top of this file for what this does and,
+  // more importantly, what it does NOT do (it is not privacy; the API cannot set visibility).
+  //
+  // Returns true only when Strava confirmed the change. Two ways to get false, both normal rather
+  // than exceptional: the upload has no activity_id (still processing when the last poll ran, or a
+  // duplicate — whose poll body never carries one), and a PUT that fails or is refused. Neither
+  // throws, so the caller never has to guard the call.
+  async function muteStravaActivity(req, user, tok, uploadBody) {
+    const id = uploadBody && uploadBody.activity_id;
+    if (typeof id !== 'number' || !Number.isFinite(id) || id <= 0) {
+      audit(req, 'strava.mute.skipped', { ok: false, user, msg: 'no-activity-id' });
+      return false;
+    }
+    try {
+      const r = await fetch(STRAVA_API_V3_BASE + '/activities/' + encodeURIComponent(id), {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer ' + tok.access, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hide_from_home: true }),
+        signal: AbortSignal.timeout(STRAVA_TIMEOUT_MS)
+      });
+      if (!r.ok) {
+        audit(req, 'strava.mute.fail', { ok: false, user, msg: 'mute-' + r.status });
+        return false;
+      }
+      return true;
+    } catch (e) {
+      audit(req, 'strava.mute.fail', { ok: false, user, msg: e.message });
+      return false;
+    }
+  }
 }
 
 http.createServer(async (req, res) => {
