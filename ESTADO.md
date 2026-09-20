@@ -584,6 +584,37 @@ Decisiones del ciclo 6 (tomadas el 2026-09-20, no reabrir):
 - `.gitignore` de esta rama recibe `.agent/` (ficheros de planes de agentes, igual que en el fork
   original) — commit `6f17fe4` en `rebase/v1.3.7`, un fichero, no fusionado a `develop`.
 
+### Trabajo aparecido después de U0: el silenciado de Strava (2026-09-21)
+
+El dueño avisó de que había trabajo de otra sesión en la rama `claude/strava-hidden-workouts-la63cn`
+(un commit, `be89ea8`), **que no estaba en `main`, ni en `develop`, ni en la etiqueta
+`v1.2.9-fork-final`**. Eso convertía la etiqueta de retorno en un punto de retorno incompleto y, peor,
+**U3 lo habría perdido en silencio**: su brief dice sacar los ficheros de Strava de esa etiqueta.
+Es exactamente el riesgo "se pierde algo del fork sin que nadie lo note" de la tabla de
+`PLAN-UPSTREAM.md`, y solo se evitó porque el dueño lo mencionó. **Lección de proceso: antes de cada
+tarea del ciclo 6, `git fetch origin --prune` y mirar si hay ramas que la etiqueta no contenga.**
+
+Qué arregla (resumen; el detalle está arriba, en la sección de `STRAVA_HIDE_FROM_HOME`): el
+silenciado solo se intentaba dentro de la petición de subida, y como necesita el `activity_id` —que
+no existe hasta que Strava termina de procesar— el caso **normal** era no silenciar nunca, devolviendo
+un `200` limpio que ningún cliente lee. Ahora lo pendiente se persiste en `strava-mutes-<uid>.json` y
+lo reintenta un barrido de fondo (15 s de base, 8 intentos, abandono a los 30 min), que sobrevive a un
+reinicio. Un duplicado también se silencia ahora: su id vive dentro del texto del error.
+
+Consecuencias para el resto del ciclo 6, ya comprobadas:
+- **U3:** los ficheros de Strava se traen de `v1.2.9-fork-strava` (etiqueta nueva, ver abajo), **no**
+  de `v1.2.9-fork-final`. Añade tres ganchos de prueba a los tres que ya había:
+  `STRAVA_MUTE_SWEEP_MS`, `STRAVA_MUTE_RETRY_BASE_MS` y `STRAVA_MUTE_MAX_AGE_MS`.
+- **U4:** **no añade ningún módulo nuevo a `api/`**, así que el riesgo del `COPY` uno a uno del
+  `api/Dockerfile` no cambia. Sí toca `.env.production.example`, que U4 posee.
+- **U5:** aparece un fichero de runtime por perfil, `strava-mutes-<uid>.json`, que el recon de U5
+  debe incluir en la lista de "campos y ficheros aditivos del fork que tienen que sobrevivir".
+  `scripts/backup.sh` ya lo cubre: empaqueta `data/` entero.
+
+**Etiqueta `v1.2.9-fork-strava`**: el estado completo del fork, este arreglo incluido. Es la que usan
+U1–U6 para restaurar ficheros propios. `v1.2.9-fork-final` se conserva como punto de retorno de `main`
+anterior a este despliegue, pero **está incompleta**: no la uses para restaurar nada.
+
 ## Registro
 
 | Fecha | Qué |
@@ -591,3 +622,4 @@ Decisiones del ciclo 6 (tomadas el 2026-09-20, no reabrir):
 | 2026-09-04 | Rama `develop` creada desde `main`. `PLAN.md` y `ESTADO.md` escritos. |
 | 2026-09-07 | Ciclo 4 planificado: `PLAN-NOTIFICACIONES.md`. N0 cerrado en el móvil. N1 fusionado. |
 | 2026-09-21 | Ciclo 6, U0 hecho: rama `rebase/v1.3.7` desde upstream v1.3.8, backup y etiqueta de retorno, línea base medida (1584 front / 176 de 193 api), stack de upstream verificado en Docker aislado sin tocar producción. |
+| 2026-09-21 | Arreglo del silenciado de Strava (`be89ea8`) rescatado de una rama suelta, fusionado a `develop` y desplegado a `main`. Etiqueta `v1.2.9-fork-strava` creada como el estado completo del fork para U1–U6. |
