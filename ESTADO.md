@@ -463,6 +463,51 @@ Hallazgos del ciclo 5 (no reabrir):
   entrenos**, el que se usa de verdad) no. Por eso Ajustes dice que no está conectado y no se subió
   nada. Los "dos dispositivos" son las 2 passkeys del perfil, y eso sí es normal.
 
+## Ciclo 6 — subir el fork a upstream v1.3.7 (plan: `PLAN-UPSTREAM.md`)
+
+**Estado: planificado, sin empezar. Nada del ciclo 6 está tocado todavía.**
+`main` = `develop` = `b010e0b`, árbol limpio, desplegado y sirviendo.
+
+| # | Tarea | Rama | Estado | Modelo |
+|---|-------|------|--------|--------|
+| U0 | Copia de seguridad, etiqueta de retorno, rama desde upstream, línea base | `rebase/v1.3.7` | **abierto — el siguiente** | orquestador |
+| U1 | Vinculación y gestión de dispositivos | `rebase/u1-linking` | abierto | Sonnet + revisión Opus |
+| U2 | Notificaciones | `rebase/u2-push` | abierto | Sonnet |
+| U3 | Strava | `rebase/u3-strava` | abierto | Sonnet + revisión Opus |
+| U4 | Despliegue doméstico | `rebase/u4-deploy` | abierto | Haiku |
+| U5 | Migración de datos | `rebase/u5-data` | abierto | Sonnet |
+| U6 | Limpieza de comentarios | `rebase/u6-comments` | abierto | Haiku |
+| U7 | Aceptación manual | — | abierto | el dueño |
+| U8 | Entrenador IA | — | abierto, **opcional** | Haiku |
+
+Decisiones del ciclo 6 (tomadas el 2026-09-20, no reabrir):
+
+- **No se fusiona, se rebasa.** Upstream v1.3.7 pasa a ser la base y las funciones propias se
+  vuelven a aplicar encima, una por brief. Un `git merge` es inviable: los dos lados han reescrito
+  los mismos seis ficheros y upstream les ha metido +1.482 líneas. Es posible porque el fork es
+  aditivo: +13.375 / **−128**, y 53 de sus 90 ficheros son nuevos.
+- **Precio aceptado:** se pierde el historial de los commits propios sobre esos ficheros. El
+  trabajo se conserva; el porqué de cada decisión ya vive en este fichero.
+- **Donde upstream ya lo tiene, gana upstream.** Se tiran: el ciclo 2 entero (upstream trae
+  `restSec` por ejercicio desde v1.2.14, y además `warmupRestSec`), N6 (versión al pie de Ajustes
+  desde v1.2.11) y el commit de sustituir ejercicio (v1.2.14, !41/!43).
+- **La vinculación de dispositivos SE QUEDA.** El `/api/pair/*` de upstream **no** la sustituye:
+  da un token Bearer para la app Capacitor, vive en memoria y caduca a los 5 minutos. No registra
+  passkey en un perfil existente, que es lo que hace falta para el iPhone.
+- **Upstream sigue con el TTL de cuatro semanas en las push**, con el mismo comentario viejo que
+  este fork tenía. B3 y B4 son mejoras propias que upstream no tiene: no se pierden.
+- **Se quita el `web_push: 8030` y se conserva `navigate`.** Lo único que impide que Safari ejecute
+  el service worker es ese número mágico; `navigate` no depende de él, `sw.js` ya lo lee del
+  payload plano. Quitándolo se tienen las dos cosas: service worker vivo en iPhone y salto a
+  `/#/workout`. **Esto revisa la decisión de N3**, con motivo nuevo.
+- **La limpieza de comentarios es solo sobre ficheros creados por el fork**, ni siquiera los de
+  upstream que lleven un enganche propio dentro. Es lo que mantiene que la próxima actualización
+  siga siendo un `git pull`.
+- **Hay migración de datos obligatoria:** el campo `rest` de los ejercicios de las rutinas se llama
+  `restSec` en upstream. Sin migrar, cada rutina pierde su descanso en silencio. U5, sobre copia.
+- **`api/Dockerfile` es el riesgo más serio.** Lista los módulos de `api/` uno a uno y ningún test
+  lo detecta. Se valida levantando la pila, no con tests.
+
 ## Registro
 
 | Fecha | Qué |
