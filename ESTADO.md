@@ -607,6 +607,18 @@ Consecuencias para el resto del ciclo 6, ya comprobadas:
   `STRAVA_MUTE_SWEEP_MS`, `STRAVA_MUTE_RETRY_BASE_MS` y `STRAVA_MUTE_MAX_AGE_MS`.
 - **U4:** **no añade ningún módulo nuevo a `api/`**, así que el riesgo del `COPY` uno a uno del
   `api/Dockerfile` no cambia. Sí toca `.env.production.example`, que U4 posee.
+
+> **Forma exacta del riesgo del `api/Dockerfile`, comprobada el 2026-09-21** (hasta ahora estaba
+> descrito de memoria y a medias). Los dos lados no hacen lo mismo:
+> - **El fork** ya lo resolvió: `COPY *.js ./` seguido de `RUN rm -f *.test.js`. Con comodín no se
+>   puede dejar fuera un módulo — es el arreglo de la tarea FX (`a9aa113`).
+> - **Upstream v1.3.8 los enumera**: `COPY server.js push-messages.js verify-error.js ./` más
+>   `COPY coach ./coach`.
+>
+> Como el rebase **parte de upstream**, se parte de la versión enumerada: `link.js` y `strava.js`
+> se quedarían fuera de la imagen y la API entraría en bucle de reinicio con `ERR_MODULE_NOT_FOUND`,
+> con las dos suites en verde. U4 tiene que decidir explícitamente entre enumerar también los
+> módulos propios o adoptar el comodín del fork, y dejar dicho cuál eligió.
 - **U5:** aparece un fichero de runtime por perfil, `strava-mutes-<uid>.json`, que el recon de U5
   debe incluir en la lista de "campos y ficheros aditivos del fork que tienen que sobrevivir".
   `scripts/backup.sh` ya lo cubre: empaqueta `data/` entero.
