@@ -77,7 +77,10 @@ const require = createRequire(process.env.HOOK_API_DIR + '/server.js');
 const webpush = require('web-push');
 const original = webpush.sendNotification.bind(webpush);
 webpush.sendNotification = function (sub, payload, options) {
-  try { fs.appendFileSync(process.env.HOOK_CAPTURE, String(payload) + '\\n'); } catch {}
+  // Payload AND options: the delivery options (TTL, urgency, topic) never reach the plaintext
+  // body, but they decide whether an alert is delivered now or queued for weeks, so they are part
+  // of what leaves this server and are pinned here too.
+  try { fs.appendFileSync(process.env.HOOK_CAPTURE, JSON.stringify({ p: String(payload), o: options }) + '\\n'); } catch {}
   return original(sub, payload, options);
 };
 `;
@@ -118,17 +121,20 @@ async function withServer(fn, { seedState } = {}) {
   });
   proc.stderr.on('data', () => { /* delivery failures are expected: the endpoint is unreachable */ });
 
-  const captured = () => fs.readFileSync(captureFile, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
-  const waitForPayload = async (ms = 6000) => {
+  const sends = () => fs.readFileSync(captureFile, 'utf8').split('\n').filter(Boolean)
+    .map(l => { const rec = JSON.parse(l); return { payload: JSON.parse(rec.p), options: rec.o || {} }; });
+  const captured = () => sends().map(s => s.payload);
+  const waitForSend = async (ms = 6000) => {
     const until = Date.now() + ms;
     while (Date.now() < until) {
-      const c = captured();
-      if (c.length) return c[0];
+      const s = sends();
+      if (s.length) return s[0];
       await sleep(100);
     }
     throw new Error('no push payload was captured');
   };
-  const ctx = { uid, origin, dataDir, cookie: signCookie(secret, uid), captured, waitForPayload };
+  const waitForPayload = async (ms = 6000) => (await waitForSend(ms)).payload;
+  const ctx = { uid, origin, dataDir, cookie: signCookie(secret, uid), captured, sends, waitForPayload, waitForSend };
   try {
     await waitReady(origin);
     await fn(ctx);
@@ -199,9 +205,13 @@ describe('push payload is the dual Declarative Web Push envelope', () => {
         try { fs.writeFileSync(stateFile, JSON.stringify(state)); } catch { /* torn down */ }
       }, 1000);
       try {
-        const payload = await ctx.waitForPayload(30000);
+        const { payload, options } = await ctx.waitForSend(30000);
         assertDualEnvelope(payload, ctx.origin, { tag: 'day-reminder' });
         assert.match(payload.notification.title, /Leg day/);
+        // Checked here rather than in its own test: this emitter costs up to 30s of wall clock to
+        // provoke, and the reminder is the alert a long TTL would misplace most visibly — a
+        // "workout planned today" delivered tomorrow is wrong, not just late.
+        assert.equal(options.TTL, 3 * 3600);
       } finally { clearInterval(stop); }
     }, {
       seedState: () => ({
@@ -218,6 +228,64 @@ describe('push payload is the dual Declarative Web Push envelope', () => {
       await fetch(ctx.origin + '/api/push/test', { method: 'POST', headers: { Cookie: ctx.cookie } });
       const payload = await ctx.waitForPayload();
       assert.equal(payload.notification.navigate, ctx.origin + '/');
+    });
+  });
+});
+
+/* Delivery options. The symptom these pin down is the one the owner actually hit: nothing arrives
+   for hours, then everything arrives at once on opening the app. That is not a lost push, it is a
+   QUEUED one — and web-push's default TTL of four weeks is what let the queue keep it. Urgency
+   makes the attempt sooner; only TTL decides when an alert stops being worth delivering at all.
+   None of this shows up in the payload, so without these tests a regression to the default would
+   be invisible until the next time the phone spent an afternoon out of coverage. */
+const WEBPUSH_DEFAULT_TTL = 2419200;   // four weeks — the value that must never be in play here
+
+describe('push delivery options', () => {
+  it('5. the rest-over alert: high urgency, TTL matching the server\'s own staleness threshold, topic set', async () => {
+    await withServer(async ctx => {
+      const r = await fetch(ctx.origin + '/api/push/rest-timer', {
+        method: 'POST', headers: { Cookie: ctx.cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seconds: 1 })
+      });
+      assert.equal(r.status, 200);
+      const { options } = await ctx.waitForSend();
+      assert.equal(options.urgency, 'high', 'normal urgency is what Doze holds until the next maintenance window');
+      // 120s = REST_TIMER_MAX_LATE_MS. The server already refuses to fire a rest alert later than
+      // this after a restart; letting a push service deliver the same alert weeks later would
+      // contradict that rule from the other side.
+      assert.equal(options.TTL, 120);
+      assert.equal(options.topic, 'rest-timer', 'without a topic, two queued rests stack instead of replacing each other');
+    });
+  });
+
+  it('6. the test notification falls back to the short default, never to the library default', async () => {
+    await withServer(async ctx => {
+      await fetch(ctx.origin + '/api/push/test', { method: 'POST', headers: { Cookie: ctx.cookie } });
+      const { options } = await ctx.waitForSend();
+      assert.equal(options.urgency, 'high');
+      assert.equal(options.TTL, 60);
+      assert.notEqual(options.TTL, WEBPUSH_DEFAULT_TTL);
+      assert.equal(options.topic, 'test');
+    });
+  });
+
+  it('7. every TTL emitted is a plain integer well inside the same day', async () => {
+    // A guard for whatever gets added next: web-push throws on a non-integer or negative TTL, and
+    // a throw inside sendNotification costs the notification outright.
+    await withServer(async ctx => {
+      await fetch(ctx.origin + '/api/push/test', { method: 'POST', headers: { Cookie: ctx.cookie } });
+      await fetch(ctx.origin + '/api/push/rest-timer', {
+        method: 'POST', headers: { Cookie: ctx.cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seconds: 1 })
+      });
+      const until = Date.now() + 6000;
+      let all = [];
+      while (Date.now() < until && all.length < 2) { all = ctx.sends(); await sleep(100); }
+      assert.equal(all.length, 2, 'both emitters should have sent by now');
+      for (const { options } of all) {
+        assert.ok(Number.isInteger(options.TTL), `TTL must be an integer, got ${options.TTL}`);
+        assert.ok(options.TTL > 0 && options.TTL <= 24 * 3600, `TTL out of range: ${options.TTL}`);
+      }
     });
   });
 });
