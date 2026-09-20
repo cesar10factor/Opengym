@@ -150,15 +150,28 @@ Strava no expone la visibilidad de una actividad — `POST /uploads` no tiene pa
 antiguo `private` desapareció en 2018) y `PUT /activities/{id}` solo acepta `name`, `description`,
 `type`/`sport_type`, `gear_id`, `commute`, `trainer` y `hide_from_home`. Para que salgan privadas de
 verdad hay que ponerlo en la cuenta (Ajustes → Controles de privacidad → Actividades → "Sólo tú").
-Dos decisiones que sostienen esto:
+Tres decisiones que sostienen esto:
 - **Es lo último que pasa y nunca puede costar el entrenamiento.** Ocurre después de registrar la
   subida como hecha, así que un silenciado fallido devuelve `200` con `muted: false` en vez de un
   error: fallar aquí haría que el cliente reintentara y **subiera una segunda copia** para arreglar
   algo que solo es cosmético.
-- **`STRAVA_MUTE_EXTRA_POLLS` (2) existe solo para esto.** Silenciar necesita el `activity_id`, que
-  no existe hasta que Strava termina de procesar; si el sondeo único de T14 llega pronto se hacen
-  como mucho dos sondeos más. Con el silenciado apagado no se hace ninguno — el comportamiento de
-  T14 queda intacto.
+- **El silenciado sobrevive a la petición que lo encargó.** Esta es la corrección del fallo con el
+  que nació la función: silenciar necesita el `activity_id`, que no existe hasta que Strava termina
+  de procesar, y la primera versión solo lo intentaba dentro de la petición, en una ventana de unos
+  seis segundos. Strava tarda más a menudo de lo que parece, así que el caso corriente era
+  *"no había id todavía → no se silencia → no se vuelve a mirar"*, en silencio y con un `200`
+  limpio: los entrenos seguían apareciendo en el feed. Ahora lo que no se resuelve en la petición
+  se apunta en `strava-mutes-<uid>.json` y lo reintenta un barrido de fondo (15 s, 30 s, 1 min…
+  hasta ocho intentos, y se abandona a la media hora). La respuesta lo dice con `mutePending`.
+- **Un duplicado también se silencia.** El id de la actividad viene dentro del texto del error
+  (`"... duplicate of activity 21234316"`, con `activity_id: null`), y antes se ignoraba: la única
+  subida de la que teníamos certeza de que había creado una actividad era justo la que nunca se
+  podía callar.
+
+`STRAVA_MUTE_EXTRA_POLLS` (2) sigue ahí, pero ahora es una optimización, no el mecanismo: ahorra
+esperar al barrido cuando Strava va rápido. Con el silenciado apagado no se hace ninguno — el
+comportamiento de T14 queda intacto. `STRAVA_MUTE_SWEEP_MS`, `STRAVA_MUTE_RETRY_BASE_MS` y
+`STRAVA_MUTE_MAX_AGE_MS` son ganchos solo para pruebas, como `STRAVA_TIMEOUT_MS`.
 
 Decisiones de T11 que conviene no deshacer:
 - **Todas las llamadas salientes llevan timeout (8 s).** Node no pone ninguno por defecto. Que
@@ -463,9 +476,150 @@ Hallazgos del ciclo 5 (no reabrir):
   entrenos**, el que se usa de verdad) no. Por eso Ajustes dice que no está conectado y no se subió
   nada. Los "dos dispositivos" son las 2 passkeys del perfil, y eso sí es normal.
 
+## Ciclo 6 — subir el fork a upstream v1.3.7 (plan: `PLAN-UPSTREAM.md`)
+
+**Estado: U0 hecho. U1 es el siguiente.**
+`main` = `develop` = `b010e0b`, árbol limpio, desplegado y sirviendo. `rebase/v1.3.7` es rama
+aparte, arrancada desde upstream, sin fusionar a nada todavía.
+
+| # | Tarea | Rama | Estado | Modelo |
+|---|-------|------|--------|--------|
+| U0 | Copia de seguridad, etiqueta de retorno, rama desde upstream, línea base | `rebase/v1.3.7` | **hecho** (`6f17fe4`, sin fusionar) | orquestador |
+| U1 | Vinculación y gestión de dispositivos | `rebase/u1-linking` | **abierto — el siguiente** | Sonnet + revisión Opus |
+| U2 | Notificaciones | `rebase/u2-push` | abierto | Sonnet |
+| U3 | Strava | `rebase/u3-strava` | abierto | Sonnet + revisión Opus |
+| U4 | Despliegue doméstico | `rebase/u4-deploy` | abierto | Haiku |
+| U5 | Migración de datos | `rebase/u5-data` | abierto | Sonnet |
+| U6 | Limpieza de comentarios | `rebase/u6-comments` | abierto | Haiku |
+| U7 | Aceptación manual | — | abierto | el dueño |
+| U8 | Entrenador IA | — | abierto, **opcional** | Haiku |
+
+Decisiones del ciclo 6 (tomadas el 2026-09-20, no reabrir):
+
+- **No se fusiona, se rebasa.** Upstream v1.3.7 pasa a ser la base y las funciones propias se
+  vuelven a aplicar encima, una por brief. Un `git merge` es inviable: los dos lados han reescrito
+  los mismos seis ficheros y upstream les ha metido +1.482 líneas. Es posible porque el fork es
+  aditivo: +13.375 / **−128**, y 53 de sus 90 ficheros son nuevos.
+- **Precio aceptado:** se pierde el historial de los commits propios sobre esos ficheros. El
+  trabajo se conserva; el porqué de cada decisión ya vive en este fichero.
+- **Donde upstream ya lo tiene, gana upstream.** Se tiran: el ciclo 2 entero (upstream trae
+  `restSec` por ejercicio desde v1.2.14, y además `warmupRestSec`), N6 (versión al pie de Ajustes
+  desde v1.2.11) y el commit de sustituir ejercicio (v1.2.14, !41/!43).
+- **La vinculación de dispositivos SE QUEDA.** El `/api/pair/*` de upstream **no** la sustituye:
+  da un token Bearer para la app Capacitor, vive en memoria y caduca a los 5 minutos. No registra
+  passkey en un perfil existente, que es lo que hace falta para el iPhone.
+- **Upstream sigue con el TTL de cuatro semanas en las push**, con el mismo comentario viejo que
+  este fork tenía. B3 y B4 son mejoras propias que upstream no tiene: no se pierden.
+- **Se quita el `web_push: 8030` y se conserva `navigate`.** Lo único que impide que Safari ejecute
+  el service worker es ese número mágico; `navigate` no depende de él, `sw.js` ya lo lee del
+  payload plano. Quitándolo se tienen las dos cosas: service worker vivo en iPhone y salto a
+  `/#/workout`. **Esto revisa la decisión de N3**, con motivo nuevo.
+- **La limpieza de comentarios es solo sobre ficheros creados por el fork**, ni siquiera los de
+  upstream que lleven un enganche propio dentro. Es lo que mantiene que la próxima actualización
+  siga siendo un `git pull`.
+- **Hay migración de datos obligatoria:** el campo `rest` de los ejercicios de las rutinas se llama
+  `restSec` en upstream. Sin migrar, cada rutina pierde su descanso en silencio. U5, sobre copia.
+- **`api/Dockerfile` es el riesgo más serio.** Lista los módulos de `api/` uno a uno y ningún test
+  lo detecta. Se valida levantando la pila, no con tests.
+
+### U0 (2026-09-20/21) — hallazgos
+
+- **Upstream ya iba por v1.3.8** cuando se ejecutó U0, un release por delante de la v1.3.7 sobre la
+  que está escrito `PLAN-UPSTREAM.md`. Decisión del dueño: usar `upstream/main` (v1.3.8) tal cual,
+  no fijar el tag v1.3.7. La regla de cada brief ("nada se da por bueno de memoria, cada brief lee
+  el código de upstream de cero") ya cubre el salto de versión sin cambiar nada del plan.
+  Rama `rebase/v1.3.7` creada desde `upstream/main` en `f91cde1`.
+- **Copia de seguridad** en `~/opengym-backups/opengym-backup-2026-09-20_234801.tar.gz`, fuera del
+  repo, verificada (contiene el perfil real `ZOI4PpUB_3gEoV8b`, `db.json`, `secret`, `vapid.json`,
+  datos de Strava). Etiqueta de retorno `v1.2.9-fork-final` creada y subida a `origin`.
+- **Línea base de upstream, frontend: 1584 tests, verde.**
+- **Línea base de upstream, api: 176/193 verde.** Las 17 fallas son todas del entrenador IA (U8,
+  opcional, apagado por defecto) y **no son un fallo de upstream**: dependen de comportamiento
+  exclusivo de Linux que este equipo no tiene fuera de Docker —
+  - `credential.test.js`: exige permisos POSIX `0o600` en un fichero; Windows no tiene ese modelo
+    de permisos y `fs.statSync(...).mode` no los aplica igual.
+  - `jobs.test.js`, `coach-limits.test.js`, `routes.test.js`: dependen de lanzar
+    `coach/fixture-cli.mjs` como proceso hijo a partir de `new URL(...).pathname`, que en Windows
+    da una ruta con barra inicial delante de la letra de unidad (`/C:/Users/...`) y no resuelve.
+  - Se verificó **antes** de aceptar esto: `prompts.test.js` sí era un CRLF real (ver debajo) y con
+    el arreglo pasó a verde; los otros 17 no cambiaron con el mismo arreglo, así que la causa es
+    distinta y está diagnosticada arriba, no es la misma familia de fallo.
+  - No se toca código de upstream por esto: la función solo corre de verdad en el contenedor Linux,
+    que es donde de hecho se verificó (ver más abajo).
+- **Trampa de CRLF de Windows, para cualquier tarea futura del ciclo 6.** `core.autocrlf` estaba en
+  `true` a nivel global y el repo no trae `.gitattributes`. Consecuencia real, no hipotética:
+  `api/coach/prompts/*.md` se bajaron con CRLF y `prompts.test.js` (que compara ese `.md` contra el
+  `.js` generado, byte a byte) fallaba por eso, no por ningún bug. Se puso `core.autocrlf=false`
+  **solo en este repo** (`git config core.autocrlf false`, sin tocar la config global) y se
+  re-hizo `git checkout` de los ficheros afectados. **Un primer intento de arreglo se equivocó**:
+  un `git checkout -- .` inmediatamente después de cambiar `core.autocrlf` no reescribió nada por
+  una cache de índice obsoleta ("racy git"); hizo falta un segundo `git checkout` para que surtiera
+  efecto — compruébese con `git hash-object <fichero>` contra `git rev-parse HEAD:<fichero>`, no
+  fiarse de que el primer intento haya bastado.
+  **Consecuencia que hay que vigilar en cada tarea de aquí en adelante:** el primer `Edit` sobre
+  `.gitignore` en esta sesión heredó CRLF del checkout viejo (hecho antes de tocar `core.autocrlf`)
+  y generó un commit que reformateaba el fichero entero (24 líneas tocadas por 1 línea real de
+  cambio) — exactamente lo que la regla dura de U6 prohíbe hacerle a un fichero de upstream. Se
+  corrigió con un commit de arreglo aparte (`6f17fe4`) que devuelve LF y dejando el diff en una
+  sola línea contra `upstream/main`. **Para cualquier fichero de upstream que se edite en este
+  ciclo: comprobar `file <fichero>` antes y después de tocarlo, y el diff contra `upstream/main`
+  antes de commitear** — un editor que preserva el estilo de línea ya presente en disco no protege
+  si ese estilo en disco ya estaba mal por el checkout.
+- **Docker Desktop no estaba arrancado** al empezar el paso 6 de U0 — es decir, **producción no se
+  estaba sirviendo** en ese momento. Al abrirlo, los tres contenedores de producción
+  (`opengym-web-1`, `opengym-api-1`, `opengym-cloudflared-1`) se reiniciaron solos por su política
+  `restart: unless-stopped`, usando la imagen ya desplegada (`registry.gitlab.com/duartesantos8/...`,
+  no la de `ghcr.io` que trae ya `docker-compose.yml` en esta rama). Verificado que siguen sirviendo
+  en `localhost:8080` tras la comprobación de abajo; **queda pendiente que el dueño confirme desde
+  fuera** (el dominio real, no localhost) que el túnel de Cloudflare reconectó bien.
+- **Upstream v1.3.8 levanta limpio, aislado de producción.** Se usó un proyecto Docker separado
+  (`docker compose -p opengym-u0-test`, ver `.agent/u0-isolated-override.yml`, no commiteado) con
+  `DATA_DIR` en una carpeta vacía y el puerto de `web` remapeado a 8099 en vez de 8080 — **nunca se
+  tocaron los contenedores de producción ni `./data`**. `GET /api/health` → `{"ok":true,"users":0}`,
+  la SPA carga en `http://localhost:8099/`. Stack de prueba parado y borrado (`down`) al terminar.
+  **Nota de Compose para el futuro:** el override de `ports` no reemplaza el mapeo del compose base
+  por defecto — los concatena, y arrancar con los dos intenta ocupar también el puerto real y
+  falla. Hace falta la etiqueta `!override` de la especificación de Compose (`ports: !override`)
+  para reemplazar la lista entera; `volumes` sí se reemplaza por servicio sin necesitar la etiqueta.
+- `.gitignore` de esta rama recibe `.agent/` (ficheros de planes de agentes, igual que en el fork
+  original) — commit `6f17fe4` en `rebase/v1.3.7`, un fichero, no fusionado a `develop`.
+
+### Trabajo aparecido después de U0: el silenciado de Strava (2026-09-21)
+
+El dueño avisó de que había trabajo de otra sesión en la rama `claude/strava-hidden-workouts-la63cn`
+(un commit, `be89ea8`), **que no estaba en `main`, ni en `develop`, ni en la etiqueta
+`v1.2.9-fork-final`**. Eso convertía la etiqueta de retorno en un punto de retorno incompleto y, peor,
+**U3 lo habría perdido en silencio**: su brief dice sacar los ficheros de Strava de esa etiqueta.
+Es exactamente el riesgo "se pierde algo del fork sin que nadie lo note" de la tabla de
+`PLAN-UPSTREAM.md`, y solo se evitó porque el dueño lo mencionó. **Lección de proceso: antes de cada
+tarea del ciclo 6, `git fetch origin --prune` y mirar si hay ramas que la etiqueta no contenga.**
+
+Qué arregla (resumen; el detalle está arriba, en la sección de `STRAVA_HIDE_FROM_HOME`): el
+silenciado solo se intentaba dentro de la petición de subida, y como necesita el `activity_id` —que
+no existe hasta que Strava termina de procesar— el caso **normal** era no silenciar nunca, devolviendo
+un `200` limpio que ningún cliente lee. Ahora lo pendiente se persiste en `strava-mutes-<uid>.json` y
+lo reintenta un barrido de fondo (15 s de base, 8 intentos, abandono a los 30 min), que sobrevive a un
+reinicio. Un duplicado también se silencia ahora: su id vive dentro del texto del error.
+
+Consecuencias para el resto del ciclo 6, ya comprobadas:
+- **U3:** los ficheros de Strava se traen de `v1.2.9-fork-strava` (etiqueta nueva, ver abajo), **no**
+  de `v1.2.9-fork-final`. Añade tres ganchos de prueba a los tres que ya había:
+  `STRAVA_MUTE_SWEEP_MS`, `STRAVA_MUTE_RETRY_BASE_MS` y `STRAVA_MUTE_MAX_AGE_MS`.
+- **U4:** **no añade ningún módulo nuevo a `api/`**, así que el riesgo del `COPY` uno a uno del
+  `api/Dockerfile` no cambia. Sí toca `.env.production.example`, que U4 posee.
+- **U5:** aparece un fichero de runtime por perfil, `strava-mutes-<uid>.json`, que el recon de U5
+  debe incluir en la lista de "campos y ficheros aditivos del fork que tienen que sobrevivir".
+  `scripts/backup.sh` ya lo cubre: empaqueta `data/` entero.
+
+**Etiqueta `v1.2.9-fork-strava`**: el estado completo del fork, este arreglo incluido. Es la que usan
+U1–U6 para restaurar ficheros propios. `v1.2.9-fork-final` se conserva como punto de retorno de `main`
+anterior a este despliegue, pero **está incompleta**: no la uses para restaurar nada.
+
 ## Registro
 
 | Fecha | Qué |
 |-------|-----|
 | 2026-09-04 | Rama `develop` creada desde `main`. `PLAN.md` y `ESTADO.md` escritos. |
 | 2026-09-07 | Ciclo 4 planificado: `PLAN-NOTIFICACIONES.md`. N0 cerrado en el móvil. N1 fusionado. |
+| 2026-09-21 | Ciclo 6, U0 hecho: rama `rebase/v1.3.7` desde upstream v1.3.8, backup y etiqueta de retorno, línea base medida (1584 front / 176 de 193 api), stack de upstream verificado en Docker aislado sin tocar producción. |
+| 2026-09-21 | Arreglo del silenciado de Strava (`be89ea8`) rescatado de una rama suelta, fusionado a `develop` y desplegado a `main`. Etiqueta `v1.2.9-fork-strava` creada como el estado completo del fork para U1–U6. |

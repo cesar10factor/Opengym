@@ -197,6 +197,66 @@ export function classifyUploadStatus(body) {
   return UPLOAD_STATUS_UNKNOWN;
 }
 
+/* ---------- finding the activity id to act on (T15) ---------- */
+// Muting an upload (hide_from_home) needs its activity_id, and there are two places it can come
+// from — which is the whole reason this is a function rather than a property read.
+//
+// The obvious one is the `activity_id` field, populated once processing finishes. The other is
+// the DUPLICATE error text, which carries the id of the activity Strava kept instead: their own
+// documented example is "Test_Walk.gpx duplicate of activity 21234316", and in that body
+// activity_id is null. classifyUploadStatus already calls a duplicate a success ("it is up
+// there"), so without this the one upload we KNOW produced a live activity was also the one we
+// could never mute — the id was sitting in the error string the whole time.
+//
+// Returns a positive integer or null. Deliberately strict about the shape: this value becomes a
+// URL path segment on a PUT that edits a real activity, so a half-parsed or out-of-range number
+// must read as "no id" rather than address someone else's activity.
+const DUPLICATE_ACTIVITY_ID_PATTERN = /duplicate of activity\s+(\d+)/i;
+export function activityIdFromUpload(body) {
+  if (!body || typeof body !== 'object') return null;
+  const direct = body.activity_id;
+  if (typeof direct === 'number' && Number.isInteger(direct) && direct > 0) return direct;
+  const error = typeof body.error === 'string' ? body.error : '';
+  const m = DUPLICATE_ACTIVITY_ID_PATTERN.exec(error);
+  if (!m) return null;
+  const parsed = Number(m[1]);
+  return Number.isInteger(parsed) && parsed > 0 && Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+/* ---------- pending-mute scheduling (T15) ---------- */
+// How long after an upload we keep trying to mute it, and how far apart the attempts are.
+//
+// Strava processes uploads asynchronously and takes as long as it takes — seconds usually, but
+// minutes often enough that a mute which only ever ran inside the upload request was, in
+// practice, a mute that mostly did not run. These bounds are what make the retry outlive the
+// request without turning into an unbounded background job: attempts back off geometrically from
+// 15s, and the whole thing is abandoned after MUTE_MAX_AGE_MS whatever state it is in.
+//
+// baseMs/maxAgeMs are parameters rather than bare constant reads for the same reason
+// STRAVA_UPLOAD_POLL_DELAY_MS is an env var: a test must be able to compress the schedule without
+// waiting out a real backoff. Defaults are the production values; a real deployment overrides
+// neither.
+export const MUTE_RETRY_BASE_MS = 15 * 1000;
+export const MUTE_MAX_AGE_MS = 30 * 60 * 1000;
+export const MUTE_MAX_ATTEMPTS = 8;
+
+// When the next attempt on a pending mute is due: 15s, 30s, 1m, 2m, 4m, 8m, 16m... capped at a
+// quarter of the give-up window so a late attempt is still scheduled for a time at which the entry
+// has not already expired. Pure, so the schedule is asserted directly rather than waited out.
+export function nextMuteAttemptAt(attempts, now, baseMs = MUTE_RETRY_BASE_MS, maxAgeMs = MUTE_MAX_AGE_MS) {
+  const backoff = Math.min(baseMs * Math.pow(2, Math.max(0, attempts)), maxAgeMs / 4);
+  return now + backoff;
+}
+
+// Whether a pending mute is worth another attempt. Age is checked against `firstAt` (when the
+// upload happened) rather than attempt count alone, so a server that was down for an hour drops
+// stale work at boot instead of replaying it against activities the user has long since seen.
+export function muteIsExpired(pending, now, maxAgeMs = MUTE_MAX_AGE_MS) {
+  if (!pending) return true;
+  if (!Number.isFinite(pending.firstAt) || now - pending.firstAt >= maxAgeMs) return true;
+  return (pending.attempts || 0) >= MUTE_MAX_ATTEMPTS;
+}
+
 /* ---------- granted scope check ---------- */
 // Strava's consent screen lets the user untick individual permissions; the callback's `scope`
 // query param reports what was actually granted (comma-separated), which can be narrower than
