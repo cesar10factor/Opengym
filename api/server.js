@@ -274,26 +274,54 @@ function pushNavigate(target) {
    web-push needs nothing special for this: it already encrypts with the standard aes128gcm
    (RFC 8291) and WebKit only cares about the decrypted JSON — checked against the library source
    and WebKit's documentation, there is no content-type or encoding switch to set. */
+/* How long a push service may keep an alert it could not deliver yet, when the caller says nothing.
+
+   `web-push` defaults to FOUR WEEKS, and that default is what made alerts turn up in a batch. An
+   undeliverable push (no coverage, the phone in Doze, Chrome frozen by battery optimisation) is not
+   dropped, it is QUEUED — and the whole queue is flushed the moment the device becomes reachable
+   again, which in practice is when the app is opened. Urgency only buys a faster attempt; nothing
+   but TTL decides when an alert stops being worth delivering.
+
+   Nothing this server sends survives the day it was sent, so every caller passes its own `ttl` and
+   this default is deliberately short: it covers the test notification and anything added later,
+   where "it could not be delivered now" means the alert failed, not that it should surface at some
+   unrelated moment half an hour on. */
+const PUSH_TTL_DEFAULT_S = 60;
+
+/* The Topic header collapses the queue: a push replaces any undelivered one carrying the same
+   topic for that subscription, instead of stacking behind it. The tag is the right value because it
+   already means exactly that on screen — same tag, one notification, the newest wins — so queue and
+   tray agree. It is a belt to the TTL brace, for the case of two rests in a row with no coverage.
+   web-push THROWS on a topic outside this alphabet or over 32 chars, and a throw here would cost
+   the notification itself, so a tag that doesn't qualify simply travels without a topic. */
+const PUSH_TOPIC_OK = /^[A-Za-z0-9\-_]{1,32}$/;
+
 async function sendPush(userId, payload) {
   const subs = db.subs.filter(s => s.userId === userId);
   if (!subs.length) return;
+  const tag = payload.tag || 'opengym';
   const body = JSON.stringify({
     web_push: 8030,
     notification: {
       title: payload.title || 'openGym',
       body: payload.body || '',
-      tag: payload.tag || 'opengym',
+      tag,
       navigate: pushNavigate(payload.navigate)
     }
   });
+  // Rounded and floored rather than trusted: web-push rejects a non-integer or negative TTL by
+  // throwing, which would turn a caller's typo into a silently missing notification.
+  const ttl = Number.isFinite(payload.ttl) ? Math.max(0, Math.round(payload.ttl)) : PUSH_TTL_DEFAULT_S;
+  const options = { urgency: 'high', TTL: ttl };
+  if (PUSH_TOPIC_OK.test(tag)) options.topic = tag;
   let dirty = false;
   await Promise.all(subs.map(async sub => {
-    // urgency 'high' is the one lever we have over delivery speed — iOS/Android throttle
-    // low-urgency background push more aggressively under battery-saving modes. TTL is left
-    // at the library default (long) so a briefly-offline device still gets it once reconnected,
-    // rather than risking it being dropped for the sake of shaving off latency that TTL doesn't
-    // actually control anyway.
-    try { await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, body, { urgency: 'high' }); }
+    // urgency 'high' is the one lever we have over delivery SPEED — iOS/Android throttle
+    // low-urgency background push far more aggressively under battery-saving modes, and a normal
+    // -urgency message can sit in Doze until the next maintenance window. It is legitimate here:
+    // every push this server sends paints a visible notification at once, which is precisely the
+    // condition the standard attaches to high urgency.
+    try { await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, body, options); }
     catch (e) {
       console.error('push send failed', userId, e.statusCode, e.body || e.message);
       if (e.statusCode === 404 || e.statusCode === 410) {
@@ -357,6 +385,11 @@ function armRestTimer(userId, delayMs, body = '') {
       title: 'Rest over 💪',
       body: body || REST_BODY_FALLBACK,
       tag: 'rest-timer',
+      // Deliberately the same threshold the reboot path uses above: an alert this server refuses
+      // to fire itself once it is that late must not be one it lets a push service deliver later.
+      // Past it you are already mid-next-set, and "rest over" is noise — the exact shape of the
+      // batch-on-open symptom, only sourced from the queue instead of from disk.
+      ttl: REST_TIMER_MAX_LATE_MS / 1000,
       // The app is a HashRouter (frontend/src/App.jsx), so the workout screen is /#/workout —
       // "/workout" would 404 into the app root and look like the deep link almost worked.
       navigate: '/#/workout'
@@ -394,6 +427,13 @@ function cancelRestTimer(userId) {
   if (kept.length !== db.restTimers.length) { db.restTimers = kept; saveDb(); }
   else db.restTimers = kept;
 }
+
+/* How long the "workout planned today" reminder stays worth delivering.
+   Long enough to survive a morning with the phone in a dead zone or switched off, short enough that
+   it can never arrive in the middle of the night or on the following day — which for a reminder
+   about TODAY would be actively misleading, not merely late. The daily `lastReminder` guard stops
+   it repeating; this stops a stale copy of it appearing hours after the gym closed. */
+const DAY_REMINDER_TTL_S = 3 * 3600;
 
 // "Workout planned today" reminder — one per user per day, at their chosen time.
 // Duplicated (not imported) from frontend/src/lib/history.js effectiveRoutineId — tiny pure helper, not worth sharing across the two runtimes.
@@ -434,7 +474,8 @@ setInterval(() => {
     sendPush(user.id, {
       title: routine ? `${routine.emoji || '🏋️'} ${routine.name} today` : 'Workout planned today',
       body: "It's on your plan — let's go 💪",
-      tag: 'day-reminder'
+      tag: 'day-reminder',
+      ttl: DAY_REMINDER_TTL_S
     });
   }
 // Checked every 10s (not 60s) — ticks aren't aligned to the top of the minute, so a 60s
