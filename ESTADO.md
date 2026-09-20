@@ -392,7 +392,8 @@ Decisiones del ciclo 4 (no reabrir):
 |---|-------|------|--------|-----------------|
 | B1 | El buscador de ejercicios tumbaba la pantalla | `fix/search-crash-custom-exercises` | **hecho** | `9d46ea3` (588 tests), desplegado en `cfa61fd` |
 | B2 | Strava: no sube y "conectar" da error | — | **abierto** — falta el mensaje de error exacto | — |
-| B3 | Las push no llegaban con la app cerrada y entraban en bloque al abrirla | `fix/push-ttl` | **hecho** | `2f0b699` (193 api + 611 front) |
+| B3 | Las push no llegaban con la app cerrada y entraban en bloque al abrirla | `fix/push-ttl` | **hecho** | `2f0b699` (193 api + 611 front), desplegado en `1454d8f` |
+| B4 | Las notificaciones se apilaban en la bandeja hasta borrarlas a mano | `fix/notification-stacking` | **hecho** | `3366408` (193 api + 623 front) |
 | M1 | Mejora futura: añadir ejercicios a rutinas | — | **abierto, sin especificar** — el dueño dirá qué quiere | — |
 
 Hallazgos del ciclo 5 (no reabrir):
@@ -419,6 +420,30 @@ Hallazgos del ciclo 5 (no reabrir):
   veía: una regresión al valor por defecto habría sido invisible hasta la siguiente tarde sin
   cobertura. El gancho de captura de `push-payload.integration.test.js` graba ahora también las
   opciones, y hay tres tests que las fijan.
+- **B4, causa raíz: el aviso local de fin de descanso no llevaba `tag`.** `maybeRestNotification`
+  (`useUI.js`) mostraba la notificación **sin etiqueta**, y una notificación sin etiqueta no
+  reemplaza a nada: cada descanso dejaba su propia entrada permanente. Y como la push del servidor
+  **sí** lleva `tag`, cada descanso producía **dos** notificaciones para un solo evento. Ahora usa
+  el mismo `rest-timer` y el mismo texto de "qué toca" que la push, así que las dos se funden en una
+  y el descanso siguiente la reemplaza. Era exactamente el riesgo que anotó N1 en
+  `PLAN-NOTIFICACIONES.md`; se dio por descartado porque el aviso local solo actúa con la pestaña
+  oculta, que es justo cuando la push también llega.
+- **Sin `renotify` en el aviso local, a propósito.** El pitido y la vibración de ese descanso acaban
+  de sonar en la línea de arriba; reemplazar una push ya entregada tiene que ser silencioso o el
+  arreglo cambia dos notificaciones por dos sonidos.
+- **El `tag` solo colapsa avisos del mismo tipo.** Un "hoy toca entrenar" sin descartar seguía ahí
+  cuando empezaban a llegar los descansos. `sw.js` cierra ahora los de **otra** etiqueta antes de
+  pintar el nuevo: todo lo que manda esta app es sobre el momento, así que un aviso viejo no merece
+  quedarse en cuanto existe uno nuevo. Los del mismo `tag` se dejan estar: los reemplaza
+  `showNotification` sola, sin parpadeo y conservando el sentido de `renotify`.
+- **Nada de esto puede costar la notificación.** `getNotifications()` va envuelto y
+  `showNotification` se alcanza igual y sigue dentro de `waitUntil`: una push entregada que no pinta
+  nada es lo que revoca la suscripción en iOS, en silencio.
+- **En iPhone esto no se ejecuta.** Safari pinta la push declarativa sin arrancar el service worker,
+  así que allí el `tag` es todo el mecanismo. Limitación de plataforma, no algo que rodear.
+- **`public/sw.js` no tenía ni un test**, que es el peor sitio donde no tenerlos: es la pieza que
+  corre con la app cerrada. Ahora se carga como fuente contra un `self` de mentira
+  (`frontend/src/sw.test.js`).
 
 - **B1, causa raíz: `mergePlan` escribía ejercicios personalizados incompletos.** Solo ponía
   `id`/`n`/`bp`/`desc`, dejando `tg` y `eq` en `undefined`, mientras que el formulario de creación
