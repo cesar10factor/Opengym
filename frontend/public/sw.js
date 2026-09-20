@@ -14,19 +14,43 @@ self.addEventListener('activate', e => {
    server that sends to it, or newer than one not yet redeployed. Neither order may lose an alert.
    A throw in here would mean a delivered push with no visible notification, which is exactly what
    costs the subscription on iOS — hence the try/catch and the defaults on every field. */
+/* One openGym notification at a time.
+
+   The `tag` already collapses repeats of the SAME alert — a new rest-over replaces the previous
+   rest-over — but nothing stopped alerts of different kinds piling up: a "workout planned today"
+   nobody dismissed still sitting there when the rests start arriving. Every alert this app sends
+   is about right now, so an older one is never worth keeping once a newer one exists, and the
+   honest tray is a tray with the current alert in it and nothing else.
+
+   Same-tag ones are left alone on purpose: `showNotification` replaces those itself, which keeps
+   the replacement atomic (closing first would blink the tray) and keeps `renotify` meaningful.
+
+   Not reachable on iOS: Safari paints a declarative push without ever starting the service worker,
+   so there the tag is the whole mechanism. That is a platform limit, not something to work around
+   — the tag still collapses each kind on its own. */
+async function closeOtherNotifications(tag) {
+  try {
+    const open = await self.registration.getNotifications()
+    for (const n of open) if (n.tag !== tag) n.close()
+  } catch { /* never let tray housekeeping cost the notification itself */ }
+}
+
 self.addEventListener('push', e => {
   let data = {}
   try { data = e.data ? e.data.json() : {} } catch { data = {} }
   const n = (data && data.notification) || data || {}
-  e.waitUntil(self.registration.showNotification(n.title || 'openGym', {
+  const tag = n.tag || 'opengym'
+  // showNotification stays inside waitUntil and is always reached: a delivered push that paints
+  // nothing is what costs the subscription on iOS (see the INVARIANT in api/server.js).
+  e.waitUntil(closeOtherNotifications(tag).then(() => self.registration.showNotification(n.title || 'openGym', {
     body: n.body || '',
     icon: 'icon-512.png',
     badge: 'icon-180.png',
-    tag: n.tag || 'opengym',
+    tag,
     renotify: true,
     // Carried through so the click handler goes where the payload says, not always to the root.
     data: { navigate: n.navigate || './' }
-  }))
+  })))
 })
 self.addEventListener('notificationclick', e => {
   e.notification.close()
