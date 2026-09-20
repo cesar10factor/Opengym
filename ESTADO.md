@@ -392,9 +392,33 @@ Decisiones del ciclo 4 (no reabrir):
 |---|-------|------|--------|-----------------|
 | B1 | El buscador de ejercicios tumbaba la pantalla | `fix/search-crash-custom-exercises` | **hecho** | `9d46ea3` (588 tests), desplegado en `cfa61fd` |
 | B2 | Strava: no sube y "conectar" da error | — | **abierto** — falta el mensaje de error exacto | — |
+| B3 | Las push no llegaban con la app cerrada y entraban en bloque al abrirla | `fix/push-ttl` | **hecho** | `2f0b699` (193 api + 611 front) |
 | M1 | Mejora futura: añadir ejercicios a rutinas | — | **abierto, sin especificar** — el dueño dirá qué quiere | — |
 
 Hallazgos del ciclo 5 (no reabrir):
+
+- **B3, causa raíz: el TTL por defecto de `web-push` son cuatro semanas.** Una push que no se puede
+  entregar (móvil en Doze, sin cobertura, Chrome congelado por la optimización de batería) **no se
+  pierde: se encola**, y la cola se vacía entera en cuanto el dispositivo vuelve a ser alcanzable —
+  en la práctica, al abrir la app. Ese es el síntoma exacto, y no era un fallo de entrega.
+- **La urgencia ya era `high` y no era el problema.** `urgency` acelera el intento; **solo el TTL
+  decide cuándo un aviso deja de merecer entrega**. Confundir las dos cosas es lo que dejó el
+  comentario anterior de `sendPush` justificando el TTL largo como una virtud.
+- **Contradicción interna que lo delataba:** el servidor descarta un aviso de descanso con más de
+  `REST_TIMER_MAX_LATE_MS` (2 min) de retraso al rearmar tras un reinicio, y a la vez se lo
+  entregaba a FCM con cuatro semanas de margen. Ahora el aviso de descanso usa **esa misma
+  constante** como TTL: las dos vías se rinden en el mismo instante.
+- TTL por emisor: descanso 120 s · recordatorio del día 3 h (sobrevive a una mañana sin cobertura y
+  nunca aparece de madrugada ni al día siguiente) · por defecto 60 s (notificación de prueba y lo
+  que se añada después).
+- **Cabecera `Topic` = el `tag`.** Un aviso sin entregar es **reemplazado** en la cola por el
+  siguiente en vez de apilarse: la misma regla que el `tag` ya aplica en pantalla. `web-push`
+  **lanza excepción** con un topic fuera de `[A-Za-z0-9-_]{1,32}`, y una excepción ahí costaría la
+  notificación entera, así que un tag que no cumpla viaja sin topic.
+- **Las opciones de entrega no viajan en el payload**, así que ningún test de los que había las
+  veía: una regresión al valor por defecto habría sido invisible hasta la siguiente tarde sin
+  cobertura. El gancho de captura de `push-payload.integration.test.js` graba ahora también las
+  opciones, y hay tres tests que las fijan.
 
 - **B1, causa raíz: `mergePlan` escribía ejercicios personalizados incompletos.** Solo ponía
   `id`/`n`/`bp`/`desc`, dejando `tg` y `eq` en `undefined`, mientras que el formulario de creación
