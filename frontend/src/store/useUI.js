@@ -56,19 +56,40 @@ const requestRestNotificationPermission = async () => {
   return requestRestNotificationPermissionP
 }
 
+/* The tag the server puts on the rest-over push (api/server.js, `tag: 'rest-timer'`). A literal on
+   both sides rather than a shared constant — they live in different runtimes — so they have to be
+   changed together.
+
+   This local alert and that push announce THE SAME rest, and both can fire for it. Sharing the tag
+   is what makes the tray show one notification instead of two, and makes the next rest replace this
+   one instead of queueing behind it. Without it every rest that ended with the app in the
+   background left its own entry, permanently, until dismissed by hand. */
+const REST_NOTIFICATION_TAG = 'rest-timer'
+
 const maybeRestNotification = async () => {
   if (!notificationsSupported()) return
   if (!document.hidden && document.visibilityState !== 'hidden') return
   if (Notification.permission !== 'granted' && !(await requestRestNotificationPermission())) return
   try {
+    const options = {
+      // Same line the push carries. The two race to land and either may win; the alert must not
+      // say something different depending on which one did.
+      body: restBody() || t('Rest over — next set!'),
+      tag: REST_NOTIFICATION_TAG,
+      // Deliberately no `renotify`: replacing a push that already sounded must be silent. The beep
+      // and the vibration for this rest have just fired locally, two lines up the call site — a
+      // second alert for one rest is the noise this is meant to remove, not add.
+      icon: 'icon-512.png',
+      badge: 'icon-180.png'
+    }
     // Android Chrome forbids the Notification constructor (Illegal constructor) - the
     // service-worker registration path is the one that actually pops there.
     const reg = await navigator.serviceWorker?.getRegistration?.()
     if (reg?.showNotification) {
-      reg.showNotification(t('Rest over — next set!'), { body: t('Rest over — next set!') })
+      reg.showNotification(t('Rest over — next set!'), options)
       return
     }
-    new Notification(t('Rest over — next set!'), { body: t('Rest over — next set!') })
+    new Notification(t('Rest over — next set!'), options)
   } catch {
     // Intentionally ignore: notification APIs vary by browser and policy in edge cases.
   }
