@@ -13,7 +13,8 @@ import { createLink, validateLink, burnLink, pruneLinks, recordFailure, isThrott
 import {
   createState, signState, validateState, burnState, pruneStates,
   needsRefresh, tokenFromExchange, tokenFromRefresh, isCompleteToken, hasRequiredScope,
-  classifyUploadStatus, UPLOAD_STATUS_SUCCESS, UPLOAD_STATUS_FAILURE
+  classifyUploadStatus, UPLOAD_STATUS_SUCCESS, UPLOAD_STATUS_FAILURE,
+  activityIdFromUpload, nextMuteAttemptAt, muteIsExpired, MUTE_RETRY_BASE_MS, MUTE_MAX_AGE_MS
 } from './strava.js';
 
 const PORT = +(process.env.PORT || 3000);
@@ -85,13 +86,23 @@ const STRAVA_UPLOAD_POLL_DELAY_MS = +(process.env.STRAVA_UPLOAD_POLL_DELAY_MS ||
 // On by default — the whole point is "synced workouts are quiet by default" — and switched off
 // with STRAVA_HIDE_FROM_HOME=0 (also '', 'false', 'no', 'off').
 const STRAVA_HIDE_FROM_HOME = !/^(0|false|no|off)$/i.test(String(process.env.STRAVA_HIDE_FROM_HOME ?? '1').trim());
-// Muting needs the activity_id, which only exists once Strava has FINISHED processing the upload —
-// the single post-201 poll is often, but not always, late enough to see it. These are the extra
-// polls taken (spaced by STRAVA_UPLOAD_POLL_DELAY_MS, same bounded timeout each) purely to catch
-// an activity_id that had not appeared yet, and they run ONLY when muting is on and the first poll
-// was inconclusive. 2 extra attempts bounds the added wait at ~2x the poll delay on the slow path,
-// while the common case (a small JSON upload, already processed at the first poll) takes none.
+// Muting needs the activity_id, which only exists once Strava has FINISHED processing the upload.
+// These are the extra polls taken inside the request (spaced by STRAVA_UPLOAD_POLL_DELAY_MS, same
+// bounded timeout each) to catch an id that had not appeared at the first poll, and they run ONLY
+// when muting is on and that first poll was inconclusive.
+//
+// They are an optimisation, not the mechanism: an upload still processing after them is queued and
+// muted later by the sweeper below. That distinction is the fix for the original bug — these polls
+// WERE the mechanism, so the many uploads Strava takes longer than ~6s to process were never muted
+// at all, silently, while the request reported a clean success.
 const STRAVA_MUTE_EXTRA_POLLS = Math.max(0, +(process.env.STRAVA_MUTE_EXTRA_POLLS ?? 2) || 0);
+// How often the pending-mute sweeper wakes to retry queued mutes, and the two bounds of the
+// per-entry schedule it applies (backoff from 15s; the whole entry abandoned after 30 minutes —
+// see strava.js). All three exist for the test suite, same convention as STRAVA_TIMEOUT_MS and
+// STRAVA_UPLOAD_POLL_DELAY_MS above: a real deployment leaves them alone.
+const STRAVA_MUTE_SWEEP_MS = Math.max(50, +(process.env.STRAVA_MUTE_SWEEP_MS || 15000) || 15000);
+const STRAVA_MUTE_RETRY_BASE_MS = Math.max(10, +(process.env.STRAVA_MUTE_RETRY_BASE_MS || MUTE_RETRY_BASE_MS) || MUTE_RETRY_BASE_MS);
+const STRAVA_MUTE_MAX_AGE_MS = Math.max(100, +(process.env.STRAVA_MUTE_MAX_AGE_MS || MUTE_MAX_AGE_MS) || MUTE_MAX_AGE_MS);
 // Version marker (N6): which commit this container was built from. The image has no .git, so the
 // values arrive as build args promoted to ENV in api/Dockerfile — see docker-compose.yml and
 // scripts/auto-deploy.ps1 for who fills them in. Everything here is optional: an image built
@@ -202,6 +213,68 @@ function recordStravaUpload(uid, workoutId) {
 // workout that never actually uploaded.
 const stravaInFlight = new Set();
 const inFlightKey = (uid, workoutId) => uid + ' ' + workoutId;
+
+/* ---------- pending mutes (T15) ---------- */
+// Muting an upload needs its activity_id, which only exists once Strava has FINISHED processing —
+// and Strava takes as long as it takes. The first version of this feature only ever tried inside
+// the upload request, across a handful of polls spanning a few seconds, and gave up silently when
+// the id had not appeared yet. That is the common case, not the rare one, which is why synced
+// workouts kept landing in the feed while the server reported a clean upload.
+//
+// So the mute outlives the request: anything not settled inline is written here and retried by the
+// sweeper below until it lands or ages out. One file per user, same convention as the stores
+// above, so nothing needs migrating — a user with no pending mutes simply has no file.
+const stravaMutesFile = uid => path.join(DATA, 'strava-mutes-' + uid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
+// Same "null means unreadable" contract as readStravaUploads, for the same reason in reverse: a
+// file we cannot parse must not be silently replaced by a fresh one, which would drop mutes that
+// are still pending. [] is "nothing pending", null is "do not touch this file".
+function readStravaMutes(uid) {
+  let raw;
+  try { raw = fs.readFileSync(stravaMutesFile(uid), 'utf8'); }
+  catch (e) { return e.code === 'ENOENT' ? [] : null; }
+  try {
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : null;
+  } catch { return null; }
+}
+// Writing [] removes the file rather than leaving an empty array behind, so "has pending work" is
+// answerable by a directory listing at boot (see loadPendingMuteUsers) instead of by opening every
+// user's file.
+function writeStravaMutes(uid, list) {
+  if (!list.length) { try { fs.unlinkSync(stravaMutesFile(uid)); } catch { /* already gone */ } return; }
+  atomicWrite(stravaMutesFile(uid), JSON.stringify(list));
+}
+// Queue one upload for a later mute attempt. Keyed by uploadId: a retry of the same workout that
+// produces the same upload must not queue a second entry racing the first.
+function queueStravaMute(uid, entry) {
+  const list = readStravaMutes(uid);
+  if (list === null) return false;
+  if (list.some(p => p.uploadId === entry.uploadId)) return true;
+  list.push(entry);
+  writeStravaMutes(uid, list);
+  pendingMuteUsers.add(uid);
+  return true;
+}
+// Which users have pending mutes. Kept in memory so the sweeper's usual tick (nothing pending)
+// costs nothing at all, and seeded from disk at boot so a restart mid-flight resumes rather than
+// abandoning every mute the previous process had queued.
+const pendingMuteUsers = new Set();
+// The one place the configured schedule meets the pure one, so no caller has to remember to pass
+// both overrides.
+const muteAttemptAt = attempts => nextMuteAttemptAt(attempts, Date.now(), STRAVA_MUTE_RETRY_BASE_MS, STRAVA_MUTE_MAX_AGE_MS);
+// Recovering the uid from the filename is exact rather than lossy: user ids are base64url
+// (crypto.randomBytes(12).toString('base64url')), which is precisely the character set the path
+// sanitiser keeps, so the name in the file IS the uid. Cross-checked against the known users
+// anyway — a leftover or hand-dropped file must not conjure a uid the sweeper then chases.
+function loadPendingMuteUsers() {
+  let names;
+  try { names = fs.readdirSync(DATA); } catch { return; }
+  const known = new Set(db.users.map(u => u.id));
+  for (const name of names) {
+    const m = /^strava-mutes-(.+)\.json$/.exec(name);
+    if (m && known.has(m[1])) pendingMuteUsers.add(m[1]);
+  }
+}
 // Refreshes the stored token if it's expired (or close enough — see strava.js's REFRESH_MARGIN_MS)
 // and persists the new one. Not called by any route in T11 (there is no upload route yet — T12
 // adds it); kept here so T12 can call it directly rather than re-deriving the exchange call.
@@ -632,6 +705,9 @@ let auditCount = 0;
 // one source from another, not enough to point at a person.
 function clientIp(req) {
   if (AUDIT_IP === 'off') return null;
+  // Background work audits with no request at all (the pending-mute sweeper). "No request" means
+  // no IP, not a crash — audit() promises never to throw, and it calls straight into here.
+  if (!req || !req.headers) return null;
   const raw = String(req.headers['cf-connecting-ip'] || '').trim()
     || String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
     || String(req.headers['x-real-ip'] || '').trim();
@@ -1624,10 +1700,32 @@ if (STRAVA_ENABLED) {
     // already succeeded and been recorded by this point, so a mute that fails (Strava down, the
     // activity_id never showed up, a rejected PUT) must never turn a landed workout into an error
     // the client would retry — that retry would upload a second copy to fix a cosmetic problem.
-    // `muted` reports honestly which of the two happened, and is absent entirely when the feature
-    // is switched off.
+    //
+    // What "best-effort" must NOT mean is "attempted once and forgotten", which is what it meant
+    // before and why muting didn't work: an upload Strava was still processing had no activity_id
+    // to mute, so the mute was skipped and never revisited. Now anything unsettled here is queued
+    // for the sweeper, and `muted` reports which of the three actually happened.
     const body200 = { ok: true, upload: finalData, recorded };
-    if (STRAVA_HIDE_FROM_HOME) body200.muted = await muteStravaActivity(req, user, tok, finalData);
+    if (STRAVA_HIDE_FROM_HOME) {
+      const id = activityIdFromUpload(finalData);
+      if (id !== null && await muteStravaActivity(user, tok, id)) {
+        body200.muted = true;
+      } else if (uploadId != null) {
+        // Not settled inline. Queue it rather than reporting a clean "no": the activity exists (or
+        // is about to), and the sweeper will keep at it for the next half hour.
+        const queued = queueStravaMute(user.id, {
+          uploadId, activityId: id, attempts: 1,
+          firstAt: Date.now(), nextAt: muteAttemptAt(0)
+        });
+        audit(req, 'strava.mute.pending', { ok: queued, user, msg: id === null ? 'no-activity-id' : 'mute-failed' });
+        body200.muted = false;
+        body200.mutePending = queued;
+      } else {
+        // No upload id at all, so there is nothing to poll for later either. Genuinely done.
+        audit(req, 'strava.mute.skipped', { ok: false, user, msg: 'no-upload-id' });
+        body200.muted = false;
+      }
+    }
     json(res, 200, body200);
   };
 
@@ -1635,16 +1733,11 @@ if (STRAVA_ENABLED) {
   // followers' feeds. See STRAVA_HIDE_FROM_HOME at the top of this file for what this does and,
   // more importantly, what it does NOT do (it is not privacy; the API cannot set visibility).
   //
-  // Returns true only when Strava confirmed the change. Two ways to get false, both normal rather
-  // than exceptional: the upload has no activity_id (still processing when the last poll ran, or a
-  // duplicate — whose poll body never carries one), and a PUT that fails or is refused. Neither
-  // throws, so the caller never has to guard the call.
-  async function muteStravaActivity(req, user, tok, uploadBody) {
-    const id = uploadBody && uploadBody.activity_id;
-    if (typeof id !== 'number' || !Number.isFinite(id) || id <= 0) {
-      audit(req, 'strava.mute.skipped', { ok: false, user, msg: 'no-activity-id' });
-      return false;
-    }
+  // Returns true only when Strava confirmed the change, false on any refusal or network failure,
+  // and never throws — every caller treats a failure as "try again later", not as an error to
+  // propagate. `user` is used only for the audit line; this is deliberately NOT request-scoped,
+  // because the sweeper calls it with no request at all.
+  async function muteStravaActivity(user, tok, id) {
     try {
       const r = await fetch(STRAVA_API_V3_BASE + '/activities/' + encodeURIComponent(id), {
         method: 'PUT',
@@ -1653,14 +1746,93 @@ if (STRAVA_ENABLED) {
         signal: AbortSignal.timeout(STRAVA_TIMEOUT_MS)
       });
       if (!r.ok) {
-        audit(req, 'strava.mute.fail', { ok: false, user, msg: 'mute-' + r.status });
+        audit(null, 'strava.mute.fail', { ok: false, user, msg: 'mute-' + r.status });
         return false;
       }
       return true;
     } catch (e) {
-      audit(req, 'strava.mute.fail', { ok: false, user, msg: e.message });
+      audit(null, 'strava.mute.fail', { ok: false, user, msg: e.message });
       return false;
     }
+  }
+
+  // One GET /uploads/{id}, outside any request. Same "null means inconclusive" contract as the
+  // in-request poll; separate because that one closes over the request's token and upload id.
+  async function pollUploadOnce(tok, uploadId) {
+    try {
+      const r = await fetch(STRAVA_API_V3_BASE + '/uploads/' + encodeURIComponent(uploadId), {
+        headers: { Authorization: 'Bearer ' + tok.access },
+        signal: AbortSignal.timeout(STRAVA_TIMEOUT_MS)
+      });
+      if (!r.ok) return null;
+      try { return await r.json(); } catch { return null; }
+    } catch { return null; }
+  }
+
+  // One attempt at one pending mute. Returns true when the entry is finished with — muted, or
+  // abandoned because there is nothing left to mute — and false when it should be retried.
+  async function attemptPendingMute(uid, pending) {
+    const user = { id: uid };
+    const tok = await ensureFreshStravaToken(uid);
+    // No token means the user disconnected Strava since uploading. Their activity is no longer
+    // ours to edit, and no amount of retrying will get it back — drop the entry.
+    if (!tok) { audit(null, 'strava.mute.gaveup', { ok: false, user, msg: 'not-connected' }); return true; }
+
+    let id = pending.activityId;
+    if (id === null || id === undefined) {
+      const body = await pollUploadOnce(tok, pending.uploadId);
+      // A poll that says the activity was deleted during processing is terminal: there is nothing
+      // left to hide. Anything else inconclusive just means "still processing" — retry.
+      if (body && classifyUploadStatus(body) === UPLOAD_STATUS_FAILURE) {
+        audit(null, 'strava.mute.gaveup', { ok: false, user, msg: 'upload-failed' });
+        return true;
+      }
+      id = activityIdFromUpload(body);
+      if (id === null) return false;
+      pending.activityId = id;                 // remembered so a failed PUT doesn't re-poll
+    }
+    if (!await muteStravaActivity(user, tok, id)) return false;
+    audit(null, 'strava.muted', { user, msg: 'attempt-' + (pending.attempts || 1) });
+    return true;
+  }
+
+  // The sweeper. Walks the users with queued mutes, retries the entries that are due, and drops
+  // the ones that are done or too old. unref'd so it never holds the process open, and re-entrancy
+  // guarded so a slow Strava can't stack overlapping sweeps on top of each other.
+  let sweeping = false;
+  async function sweepPendingMutes() {
+    if (sweeping || !pendingMuteUsers.size) return;
+    sweeping = true;
+    try {
+      for (const uid of [...pendingMuteUsers]) {
+        const list = readStravaMutes(uid);
+        if (list === null) continue;           // unreadable — leave it alone, try again next tick
+        if (!list.length) { pendingMuteUsers.delete(uid); continue; }
+        const now = Date.now();
+        const keep = [];
+        for (const pending of list) {
+          if (muteIsExpired(pending, now, STRAVA_MUTE_MAX_AGE_MS)) {
+            audit(null, 'strava.mute.gaveup', { ok: false, user: { id: uid }, msg: 'expired' });
+            continue;
+          }
+          if (pending.nextAt > now) { keep.push(pending); continue; }
+          pending.attempts = (pending.attempts || 0) + 1;
+          let done = false;
+          try { done = await attemptPendingMute(uid, pending); }
+          catch { done = false; }              // never let one entry take the sweeper down
+          if (done) continue;
+          pending.nextAt = muteAttemptAt(pending.attempts);
+          keep.push(pending);
+        }
+        writeStravaMutes(uid, keep);
+        if (!keep.length) pendingMuteUsers.delete(uid);
+      }
+    } finally { sweeping = false; }
+  }
+
+  if (STRAVA_HIDE_FROM_HOME) {
+    loadPendingMuteUsers();
+    setInterval(() => { sweepPendingMutes(); }, STRAVA_MUTE_SWEEP_MS).unref();
   }
 }
 

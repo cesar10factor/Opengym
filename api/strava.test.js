@@ -5,7 +5,9 @@ import {
   STATE_TTL_MS, REFRESH_MARGIN_MS, REQUIRED_SCOPE,
   needsRefresh, createState, signState, verifyStateSig, validateState, burnState, pruneStates,
   tokenFromExchange, tokenFromRefresh, isCompleteToken, hasRequiredScope,
-  classifyUploadStatus, UPLOAD_STATUS_SUCCESS, UPLOAD_STATUS_FAILURE, UPLOAD_STATUS_UNKNOWN
+  classifyUploadStatus, UPLOAD_STATUS_SUCCESS, UPLOAD_STATUS_FAILURE, UPLOAD_STATUS_UNKNOWN,
+  activityIdFromUpload, nextMuteAttemptAt, muteIsExpired,
+  MUTE_RETRY_BASE_MS, MUTE_MAX_AGE_MS, MUTE_MAX_ATTEMPTS
 } from './strava.js';
 
 const SECRET = 'test-secret-do-not-use-in-prod';
@@ -402,5 +404,88 @@ describe('classifyUploadStatus', () => {
   it('activity_id: 0 or a non-numeric activity_id is not treated as success', () => {
     assert.equal(classifyUploadStatus({ error: null, status: 'Your activity is ready.', activity_id: 0 }), UPLOAD_STATUS_UNKNOWN);
     assert.equal(classifyUploadStatus({ error: null, status: 'Your activity is ready.', activity_id: '12345' }), UPLOAD_STATUS_UNKNOWN);
+  });
+});
+
+// The id the mute actually PUTs to. Worth its own suite because the bug this fixed was not a
+// wrong id but a MISSING one: the only place an id could be read from was `activity_id`, so an
+// upload Strava had not finished processing (no id yet) and a duplicate (id only in the error
+// text) were both unmutable — and those are the two commonest outcomes.
+describe('activityIdFromUpload', () => {
+  it('reads a ready upload\'s activity_id', () => {
+    assert.equal(activityIdFromUpload({ error: null, status: 'Your activity is ready.', activity_id: 20071984970 }), 20071984970);
+  });
+
+  it('reads the id out of a DUPLICATE error, where activity_id is null', () => {
+    // Strava's own documented example. classifyUploadStatus already calls this a success, so
+    // without this the activity we are most certain exists would be the one never muted.
+    const body = { error: 'Test_Walk.gpx duplicate of activity 21234316', status: 'Your activity is still being processed.', activity_id: null };
+    assert.equal(activityIdFromUpload(body), 21234316);
+  });
+
+  it('a still-processing upload has no id yet — null, not a guess', () => {
+    assert.equal(activityIdFromUpload({ error: null, status: 'Your activity is still being processed.', activity_id: null }), null);
+  });
+
+  it('never returns the UPLOAD id as a fallback', () => {
+    // The upload id and the activity id are different numbers; PUTting the former would edit an
+    // unrelated activity or 404. "No activity id" must stay "no activity id".
+    assert.equal(activityIdFromUpload({ id: 9001, id_str: '9001', activity_id: null, error: null }), null);
+  });
+
+  it('rejects ids that are not positive safe integers', () => {
+    assert.equal(activityIdFromUpload({ activity_id: 0 }), null);
+    assert.equal(activityIdFromUpload({ activity_id: -5 }), null);
+    assert.equal(activityIdFromUpload({ activity_id: 1.5 }), null);
+    assert.equal(activityIdFromUpload({ activity_id: '20071984970' }), null, 'a numeric STRING is not a number here — it would still work in a URL, but accepting it hides a shape change');
+    assert.equal(activityIdFromUpload({ activity_id: null, error: 'duplicate of activity 99999999999999999999' }), null, 'past 2^53 the parse is lossy, and a lossy id addresses the wrong activity');
+  });
+
+  it('a non-duplicate error carries no id', () => {
+    assert.equal(activityIdFromUpload({ error: 'There was an error processing your activity.', activity_id: null }), null);
+  });
+
+  it('a malformed or empty body is null, not a throw', () => {
+    assert.equal(activityIdFromUpload(null), null);
+    assert.equal(activityIdFromUpload(undefined), null);
+    assert.equal(activityIdFromUpload('not an object'), null);
+    assert.equal(activityIdFromUpload({}), null);
+  });
+});
+
+describe('pending-mute scheduling', () => {
+  it('backs off geometrically from the base delay', () => {
+    const now = 1_000_000;
+    assert.equal(nextMuteAttemptAt(0, now), now + MUTE_RETRY_BASE_MS);
+    assert.equal(nextMuteAttemptAt(1, now), now + MUTE_RETRY_BASE_MS * 2);
+    assert.equal(nextMuteAttemptAt(2, now), now + MUTE_RETRY_BASE_MS * 4);
+  });
+
+  it('the backoff is capped, so a late attempt still falls inside the give-up window', () => {
+    const now = 1_000_000;
+    // Without a cap, attempt 8 alone would be ~64 minutes out — past MUTE_MAX_AGE_MS, i.e. an
+    // entry scheduled for a time at which it is already expired. Every gap must stay small
+    // enough that the attempt actually happens.
+    assert.equal(nextMuteAttemptAt(99, now), now + MUTE_MAX_AGE_MS / 4);
+    assert.ok(nextMuteAttemptAt(99, now) - now < MUTE_MAX_AGE_MS);
+  });
+
+  it('gives up once the upload is older than the window, however few attempts it has had', () => {
+    const now = 1_000_000_000;
+    assert.equal(muteIsExpired({ firstAt: now - MUTE_MAX_AGE_MS, attempts: 1 }, now), true);
+    assert.equal(muteIsExpired({ firstAt: now - MUTE_MAX_AGE_MS + 1000, attempts: 1 }, now), false);
+  });
+
+  it('gives up once the attempts are spent, however young the upload is', () => {
+    const now = 1_000_000_000;
+    assert.equal(muteIsExpired({ firstAt: now, attempts: MUTE_MAX_ATTEMPTS }, now), true);
+    assert.equal(muteIsExpired({ firstAt: now, attempts: MUTE_MAX_ATTEMPTS - 1 }, now), false);
+  });
+
+  it('a missing or malformed entry is expired rather than retried forever', () => {
+    const now = 1_000_000_000;
+    assert.equal(muteIsExpired(null, now), true);
+    assert.equal(muteIsExpired({}, now), true, 'no firstAt means we cannot bound it — drop it');
+    assert.equal(muteIsExpired({ firstAt: 'soon', attempts: 0 }, now), true);
   });
 });

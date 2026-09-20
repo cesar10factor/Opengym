@@ -264,7 +264,10 @@ describe('POST /api/strava/upload with Strava configured', () => {
       STRAVA_CLIENT_ID: 'cid', STRAVA_CLIENT_SECRET: 'csecret', STRAVA_API_BASE: stub.base(),
       // Both shrunk purely to keep this suite fast (same convention as
       // api/strava.integration.test.js's hang test) — a real deployment leaves both alone.
-      STRAVA_UPLOAD_POLL_DELAY_MS: '20', STRAVA_TIMEOUT_MS: '300'
+      // The pending-mute sweeper is pinned far beyond this suite's runtime: every test here is
+      // about what one request does, and a sweep firing mid-suite would add Strava calls the
+      // request-count assertions below do not expect. The sweeper has its own suite.
+      STRAVA_UPLOAD_POLL_DELAY_MS: '20', STRAVA_TIMEOUT_MS: '300', STRAVA_MUTE_SWEEP_MS: '600000'
     });
     await waitReady(origin);
   });
@@ -331,7 +334,11 @@ describe('POST /api/strava/upload with Strava configured', () => {
     // `muted` is false here because this upload never produced an activity_id (the poll keeps
     // saying "still processing"), and hide_from_home needs one. It is reported rather than hidden:
     // the mute is best-effort and must never turn a landed upload into a failure.
-    assert.deepEqual(JSON.parse(raw), { ok: true, upload: { id: 555, external_id: null, status: 'processing' }, recorded: true, muted: false });
+    //
+    // `mutePending` is the other half of that honesty, and the whole point of the fix: false used
+    // to be the end of the story, and this exact case -- an upload Strava had not finished
+    // processing -- is the one that silently never got muted. It is now queued for the sweeper.
+    assert.deepEqual(JSON.parse(raw), { ok: true, upload: { id: 555, external_id: null, status: 'processing' }, recorded: true, muted: false, mutePending: true });
     assert.ok(!raw.includes('REAL_ACCESS_TOKEN_VALUE'), 'the raw response text must never contain the access token');
     assert.doesNotMatch(raw, /access_token|refresh_token/i);
 
@@ -590,11 +597,11 @@ describe('POST /api/strava/upload with Strava configured', () => {
         'hide_from_home is the only field Strava exposes here — visibility is not settable via the API');
     });
 
-    it('no activity_id (a duplicate) -> nothing is muted, muted:false, and the upload is still a recorded success', async () => {
+    it('a DUPLICATE is muted using the id in its error text, even though activity_id is null', async () => {
       stub.setUploadHandler(() => ({ status: 201, body: { id: 9002, external_id: null, status: 'Your activity is still being processed.' } }));
       stub.setPollHandler(() => ({ status: 200, body: { id: 9002, error: 'opengym-w-mute-dup.json duplicate of activity 21234316', status: 'Your activity is still being processed.', activity_id: null } }));
-      let muteCalls = 0;
-      stub.setMuteHandler(() => { muteCalls++; return { status: 200, body: {} }; });
+      let muteCall = null;
+      stub.setMuteHandler(record => { muteCall = record; return { status: 200, body: {} }; });
 
       const r = await fetch(origin + '/api/strava/upload', {
         method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
@@ -603,8 +610,30 @@ describe('POST /api/strava/upload with Strava configured', () => {
       assert.equal(r.status, 200);
       const body = await r.json();
       assert.equal(body.recorded, true, 'a duplicate is still a success — muting has no say in that');
+      // The activity provably exists (Strava is refusing to file a second copy of it) and its id
+      // is right there in the error string, so this was the worst case to skip: the one upload we
+      // are certain landed in the feed was also the one that could never be quietened.
+      assert.equal(body.muted, true);
+      assert.ok(muteCall, 'the id in "duplicate of activity 21234316" is an id like any other');
+      assert.equal(muteCall.pathname, '/api/v3/activities/21234316');
+      assert.deepEqual(muteCall.body, { hide_from_home: true });
+    });
+
+    it('an upload with NO id anywhere is not muted and not queued — there is nothing to come back to', async () => {
+      stub.setUploadHandler(() => ({ status: 201, body: { id: 9006, external_id: null, status: 'Your activity is still being processed.' } }));
+      stub.setPollHandler(() => ({ status: 200, body: { id: 9006, error: null, status: 'Your activity is still being processed.', activity_id: null } }));
+      let muteCalls = 0;
+      stub.setMuteHandler(() => { muteCalls++; return { status: 200, body: {} }; });
+
+      const r = await fetch(origin + '/api/strava/upload', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ workoutId: 'w-mute-noid', payload: samplePayload() })
+      });
+      const body = await r.json();
       assert.equal(body.muted, false);
       assert.equal(muteCalls, 0, 'with no activity_id there is nothing to PUT — the guess must not be made');
+      // It IS queued, though: the upload id is known, so the sweeper can find the activity later.
+      assert.equal(body.mutePending, true);
     });
 
     it('an activity_id that only appears on a LATER poll is still muted', async () => {
@@ -686,7 +715,8 @@ describe('POST /api/strava/upload with STRAVA_HIDE_FROM_HOME=0', () => {
       JSON.stringify({ athleteId: 424242, access: 'A', refresh: 'R', expiresAt: Date.now() + 6 * 60 * 60 * 1000 }));
     proc = spawnServer(dataDir, port, origin, {
       STRAVA_CLIENT_ID: 'cid', STRAVA_CLIENT_SECRET: 'csecret', STRAVA_API_BASE: stub.base(),
-      STRAVA_UPLOAD_POLL_DELAY_MS: '20', STRAVA_TIMEOUT_MS: '300', STRAVA_HIDE_FROM_HOME: '0'
+      STRAVA_UPLOAD_POLL_DELAY_MS: '20', STRAVA_TIMEOUT_MS: '300', STRAVA_HIDE_FROM_HOME: '0',
+      STRAVA_MUTE_SWEEP_MS: '600000'
     });
     await waitReady(origin);
   });
@@ -727,5 +757,202 @@ describe('POST /api/strava/upload with STRAVA_HIDE_FROM_HOME=0', () => {
     // The extra polls exist only to catch an activity_id for the mute. With nothing to mute they
     // are pure latency, so the single-poll behaviour from before muting existed must be intact.
     assert.equal(polls, 1, 'the extra polls must not run when there is no mute to feed');
+  });
+});
+
+// Waits for a condition the background sweeper is expected to bring about. Returns the predicate's
+// value, or throws with `what` in the message — a sweeper that never runs must fail loudly rather
+// than time the whole suite out.
+async function waitFor(what, fn, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const v = await fn();
+    if (v) return v;
+    if (Date.now() > deadline) throw new Error('timed out waiting for: ' + what);
+    await new Promise(r => setTimeout(r, 25));
+  }
+}
+
+// THE REGRESSION SUITE. The original feature muted an activity only if Strava happened to finish
+// processing the upload within the request's own poll window — about six seconds. Strava routinely
+// takes longer, and when it did the mute was skipped and never retried: the request answered a
+// clean 200, the workout landed in followers' feeds, and nothing anywhere said so. Every test here
+// is about the mute surviving the end of the request that queued it.
+describe('pending mutes are retried after the upload request has finished', () => {
+  let dataDir, port, origin, proc, secret, uid, cookie, stub;
+
+  function stravaFilePath(u) { return path.join(dataDir, 'strava-' + u + '.json'); }
+  function mutesFilePath(u) { return path.join(dataDir, 'strava-mutes-' + u + '.json'); }
+  function readMutes(u) {
+    try { return JSON.parse(fs.readFileSync(mutesFilePath(u), 'utf8')); } catch { return null; }
+  }
+
+  before(async () => {
+    stub = createStravaStub();
+    await stub.listen();
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'strava-upload-sweep-'));
+    port = await getFreePort();
+    origin = `http://127.0.0.1:${port}`;
+    secret = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(path.join(dataDir, 'secret'), secret, { mode: 0o600 });
+    uid = 'u_' + crypto.randomBytes(6).toString('hex');
+    seedDb(dataDir, [{ id: uid, name: 'Sweeper', created: new Date().toISOString() }]);
+    cookie = signCookie(secret, uid);
+    fs.writeFileSync(stravaFilePath(uid), JSON.stringify({ athleteId: 424242, access: 'SWEEP_TOKEN', refresh: 'R', expiresAt: Date.now() + 6 * 60 * 60 * 1000 }));
+    proc = spawnServer(dataDir, port, origin, {
+      STRAVA_CLIENT_ID: 'cid', STRAVA_CLIENT_SECRET: 'csecret', STRAVA_API_BASE: stub.base(),
+      // The production schedule compressed: sweep every 60ms, back off from 30ms. The pure
+      // schedule itself is asserted at its real values in strava.test.js — here the only thing
+      // that matters is that the sweeper runs at all, so the test is not 15 seconds long.
+      STRAVA_UPLOAD_POLL_DELAY_MS: '20', STRAVA_TIMEOUT_MS: '300',
+      STRAVA_MUTE_SWEEP_MS: '60', STRAVA_MUTE_RETRY_BASE_MS: '30'
+    });
+    await waitReady(origin);
+  });
+
+  after(async () => {
+    await killAndWait(proc);
+    await stub.close();
+    try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch {}
+  });
+
+  it('an upload Strava is still processing when the request ends is muted later, by the sweeper', async () => {
+    // Strava stays "still processing" for longer than the request is willing to wait — the exact
+    // case that used to be dropped on the floor. 6 polls is comfortably past the in-request budget
+    // (one poll plus STRAVA_MUTE_EXTRA_POLLS), so the id CANNOT be found before the response.
+    let polls = 0;
+    stub.setUploadHandler(() => ({ status: 201, body: { id: 7001, external_id: null, status: 'Your activity is still being processed.' } }));
+    stub.setPollHandler(() => {
+      polls++;
+      return polls <= 6
+        ? { status: 200, body: { id: 7001, error: null, status: 'Your activity is still being processed.', activity_id: null } }
+        : { status: 200, body: { id: 7001, error: null, status: 'Your activity is ready.', activity_id: 70017001 } };
+    });
+    let muteCall = null;
+    stub.setMuteHandler(record => { muteCall = record; return { status: 200, body: { id: 70017001, hide_from_home: true } }; });
+
+    const r = await fetch(origin + '/api/strava/upload', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ workoutId: 'w-sweep-late', payload: samplePayload() })
+    });
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    // The request is honest about where things stand: not muted YET, but not abandoned either.
+    assert.equal(body.recorded, true);
+    assert.equal(body.muted, false);
+    assert.equal(body.mutePending, true, 'the mute must outlive the request that could not finish it');
+    assert.equal(muteCall, null, 'nothing is muted inline here — there is no id to mute yet');
+
+    await waitFor('the sweeper to mute the activity', () => muteCall);
+    assert.equal(muteCall.method, 'PUT');
+    assert.equal(muteCall.pathname, '/api/v3/activities/70017001');
+    assert.deepEqual(muteCall.body, { hide_from_home: true });
+    assert.equal(muteCall.headers['authorization'], 'Bearer SWEEP_TOKEN');
+
+    // Done means done: the entry is dropped, so the activity is not PUT again on every later sweep.
+    await waitFor('the pending entry to be cleared', () => readMutes(uid) === null);
+  });
+
+  it('an upload Strava DELETED during processing is abandoned, never PUT', async () => {
+    stub.setUploadHandler(() => ({ status: 201, body: { id: 7002, external_id: null, status: 'Your activity is still being processed.' } }));
+    let polls = 0;
+    stub.setPollHandler(() => {
+      polls++;
+      // Inconclusive while the request is watching (so it gets queued rather than 502'd), then the
+      // terminal truth once the sweeper picks it up.
+      return polls <= 3
+        ? { status: 200, body: { id: 7002, error: null, status: 'Your activity is still being processed.', activity_id: null } }
+        : { status: 200, body: { id: 7002, error: null, status: 'The created activity has been deleted.', activity_id: null } };
+    });
+    let muteCalls = 0;
+    stub.setMuteHandler(() => { muteCalls++; return { status: 200, body: {} }; });
+
+    const r = await fetch(origin + '/api/strava/upload', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ workoutId: 'w-sweep-deleted', payload: samplePayload() })
+    });
+    assert.equal((await r.json()).mutePending, true);
+
+    // There is no activity any more, so the retry must STOP rather than poll for a quarter of an
+    // hour against an id that will never come.
+    await waitFor('the sweeper to give up on the deleted activity', () => readMutes(uid) === null);
+    assert.equal(muteCalls, 0, 'nothing left to hide — no PUT should ever be made');
+  });
+
+  it('a mute that Strava keeps refusing is retried, then given up on — it never blocks later uploads', async () => {
+    stub.setUploadHandler(() => ({ status: 201, body: { id: 7003, external_id: null, status: 'Your activity is still being processed.' } }));
+    let polls = 0;
+    stub.setPollHandler(() => {
+      polls++;
+      return polls <= 3
+        ? { status: 200, body: { id: 7003, error: null, status: 'Your activity is still being processed.', activity_id: null } }
+        : { status: 200, body: { id: 7003, error: null, status: 'Your activity is ready.', activity_id: 70037003 } };
+    });
+    let muteCalls = 0;
+    stub.setMuteHandler(() => { muteCalls++; return { status: 500, body: { message: 'stub: mute keeps failing' } }; });
+
+    const r = await fetch(origin + '/api/strava/upload', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ workoutId: 'w-sweep-refused', payload: samplePayload() })
+    });
+    assert.equal(r.status, 200, 'a mute that cannot be made must never cost the workout');
+    assert.equal((await r.json()).mutePending, true);
+
+    // More than one attempt (it retries) but a bounded number (it gives up) — MUTE_MAX_ATTEMPTS.
+    await waitFor('the sweeper to retry the refused mute', () => muteCalls >= 2);
+    await waitFor('the sweeper to stop retrying', () => readMutes(uid) === null, 10000);
+    assert.ok(muteCalls <= 8, `bounded retries, got ${muteCalls}`);
+
+    // And the record of the upload itself is untouched by any of it.
+    const recorded = JSON.parse(fs.readFileSync(path.join(dataDir, 'strava-uploads-' + uid + '.json'), 'utf8'));
+    assert.ok(recorded.includes('w-sweep-refused'));
+  });
+});
+
+// Pending mutes live on disk precisely so a deploy or a crash in the seconds after an upload does
+// not lose them — the window they cover is minutes long, which is easily long enough to span a
+// container restart.
+describe('pending mutes survive a server restart', () => {
+  let dataDir, port, origin, proc, secret, uid, stub;
+
+  before(async () => {
+    stub = createStravaStub();
+    await stub.listen();
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'strava-upload-resume-'));
+    port = await getFreePort();
+    origin = `http://127.0.0.1:${port}`;
+    secret = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(path.join(dataDir, 'secret'), secret, { mode: 0o600 });
+    uid = 'u_' + crypto.randomBytes(6).toString('hex');
+    seedDb(dataDir, [{ id: uid, name: 'Resumer', created: new Date().toISOString() }]);
+    fs.writeFileSync(path.join(dataDir, 'strava-' + uid + '.json'),
+      JSON.stringify({ athleteId: 424242, access: 'RESUME_TOKEN', refresh: 'R', expiresAt: Date.now() + 6 * 60 * 60 * 1000 }));
+    // The state the previous process would have left behind: one upload queued for a mute, due now.
+    fs.writeFileSync(path.join(dataDir, 'strava-mutes-' + uid + '.json'),
+      JSON.stringify([{ uploadId: 8001, activityId: null, attempts: 1, firstAt: Date.now(), nextAt: Date.now() - 1 }]));
+  });
+
+  after(async () => {
+    await killAndWait(proc);
+    await stub.close();
+    try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch {}
+  });
+
+  it('a mute queued before the restart is picked up and completed after it', async () => {
+    stub.setPollHandler(() => ({ status: 200, body: { id: 8001, error: null, status: 'Your activity is ready.', activity_id: 80018001 } }));
+    let muteCall = null;
+    stub.setMuteHandler(record => { muteCall = record; return { status: 200, body: {} }; });
+
+    proc = spawnServer(dataDir, port, origin, {
+      STRAVA_CLIENT_ID: 'cid', STRAVA_CLIENT_SECRET: 'csecret', STRAVA_API_BASE: stub.base(),
+      STRAVA_TIMEOUT_MS: '300', STRAVA_MUTE_SWEEP_MS: '60', STRAVA_MUTE_RETRY_BASE_MS: '30'
+    });
+    await waitReady(origin);
+
+    // Nothing is uploaded in this test at all — the only input is the file on disk.
+    await waitFor('the resumed mute to reach Strava', () => muteCall);
+    assert.equal(muteCall.pathname, '/api/v3/activities/80018001');
+    assert.deepEqual(muteCall.body, { hide_from_home: true });
+    assert.equal(muteCall.headers['authorization'], 'Bearer RESUME_TOKEN');
   });
 });
