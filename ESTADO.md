@@ -150,15 +150,28 @@ Strava no expone la visibilidad de una actividad — `POST /uploads` no tiene pa
 antiguo `private` desapareció en 2018) y `PUT /activities/{id}` solo acepta `name`, `description`,
 `type`/`sport_type`, `gear_id`, `commute`, `trainer` y `hide_from_home`. Para que salgan privadas de
 verdad hay que ponerlo en la cuenta (Ajustes → Controles de privacidad → Actividades → "Sólo tú").
-Dos decisiones que sostienen esto:
+Tres decisiones que sostienen esto:
 - **Es lo último que pasa y nunca puede costar el entrenamiento.** Ocurre después de registrar la
   subida como hecha, así que un silenciado fallido devuelve `200` con `muted: false` en vez de un
   error: fallar aquí haría que el cliente reintentara y **subiera una segunda copia** para arreglar
   algo que solo es cosmético.
-- **`STRAVA_MUTE_EXTRA_POLLS` (2) existe solo para esto.** Silenciar necesita el `activity_id`, que
-  no existe hasta que Strava termina de procesar; si el sondeo único de T14 llega pronto se hacen
-  como mucho dos sondeos más. Con el silenciado apagado no se hace ninguno — el comportamiento de
-  T14 queda intacto.
+- **El silenciado sobrevive a la petición que lo encargó.** Esta es la corrección del fallo con el
+  que nació la función: silenciar necesita el `activity_id`, que no existe hasta que Strava termina
+  de procesar, y la primera versión solo lo intentaba dentro de la petición, en una ventana de unos
+  seis segundos. Strava tarda más a menudo de lo que parece, así que el caso corriente era
+  *"no había id todavía → no se silencia → no se vuelve a mirar"*, en silencio y con un `200`
+  limpio: los entrenos seguían apareciendo en el feed. Ahora lo que no se resuelve en la petición
+  se apunta en `strava-mutes-<uid>.json` y lo reintenta un barrido de fondo (15 s, 30 s, 1 min…
+  hasta ocho intentos, y se abandona a la media hora). La respuesta lo dice con `mutePending`.
+- **Un duplicado también se silencia.** El id de la actividad viene dentro del texto del error
+  (`"... duplicate of activity 21234316"`, con `activity_id: null`), y antes se ignoraba: la única
+  subida de la que teníamos certeza de que había creado una actividad era justo la que nunca se
+  podía callar.
+
+`STRAVA_MUTE_EXTRA_POLLS` (2) sigue ahí, pero ahora es una optimización, no el mecanismo: ahorra
+esperar al barrido cuando Strava va rápido. Con el silenciado apagado no se hace ninguno — el
+comportamiento de T14 queda intacto. `STRAVA_MUTE_SWEEP_MS`, `STRAVA_MUTE_RETRY_BASE_MS` y
+`STRAVA_MUTE_MAX_AGE_MS` son ganchos solo para pruebas, como `STRAVA_TIMEOUT_MS`.
 
 Decisiones de T11 que conviene no deshacer:
 - **Todas las llamadas salientes llevan timeout (8 s).** Node no pone ninguno por defecto. Que
