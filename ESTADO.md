@@ -465,13 +465,14 @@ Hallazgos del ciclo 5 (no reabrir):
 
 ## Ciclo 6 — subir el fork a upstream v1.3.7 (plan: `PLAN-UPSTREAM.md`)
 
-**Estado: planificado, sin empezar. Nada del ciclo 6 está tocado todavía.**
-`main` = `develop` = `b010e0b`, árbol limpio, desplegado y sirviendo.
+**Estado: U0 hecho. U1 es el siguiente.**
+`main` = `develop` = `b010e0b`, árbol limpio, desplegado y sirviendo. `rebase/v1.3.7` es rama
+aparte, arrancada desde upstream, sin fusionar a nada todavía.
 
 | # | Tarea | Rama | Estado | Modelo |
 |---|-------|------|--------|--------|
-| U0 | Copia de seguridad, etiqueta de retorno, rama desde upstream, línea base | `rebase/v1.3.7` | **abierto — el siguiente** | orquestador |
-| U1 | Vinculación y gestión de dispositivos | `rebase/u1-linking` | abierto | Sonnet + revisión Opus |
+| U0 | Copia de seguridad, etiqueta de retorno, rama desde upstream, línea base | `rebase/v1.3.7` | **hecho** (`6f17fe4`, sin fusionar) | orquestador |
+| U1 | Vinculación y gestión de dispositivos | `rebase/u1-linking` | **abierto — el siguiente** | Sonnet + revisión Opus |
 | U2 | Notificaciones | `rebase/u2-push` | abierto | Sonnet |
 | U3 | Strava | `rebase/u3-strava` | abierto | Sonnet + revisión Opus |
 | U4 | Despliegue doméstico | `rebase/u4-deploy` | abierto | Haiku |
@@ -508,9 +509,72 @@ Decisiones del ciclo 6 (tomadas el 2026-09-20, no reabrir):
 - **`api/Dockerfile` es el riesgo más serio.** Lista los módulos de `api/` uno a uno y ningún test
   lo detecta. Se valida levantando la pila, no con tests.
 
+### U0 (2026-09-20/21) — hallazgos
+
+- **Upstream ya iba por v1.3.8** cuando se ejecutó U0, un release por delante de la v1.3.7 sobre la
+  que está escrito `PLAN-UPSTREAM.md`. Decisión del dueño: usar `upstream/main` (v1.3.8) tal cual,
+  no fijar el tag v1.3.7. La regla de cada brief ("nada se da por bueno de memoria, cada brief lee
+  el código de upstream de cero") ya cubre el salto de versión sin cambiar nada del plan.
+  Rama `rebase/v1.3.7` creada desde `upstream/main` en `f91cde1`.
+- **Copia de seguridad** en `~/opengym-backups/opengym-backup-2026-09-20_234801.tar.gz`, fuera del
+  repo, verificada (contiene el perfil real `ZOI4PpUB_3gEoV8b`, `db.json`, `secret`, `vapid.json`,
+  datos de Strava). Etiqueta de retorno `v1.2.9-fork-final` creada y subida a `origin`.
+- **Línea base de upstream, frontend: 1584 tests, verde.**
+- **Línea base de upstream, api: 176/193 verde.** Las 17 fallas son todas del entrenador IA (U8,
+  opcional, apagado por defecto) y **no son un fallo de upstream**: dependen de comportamiento
+  exclusivo de Linux que este equipo no tiene fuera de Docker —
+  - `credential.test.js`: exige permisos POSIX `0o600` en un fichero; Windows no tiene ese modelo
+    de permisos y `fs.statSync(...).mode` no los aplica igual.
+  - `jobs.test.js`, `coach-limits.test.js`, `routes.test.js`: dependen de lanzar
+    `coach/fixture-cli.mjs` como proceso hijo a partir de `new URL(...).pathname`, que en Windows
+    da una ruta con barra inicial delante de la letra de unidad (`/C:/Users/...`) y no resuelve.
+  - Se verificó **antes** de aceptar esto: `prompts.test.js` sí era un CRLF real (ver debajo) y con
+    el arreglo pasó a verde; los otros 17 no cambiaron con el mismo arreglo, así que la causa es
+    distinta y está diagnosticada arriba, no es la misma familia de fallo.
+  - No se toca código de upstream por esto: la función solo corre de verdad en el contenedor Linux,
+    que es donde de hecho se verificó (ver más abajo).
+- **Trampa de CRLF de Windows, para cualquier tarea futura del ciclo 6.** `core.autocrlf` estaba en
+  `true` a nivel global y el repo no trae `.gitattributes`. Consecuencia real, no hipotética:
+  `api/coach/prompts/*.md` se bajaron con CRLF y `prompts.test.js` (que compara ese `.md` contra el
+  `.js` generado, byte a byte) fallaba por eso, no por ningún bug. Se puso `core.autocrlf=false`
+  **solo en este repo** (`git config core.autocrlf false`, sin tocar la config global) y se
+  re-hizo `git checkout` de los ficheros afectados. **Un primer intento de arreglo se equivocó**:
+  un `git checkout -- .` inmediatamente después de cambiar `core.autocrlf` no reescribió nada por
+  una cache de índice obsoleta ("racy git"); hizo falta un segundo `git checkout` para que surtiera
+  efecto — compruébese con `git hash-object <fichero>` contra `git rev-parse HEAD:<fichero>`, no
+  fiarse de que el primer intento haya bastado.
+  **Consecuencia que hay que vigilar en cada tarea de aquí en adelante:** el primer `Edit` sobre
+  `.gitignore` en esta sesión heredó CRLF del checkout viejo (hecho antes de tocar `core.autocrlf`)
+  y generó un commit que reformateaba el fichero entero (24 líneas tocadas por 1 línea real de
+  cambio) — exactamente lo que la regla dura de U6 prohíbe hacerle a un fichero de upstream. Se
+  corrigió con un commit de arreglo aparte (`6f17fe4`) que devuelve LF y dejando el diff en una
+  sola línea contra `upstream/main`. **Para cualquier fichero de upstream que se edite en este
+  ciclo: comprobar `file <fichero>` antes y después de tocarlo, y el diff contra `upstream/main`
+  antes de commitear** — un editor que preserva el estilo de línea ya presente en disco no protege
+  si ese estilo en disco ya estaba mal por el checkout.
+- **Docker Desktop no estaba arrancado** al empezar el paso 6 de U0 — es decir, **producción no se
+  estaba sirviendo** en ese momento. Al abrirlo, los tres contenedores de producción
+  (`opengym-web-1`, `opengym-api-1`, `opengym-cloudflared-1`) se reiniciaron solos por su política
+  `restart: unless-stopped`, usando la imagen ya desplegada (`registry.gitlab.com/duartesantos8/...`,
+  no la de `ghcr.io` que trae ya `docker-compose.yml` en esta rama). Verificado que siguen sirviendo
+  en `localhost:8080` tras la comprobación de abajo; **queda pendiente que el dueño confirme desde
+  fuera** (el dominio real, no localhost) que el túnel de Cloudflare reconectó bien.
+- **Upstream v1.3.8 levanta limpio, aislado de producción.** Se usó un proyecto Docker separado
+  (`docker compose -p opengym-u0-test`, ver `.agent/u0-isolated-override.yml`, no commiteado) con
+  `DATA_DIR` en una carpeta vacía y el puerto de `web` remapeado a 8099 en vez de 8080 — **nunca se
+  tocaron los contenedores de producción ni `./data`**. `GET /api/health` → `{"ok":true,"users":0}`,
+  la SPA carga en `http://localhost:8099/`. Stack de prueba parado y borrado (`down`) al terminar.
+  **Nota de Compose para el futuro:** el override de `ports` no reemplaza el mapeo del compose base
+  por defecto — los concatena, y arrancar con los dos intenta ocupar también el puerto real y
+  falla. Hace falta la etiqueta `!override` de la especificación de Compose (`ports: !override`)
+  para reemplazar la lista entera; `volumes` sí se reemplaza por servicio sin necesitar la etiqueta.
+- `.gitignore` de esta rama recibe `.agent/` (ficheros de planes de agentes, igual que en el fork
+  original) — commit `6f17fe4` en `rebase/v1.3.7`, un fichero, no fusionado a `develop`.
+
 ## Registro
 
 | Fecha | Qué |
 |-------|-----|
 | 2026-09-04 | Rama `develop` creada desde `main`. `PLAN.md` y `ESTADO.md` escritos. |
 | 2026-09-07 | Ciclo 4 planificado: `PLAN-NOTIFICACIONES.md`. N0 cerrado en el móvil. N1 fusionado. |
+| 2026-09-21 | Ciclo 6, U0 hecho: rama `rebase/v1.3.7` desde upstream v1.3.8, backup y etiqueta de retorno, línea base medida (1584 front / 176 de 193 api), stack de upstream verificado en Docker aislado sin tocar producción. |
