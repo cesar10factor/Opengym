@@ -486,12 +486,12 @@ aparte, arrancada desde upstream, sin fusionar a nada todavía.
 |---|-------|------|--------|--------|
 | U0 | Copia de seguridad, etiqueta de retorno, rama desde upstream, línea base | `rebase/v1.3.7` | **hecho** (`6f17fe4`, sin fusionar) | orquestador |
 | U1 | Vinculación y gestión de dispositivos | `rebase/u1-linking` | **hecho** (`739d845` en `rebase/v1.3.7`) | Sonnet + revisión Opus |
-| U2 | Notificaciones | `rebase/u2-push` | **abierto — el siguiente** | Sonnet |
-| U3 | Strava | `rebase/u3-strava` | abierto | Sonnet + revisión Opus |
-| U4 | Despliegue doméstico | `rebase/u4-deploy` | abierto | Haiku |
-| U5 | Migración de datos | `rebase/u5-data` | abierto | Sonnet |
-| U6 | Limpieza de comentarios | `rebase/u6-comments` | abierto | Haiku |
-| U7 | Aceptación manual | — | abierto | el dueño |
+| U2 | Notificaciones | `rebase/u2-push` | **hecho** (`a06e258`) | Sonnet |
+| U3 | Strava | `rebase/u3-strava` | **hecho** (`ade2d73`) | Sonnet + revisión Opus |
+| U4 | Despliegue doméstico | `rebase/u4-deploy` | **hecho** (`47c0288`) | Haiku |
+| U5 | Migración de datos | `rebase/u5-data` | **hecho** (`c71e2cc`) | Sonnet |
+| U6 | Limpieza de comentarios | `rebase/u6-comments` | **hecho** (`3c87d3a`) | Haiku |
+| U7 | Aceptación manual | — | **abierto — el siguiente, lo hace el dueño** | el dueño |
 | U8 | Entrenador IA | — | abierto, **opcional** | Haiku |
 
 Decisiones del ciclo 6 (tomadas el 2026-09-20, no reabrir):
@@ -670,6 +670,87 @@ upstream, intactos) y **frontend 1599 / todos pasan**. La línea base era 193/17
 - La vinculación **convive** con `/api/pair/*` de upstream, que quedó intacto (verificado: las únicas
   líneas tocadas en su vecindad son una coma de lista y las dos rutas nuevas en `CSRF_EXEMPT`).
 
+### U2–U6 (2026-09-21) — hallazgos
+
+Estado al cerrar U6: **api 414 tests / 397 pasan**, **frontend 1734 / todos pasan**. Los 17 fallos
+de api son siempre los mismos de upstream (entrenador IA que asume Linux) y **no aumentaron ni una
+vez** en todo el ciclo. Línea base de partida: 193/176 y 1584.
+
+**U2 — notificaciones (`a06e258`)**
+- Se partió de lo de upstream y se le añadió lo propio, no al revés. Conservado de upstream: timer
+  por dispositivo, el arreglo #239 (el aviso saltaba con las notificaciones apagadas), la ventana
+  del recordatorio, `pushsubscriptionchange` y la poda del 403.
+- **Quitado el `web_push: 8030`**, que era el objetivo de la fase: ese número hace que Safari pinte
+  la push en nativo **sin ejecutar el service worker**, lo que dejaría fuera del iPhone todo lo que
+  se haga en `sw.js` — lo de upstream incluido. `navigate` no dependía de él y se conserva.
+- **El opt-out de push del fork NO se trajo, y está comprobado que no hace falta.** El fork lo
+  necesitaba porque su auto-reparación **suscribía desde cero**, así que reactivaba a quien acababa
+  de apagarlo. La de upstream (`syncPushSubscription`) **sale antes si no hay suscripción**: solo
+  repara una existente, nunca crea una. Verificado leyendo `disablePush()`, que sí desuscribe de
+  verdad. Apagar el interruptor se queda apagado.
+- Se reaplicó el arreglo N1: `stopRest()` cancelaba la push programada también cuando el descanso
+  terminaba solo, y ese aviso es el que de verdad se oye con cascos.
+
+**U3 — Strava (`ade2d73`)**
+- Enganchado al flujo **nuevo** de sincronización: ya no es "el último gana", hay `_rev` y fusión,
+  así que la subida automática lee la lista ya fusionada como cualquier otro lector.
+- La revisión Opus encontró tres cosas, todas arregladas:
+  1. **`recordStravaUpload` escribía sin protección.** Si esa escritura fallaba, el entrenamiento
+     ya estaba en Strava pero sin registrar → 500 → el cliente reintentaba → **segunda subida real**.
+  2. **`queueStravaMute` igual**, convirtiendo un fallo cosmético en un error que gastaba uno de los
+     3 intentos de un entrenamiento ya subido.
+  3. **El log de auditoría se podía vaciar desde fuera:** `/api/strava/callback` no pide sesión y
+     escribía una entrada por intento; con el tope de 5000, un bucle de `curl` expulsa las entradas
+     viejas y borra el rastro de un incidente. Ahora los fallos **anteriores** a validar el `state`
+     van a `console.warn`, que es el criterio que el propio fichero ya usaba en `csrfOk`.
+
+**U4 — despliegue (`47c0288`)**
+- **El riesgo del `api/Dockerfile` era real y estaba activo.** Upstream enumera los módulos uno a
+  uno, así que `link.js` y `strava.js` **no habrían entrado en la imagen**: la API en bucle de
+  reinicio con `ERR_MODULE_NOT_FOUND` y las dos suites en verde. Se pasó a comodín
+  (`COPY *.js ./` + `rm -f *.test.js`), y **se verificó construyendo la imagen y listando su
+  contenido**, no leyendo el Dockerfile.
+- `docker-compose.yml` solo recibe los `args` de versión, y es legítimo: **upstream ya declara esos
+  `ARG`** para sus etiquetas OCI y `auto-deploy.ps1` los exporta esperando que compose los reenvíe.
+- El runbook decía que la sincronización es "el último gana", **que ya es falso**. Corregido contra
+  el código (`_rev`, 409 sobre documento obsoleto, fusión por `_ts` más reciente).
+
+**U5 — migración de datos (`c71e2cc`)**
+- **`rest: 0` NO significa lo mismo en los dos lados, y esto era una pérdida silenciosa.** Upstream
+  hace `own > 0 ? own : global`, así que un 0 lo lee como "no configurado"; en el fork significaba
+  "sin descanso, no arranques cronómetro". El perfil real tenía **10 ejercicios así**.
+  **Decisión del dueño (2026-09-21): que caigan al global de 90 s**, en vez de tocar la función de
+  upstream. Por eso el migrador **elimina el campo** en lugar de escribir un 0 que se leería al revés.
+- Cifras reales verificadas sobre copia: **277 entrenamientos** (no 271, el perfil creció), 4 rutinas,
+  **26 ejercicios convertidos**, 10 descartados, y todo lo que está fuera de `routines` idéntico.
+- El script es idempotente, se niega a pisar el destino, tolera un BOM de entrada y nunca escribe uno.
+
+**U6 — comentarios (`3c87d3a`)**
+- 194 líneas de comentario fuera, **cero líneas de código**. Verificado mecánicamente: quitando
+  comentarios y espacios a las dos versiones, los 6 ficheros salen **byte a byte idénticos**. Un
+  vistazo al diff no habría demostrado eso.
+- Solo ficheros **creados** por el fork. Ni uno de upstream, ni siquiera los que llevan un enganche
+  propio dentro.
+
+### Verificación final de integración (2026-09-21)
+
+Lo que ningún test alcanza, hecho antes de entregar U7: **pila completa levantada con el perfil real
+migrado**, en un proyecto Docker aparte (`-p opengym-u7-check`, puerto 8098, datos en `.agent/`),
+**sin tocar producción ni `data/`**. Resultado:
+- La API arranca y **no** entra en bucle de reinicio; **cero `ERR_MODULE_NOT_FOUND`** en los logs.
+- `/api/health` responde con el perfil cargado y la SPA sirve 200.
+- Las rutas propias están registradas de verdad (`/api/link/code`, `/api/devices`,
+  `/api/strava/status` responden **401**, no 404 — prueba de que `link.js` y `strava.js` cargaron).
+- Un código de vinculación inválido devuelve el error genérico esperado.
+- Comprobado después: producción intacta y `data/` sin un byte modificado.
+
+### Inestabilidad conocida, no es nuestra
+
+`frontend/src/lib/pt-br-instructions.test.js` es **de upstream** (sin tocar) y tarda ~5,5 s contra el
+límite por defecto de 5 s de vitest. **Falla de forma intermitente cuando la máquina va cargada**,
+de forma reproducible si se lanza justo después de la suite de API. Si aparece, relanzar la suite de
+frontend a solas. No hay timeout configurado en el proyecto, así que rige el defecto.
+
 ## Registro
 
 | Fecha | Qué |
@@ -677,5 +758,6 @@ upstream, intactos) y **frontend 1599 / todos pasan**. La línea base era 193/17
 | 2026-09-04 | Rama `develop` creada desde `main`. `PLAN.md` y `ESTADO.md` escritos. |
 | 2026-09-07 | Ciclo 4 planificado: `PLAN-NOTIFICACIONES.md`. N0 cerrado en el móvil. N1 fusionado. |
 | 2026-09-21 | Ciclo 6, U0 hecho: rama `rebase/v1.3.7` desde upstream v1.3.8, backup y etiqueta de retorno, línea base medida (1584 front / 176 de 193 api), stack de upstream verificado en Docker aislado sin tocar producción. |
+| 2026-09-21 | U2–U6 hechos: notificaciones, Strava, despliegue, migración de datos y limpieza de comentarios. Ciclo 6 con todo el código dentro (`3c87d3a`). api 414/397, frontend 1734. Pila levantada con el perfil real migrado, sin tocar producción. Queda U7 (aceptación manual del dueño). |
 | 2026-09-21 | U1 hecho: vinculación y gestión de dispositivos sobre upstream v1.3.8 (`739d845`). Dos agujeros de seguridad del fork original destapados y cerrados. api 256/239, frontend 1599. |
 | 2026-09-21 | Arreglo del silenciado de Strava (`be89ea8`) rescatado de una rama suelta, fusionado a `develop` y desplegado a `main`. Etiqueta `v1.2.9-fork-strava` creada como el estado completo del fork para U1–U6. |
