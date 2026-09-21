@@ -4,13 +4,31 @@ import { beep, vibrate } from '../lib/sound.js'
 import { api } from '../lib/api.js'
 import { t } from '../lib/i18n.js'
 import { deviceId } from '../lib/push.js'
+import { nextUpBody } from '../lib/next-up.js'
 import { useStore } from './useStore.js'
+
+/* What the rest-over alert says: which exercise, which set, and the target ("Bench press — set
+   3/4 · 8 reps × 60 kg"). Composed HERE and not on the server: the server knows neither the
+   user's language nor the state of the workout. Read fresh at schedule/fire time on purpose —
+   Workout.jsx marks the set done and only then calls startRest(), so the store already reflects
+   the set just completed by the time this runs.
+   Best-effort like everything else on this path: a throw here must never take the rest timer
+   with it, and no body at all is fine — both the push and the local alert fall back to generic
+   text. */
+const restBody = () => {
+  try {
+    const S = useStore.getState().S
+    return nextUpBody(S.active, S.unit) || undefined
+  } catch { return undefined }
+}
 
 // Fire-and-forget: lets the server push a "rest over" alert if this tab gets suspended
 // before the local timer completes. No-ops for guests / offline. The device id keeps the
 // timer this browser's own: a desktop tab finishing its rest on screen used to cancel the
 // alert the phone in the gym was waiting for, because the server held one timer per account.
-const pushRestTimer = sec => { if (useStore.getState().user) api('/api/push/rest-timer', { method: 'POST', body: JSON.stringify({ seconds: sec, deviceId: deviceId() }) }).catch(() => {}) }
+// `body` is dropped from the JSON when undefined — the "nothing to announce" case (last set of
+// the workout) — so the server keeps its own generic text rather than an empty line.
+const pushRestTimer = sec => { if (useStore.getState().user) api('/api/push/rest-timer', { method: 'POST', body: JSON.stringify({ seconds: sec, deviceId: deviceId(), body: restBody() }) }).catch(() => {}) }
 const cancelPushRestTimer = () => { if (useStore.getState().user) api('/api/push/rest-timer/cancel', { method: 'POST', body: JSON.stringify({ deviceId: deviceId() }) }).catch(() => {}) }
 
 const notificationsSupported = () => typeof window !== 'undefined' && 'Notification' in window
@@ -40,11 +58,14 @@ const maybeRestNotification = async () => {
   try {
     const reg = await navigator.serviceWorker?.getRegistration?.()
     if (!(await restAlertsOn(reg))) return
-    // Same tag as the server's push (api/push-messages.js): whichever lands second replaces the
-    // first instead of stacking a second banner. No body — it only repeated the title.
+    // Same tag AND the same line the push carries (api/push-messages.js `restTimerPush` / the
+    // client's own restBody()): whichever lands second replaces the first, saying the same thing,
+    // instead of stacking a second banner or contradicting it. Deliberately no `renotify` — the
+    // beep for this rest has just fired locally, two lines up the call site, so replacing an
+    // already-delivered push has to be silent, not a second sound for one rest.
     // Android Chrome forbids the Notification constructor (Illegal constructor) - the
     // service-worker registration path is the one that actually pops there.
-    const opts = { tag: 'rest-timer', icon: 'icon-512.png' }
+    const opts = { body: restBody() || t('Rest over — next set!'), tag: 'rest-timer', icon: 'icon-512.png' }
     if (reg?.showNotification) { reg.showNotification(t('Rest over — next set!'), opts); return }
     new Notification(t('Rest over — next set!'), opts)
   } catch {
@@ -88,7 +109,10 @@ export const useUI = create((set, get) => ({
   },
 
   startRest(sec, forIdx) {
-    get().stopRest()
+    // `endRest`, not `stopRest`: a rest replacing another is about to reschedule the push two
+    // lines down, and a cancel racing that schedule could call off the new one instead of the old
+    // (the server keys the timer per device and replaces it on its own anyway).
+    get().endRest()
     // Rest timer set to Off. Stopping and returning rather than starting a zero-length timer
     // keeps every caller honest: the four places that start a rest do not each need to know.
     if (!(sec > 0)) return
@@ -112,7 +136,12 @@ export const useUI = create((set, get) => ({
         // without push permission, gets no notification, and a countdown that silently vanishes
         // on reopen reads like a bug. Only the loud parts (beep, vibration, flash) are gated.
         get().toast(t('Rest over — next set!'))
-        maybeRestNotification(); get().stopRest(); return
+        // `endRest`, not `stopRest`: the rest-over alert the owner actually hears with headphones
+        // on is the server push, not this WebAudio beep (which competes with the music on the
+        // same channel and loses). Cancelling the scheduled push here too used to mean it only
+        // ever sounded because the server won the race against the cancel request — a slightly
+        // late tick would silence it with no way to tell.
+        maybeRestNotification(); get().endRest(); return
       }
       if (left <= 3) beep(snd, 660, 0.1)
       set({ timer: { ...tm, left } })
@@ -137,10 +166,23 @@ export const useUI = create((set, get) => ({
     if (!tm || !(tm.forIdx >= at)) return
     set({ timer: { ...tm, forIdx: tm.forIdx + delta } })
   },
+  /* A rest ends one of two ways and they must not be confused.
+
+     `stopRest` is "ended early" — skipped, wound down to zero, discarded, taken over by a work
+     timer — where the alert is no longer wanted and the scheduled push has to be called off.
+
+     `endRest` is "the clock ran out on its own" (including one rest replacing another, which is
+     about to reschedule anyway): the pending server push is deliberately left alone, see the
+     comments at its two call sites in startRest() above. */
   stopRest() {
     if (timerInt) clearInterval(timerInt); timerInt = null
     if (timerTick) document.removeEventListener('visibilitychange', timerTick); timerTick = null
     if (get().timer) cancelPushRestTimer()
+    set({ timer: null })
+  },
+  endRest() {
+    if (timerInt) clearInterval(timerInt); timerInt = null
+    if (timerTick) document.removeEventListener('visibilitychange', timerTick); timerTick = null
     set({ timer: null })
   },
 

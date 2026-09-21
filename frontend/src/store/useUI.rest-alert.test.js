@@ -47,14 +47,19 @@ describe('the local rest-over alert follows the Push switch', () => {
     expect(showNotification).not.toHaveBeenCalled()
   })
 
-  it('fires once with the switch on, tagged like the server push, without repeating the title', async () => {
+  it('fires once with the switch on, tagged and worded like the server push', async () => {
     subscription = { endpoint: 'https://push.example/x' }
     await runOut()
     expect(showNotification).toHaveBeenCalledTimes(1)
     const [title, opts] = showNotification.mock.calls[0]
     expect(title).toBe('Rest over — next set!')
     expect(opts.tag).toBe('rest-timer')
-    expect(opts.body).toBeUndefined()
+    // No active workout in this test (S.active is unset), so there is no "what's next" line to
+    // compose — restBody() falls back to the same text as the title, exactly what the server's
+    // own push would say too (api/push-messages.js restTimerPush), so the two alerts never
+    // disagree about what happened. See useUI.next-up.test.js for the case with a real workout.
+    expect(opts.body).toBe('Rest over — next set!')
+    expect(opts.renotify).toBeUndefined()   // replacing an already-delivered push must be silent
   })
 
   it('never asks for the permission by itself — only the switch does', async () => {
