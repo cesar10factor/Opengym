@@ -1,16 +1,6 @@
 // Builds the JSON body for Strava's structured-training upload (T12), pure and testable.
-// POST {STRAVA_API_BASE}/uploads with data_type=json accepts exactly this shape — confirmed
-// against https://developers.strava.com/docs/uploads/ on 2026-09-06:
-//   { version: "1.0", start_time: <ISO 8601>, utc_offset: <seconds, east-positive>,
-//     elapsed_time: <seconds>, sets: [ { exercise_type, repetitions?, weight?, duration?,
-//     start_time? } ] }
-// `version` is the literal string "1.0", not a number and not this app's own version.
-// `weight` is in KILOGRAMS — the one field a mistake here writes wrong, silently, forever into
-// someone's real training history, so a pounds profile is converted before anything else happens.
-//
-// This file owns none of the mapping logic (frontend/src/lib/strava-map.js, T10) or the token/
-// network side (api/server.js, T11/T12) — it only turns one finished workout into the JSON body
-// the upload route forwards. The server attaches the token and calls Strava; this never does.
+// POST /uploads with data_type=json. `weight` is KILOGRAMS (converted from pounds first).
+// This module only builds the body; server (T11/T12) handles token, network, mapping (T10).
 import { modeForSet } from './workout-model.js'
 import { isBw } from './history.js'
 import { stravaExerciseFor } from './strava-map.js'
@@ -28,21 +18,9 @@ function toKg(w, unit) {
 }
 
 // `weight` for one row, or undefined when the row should carry no weight key at all.
-//
-// history.js's own isBw() doc comment spells out how added load on a bodyweight movement is
-// represented: "the exercise carries no load of its own, so `w` means *added* weight and is
-// asked for only once you say there is some" (frontend/src/lib/history.js, near isBw). There is
-// no separate "added load" field — a bodyweight entry's `w` IS the added load (a dip-belt
-// plate, a weighted vest), the exact same field a barbell entry uses for its total load. So the
-// only bodyweight-specific rule is: omit the key when there was no added load (w <= 0) — an
-// unloaded pull-up must not upload as "0 kg", since that reads as an exercise performed with a
-// zero-weight barbell rather than a bodyweight one. A weighted bodyweight set uploads its real
-// added load, converted to kilograms exactly like any other weight, so Strava's volume numbers
-// match what was actually trained.
-// No load is no load, however the exercise happens to be classified. Keying the omission on the
-// bodyweight flag alone meant an unflagged, unrecognised movement — a user's own exercise, which
-// is exactly what stravaExerciseFor's generic tier exists for — uploaded as "0 kg": the very
-// reading this rule is meant to prevent, arriving through the one door left open.
+// Bodyweight: `w` is added load (dip-belt, vest), same field barbell uses for total load.
+// Rule: omit when w <= 0 (unloaded pull-up must not upload as "0 kg"). Strict on bodyweight
+// flag to prevent an unrecognised movement (user exercise) from uploading as "0 kg".
 function weightFor(set, bodyweight, unit) {
   const added = Number(set.w) || 0
   if (added <= 0) return undefined

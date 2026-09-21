@@ -1,19 +1,7 @@
-/* What the rest-over notification says: which exercise, which set, and the target.
-
-   The point is to answer "what am I doing next?" without opening the app — the phone is in a
-   pocket and the owner is in WhatsApp while the rest runs. One notification per rest carries it;
-   there is deliberately no per-set push (see the INVARIANT on sendPush in api/server.js: a push
-   per completed set would be a banner with sound per set on iOS, and the silent-notification
-   pattern that would avoid it costs the subscription).
-
-   Pure on purpose, and tested beside this file: CONTRIBUTING.md puts anything that decides what
-   you lift next in src/lib with a unit test, because the superset/warm-up/mode combinations are
-   easy to get subtly wrong and impossible to verify by clicking — you would have to sit through a
-   real rest, backgrounded, to see the string.
-
-   Everything here reuses the helpers the workout screen itself uses (supersetUnits, modeOf, isBw,
-   fmtSec, isWarmupRow), so the notification can never describe a set differently from the row on
-   screen. */
+// What the rest-over notification says: exercise, set, target. Pure, tested beside this file.
+// Reuses workout-screen helpers (supersetUnits, modeOf, isBw, fmtSec, isWarmupRow) so the
+// notification matches the row on screen. INVARIANT (api/server.js): one notification per rest,
+// no per-set push on iOS (subscription cost).
 import { supersetUnits, modeOf, isBw, fmtSec } from './history.js'
 import { isWarmupRow } from './workout-model.js'
 import { exOr } from './exercises.js'

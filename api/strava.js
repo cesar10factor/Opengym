@@ -128,45 +128,17 @@ export function tokenFromRefresh(current, data) {
   };
 }
 
-// A 200 response from Strava's token endpoint with an unexpected body (missing/renamed fields,
-// an error object shaped like success, etc.) must never be persisted as if it were a real token —
-// that would leave /status reporting connected:true with a null athleteId, and a later disconnect
-// would send a null access_token to Strava. This is the gate the caller checks before writing
-// anything to disk.
+// Malformed token responses (missing/renamed fields) must never be persisted — that would
+// corrupt the stored state. The caller checks this before writing to disk.
 export function isCompleteToken(tok) {
   return !!(tok && tok.access && tok.refresh);
 }
 
 /* ---------- upload status classification (T14) ---------- */
-// POST /uploads answering 201 means "accepted for processing", NOT "activity created" — Strava
-// processes the upload asynchronously afterwards and can still destroy the resulting activity
-// (observed live: an upload that got a clean 201 was deleted moments later during processing).
-// The real outcome lives at GET /uploads/{id}, whose body is `{ id, id_str, external_id, error,
-// status, activity_id }`. Two terminal states observed live:
-//   { error: null, status: "The created activity has been deleted.", activity_id: null }
-//   { error: null, status: "Your activity is ready.", activity_id: 20071984970 }
-// The first matters most: `error` is null there too, so "error === null" is NOT a success
-// signal — only a real activity_id is. Strava's own docs list four status strings ("...still
-// being processed.", "...has been deleted.", "There was an error processing your activity.",
-// "...is ready.") and document `error` as populated on other failures — including their own
-// worked example, "Test_Walk.gpx duplicate of activity 21234316" — that neither live sample
-// happened to show.
-//
-// A duplicate is deliberately NOT a failure: it means the activity already exists (Strava is
-// refusing to file a second copy of something it already has), so the honest reading is success
-// — "it is up there, we are done with it". Classifying it as failure instead would 502 the
-// request, skip recordStravaUpload, and the client would retry (and eventually give up on) a
-// workout that was never actually lost. Our own dedup (the workoutId check earlier in the route)
-// is what should have caught this before the retry ever reached Strava anyway — a duplicate this
-// classifier sees is that safety net having already failed once, not a reason to fail again.
-// Strava's docs don't pin the exact phrase as a stable contract, so this matches loosely (a
-// case-insensitive "duplicate" substring) rather than the literal example string, to survive
-// their wording changing.
-//
-// Any OTHER non-empty `error` (malformed file, etc.) is a genuine failure — only "duplicate" is
-// carved out. Pure: given just the parsed JSON body (or null/garbage), no fetch, no timers, no
-// server.js import — so the subtleties that actually bit this app in production are covered
-// directly, with literal bodies, in api/strava.test.js.
+// POST /uploads returns 201 (accepted, not done). Real outcome at GET /uploads/{id}.
+// Key: `error` is null even when activity_id is null (deleted). Success = activity_id > 0 OR
+// duplicate error (activity already exists, which is success, not failure). Other errors are
+// genuine failures. Case-insensitive "duplicate" substring match to tolerate wording changes.
 export const UPLOAD_STATUS_SUCCESS = 'success';
 export const UPLOAD_STATUS_FAILURE = 'failure';
 export const UPLOAD_STATUS_UNKNOWN = 'unknown'; // still processing, or a body we don't recognise
@@ -198,19 +170,9 @@ export function classifyUploadStatus(body) {
 }
 
 /* ---------- finding the activity id to act on (T15) ---------- */
-// Muting an upload (hide_from_home) needs its activity_id, and there are two places it can come
-// from — which is the whole reason this is a function rather than a property read.
-//
-// The obvious one is the `activity_id` field, populated once processing finishes. The other is
-// the DUPLICATE error text, which carries the id of the activity Strava kept instead: their own
-// documented example is "Test_Walk.gpx duplicate of activity 21234316", and in that body
-// activity_id is null. classifyUploadStatus already calls a duplicate a success ("it is up
-// there"), so without this the one upload we KNOW produced a live activity was also the one we
-// could never mute — the id was sitting in the error string the whole time.
-//
-// Returns a positive integer or null. Deliberately strict about the shape: this value becomes a
-// URL path segment on a PUT that edits a real activity, so a half-parsed or out-of-range number
-// must read as "no id" rather than address someone else's activity.
+// activity_id comes from two sources: the response field (usual case, once processing finishes)
+// or the duplicate error text ("duplicate of activity 12345") where response.activity_id is null.
+// Strict parsing: this value becomes a URL path segment, so half-parsed/out-of-range => null.
 const DUPLICATE_ACTIVITY_ID_PATTERN = /duplicate of activity\s+(\d+)/i;
 export function activityIdFromUpload(body) {
   if (!body || typeof body !== 'object') return null;
@@ -224,18 +186,9 @@ export function activityIdFromUpload(body) {
 }
 
 /* ---------- pending-mute scheduling (T15) ---------- */
-// How long after an upload we keep trying to mute it, and how far apart the attempts are.
-//
-// Strava processes uploads asynchronously and takes as long as it takes — seconds usually, but
-// minutes often enough that a mute which only ever ran inside the upload request was, in
-// practice, a mute that mostly did not run. These bounds are what make the retry outlive the
-// request without turning into an unbounded background job: attempts back off geometrically from
-// 15s, and the whole thing is abandoned after MUTE_MAX_AGE_MS whatever state it is in.
-//
-// baseMs/maxAgeMs are parameters rather than bare constant reads for the same reason
-// STRAVA_UPLOAD_POLL_DELAY_MS is an env var: a test must be able to compress the schedule without
-// waiting out a real backoff. Defaults are the production values; a real deployment overrides
-// neither.
+// Strava processes uploads asynchronously (seconds to minutes). Retry with exponential backoff
+// from baseMs, abandoned after MUTE_MAX_AGE_MS. Defaults are production values; tests can override
+// to compress the schedule.
 export const MUTE_RETRY_BASE_MS = 15 * 1000;
 export const MUTE_MAX_AGE_MS = 30 * 60 * 1000;
 export const MUTE_MAX_ATTEMPTS = 8;
