@@ -21,6 +21,7 @@
 import { EXDB, EXIDX } from './exercises.js'
 import { uid } from './format.js'
 import { isWarmupRow } from './workout-model.js'
+import { HEVY_TITLE_MAP } from './hevy-id-map.js'
 
 /* ----------------------------------------------------------------- CSV ---- */
 
@@ -58,9 +59,9 @@ const norm = h => h.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
 const COLUMNS = [
   ['exercise', ['exercise', 'exercise name', 'exercise title']],
   ['date', ['date', 'workout date']],
-  ['startTime', ['start time']],
+  ['startTime', ['start time', 'start date']],
   ['endTime', ['end time']],
-  ['workoutName', ['workout name', 'title']],
+  ['workoutName', ['workout name', 'title', 'workout']],
   ['category', ['category', 'body part', 'muscle group']],
   ['weightKg', ['weight kg']],
   ['weightLb', ['weight lbs', 'weight lb']],
@@ -74,10 +75,10 @@ const COLUMNS = [
   ['distanceKm', ['distance km']],
   ['distance', ['distance']],
   ['distanceUnit', ['distance unit']],
-  ['seconds', ['seconds', 'duration seconds']],
+  ['seconds', ['seconds', 'duration seconds', 'set duration sec']],
   ['time', ['time', 'duration']],
   ['setType', ['set type']],
-  ['note', ['comment', 'comments', 'notes', 'note']],
+  ['note', ['comment', 'comments', 'notes', 'note', 'workout notes']],
 ]
 
 function mapHeader(header) {
@@ -111,7 +112,9 @@ export function detectSource(header) {
 const SYN = [
   [/\bbb\b/g, 'barbell'], [/\bdb\b/g, 'dumbbell'], [/\bkb\b/g, 'kettlebell'],
   [/\bohp\b/g, 'overhead press'], [/\bbw\b/g, 'body weight'], [/\bbodyweight\b/g, 'body weight'],
-  [/\bmachine\b/g, 'lever'], [/\bsmith machine\b/g, 'smith'], [/\bez bar\b/g, 'ez barbell'],
+  // 'smith machine' first: the generic machine->lever rule would otherwise eat the word
+  // and leave 'smith lever', which matches no entry in the dataset.
+  [/\bsmith machine\b/g, 'smith'], [/\bmachine\b/g, 'lever'], [/\bez bar\b/g, 'ez barbell'],
   [/\bpull ups?\b/g, 'pull up'], [/\bchin ups?\b/g, 'chin up'], [/\bpush ups?\b/g, 'push up'],
   [/\bsit ups?\b/g, 'sit up'], [/\bdips?\b/g, 'dip'], [/\braises?\b/g, 'raise'],
   [/\bcurls?\b/g, 'curl'], [/\bpresses\b/g, 'press'], [/\bextensions?\b/g, 'extension'],
@@ -155,7 +158,7 @@ function buildIndex() {
 // canonical barbell version, which is what these apps assume when they show it to you.
 // Extending this table is the intended way to improve import accuracy.
 const ALIAS_EX = {
-  'bench press': '0025', 'barbell bench press': '0025', 'flat bench press': '0025',
+  'bench press': '0025', 'barbell bench press': '0025', 'flat bench press': '0025', 'flat barbell bench press': '0025',
   'incline bench press': '0047', 'decline bench press': '0033',
   'close grip bench press': '0030', 'close-grip bench press': '0030',
   squat: '0043', 'back squat': '0043', 'barbell squat': '0043', 'front squat': '0042',
@@ -185,6 +188,25 @@ const ALIAS_EX = {
   // same movement, wrong equipment label, which beats leaving it uncategorised.
   'pallof press': '0979', 'cable pallof press': '0979', 'vertical pallof press': '1015',
   'cable core pallof press': '0979', 'core pallof press': '0979',
+  // Hevy's own vocabulary, from a real export. Hevy writes the equipment in parentheses
+  // and uses "bicep"/"chest fly"/"reverse fly" where the dataset says "biceps"/"fly"/
+  // "reverse fly", so these are near-misses the word-bag cannot close on its own.
+  'bicep curl (dumbbell)': '0294', 'bicep curl (cable)': '0868', 'bicep curl (barbell)': '0031',
+  'chest fly (dumbbell)': '0308', 'chest fly (machine)': '0596', 'butterfly (pec deck)': '0596',
+  'incline chest fly (dumbbell)': '0319', 'cable fly crossovers': '1269',
+  'rear delt reverse fly (dumbbell)': '0383', 'rear delt reverse fly (machine)': '0602',
+  'chest supported reverse fly (dumbbell)': '0383',
+  'bench press (smith machine)': '0748', 'overhead press (smith machine)': '0766',
+  'hack squat (machine)': '0743', 'iso-lateral row (machine)': '0571',
+  'seated cable row - bar grip': '0218', 'reverse grip lat pulldown (cable)': '0673',
+  'single arm lateral raise (cable)': '0192', 'plate front raise': '0310',
+  'back extension (weighted hyperextension)': '0573',
+  'behind the back bicep wrist curl (barbell)': '0104',
+  // A face pull is a rope rear-delt row; the dataset has no entry under that name.
+  'face pull': '0203',
+  // Cardio again: the only candidates in a 29-entry cardio vocabulary.
+  'jumping jack': '3220', 'jumping jacks': '3220', 'battle ropes': '0128',
+  'stair machine (steps)': '2311', 'stair machine': '2311',
 }
 
 let ALIAS_IDX = null
@@ -230,6 +252,48 @@ export function matchExercise(name) {
   return ties === 1 ? best : null
 }
 
+/**
+ * Exact Hevy English title → catalogue id (from the generated title map).
+ * Used when a CSV is detected as Hevy: same deterministic table as the API import,
+ * keyed by title because Hevy's CSV has no template id column.
+ */
+export function matchHevyTitle(name) {
+  const id = HEVY_TITLE_MAP[String(name || '').trim().toLowerCase()]
+  return id && EXIDX[id] ? id : null
+}
+
+// Hevy exports no category column, so every invented exercise fell through to the
+// 'upper legs' default and a third of an imported history was attributed to the legs in
+// the muscle map. When there is no category, read the body part off the name instead.
+// Order is the rule: the first match wins, so the specific word has to come before the broad one.
+// A grip is a modifier on a row or a pulldown, never the movement ("Chest Supported T Row Neutral
+// Grip" is a back exercise); a wrist or reverse curl is a forearm exercise that happens to say
+// "curl"; a leg curl is not an arm curl; and a Romanian or stiff-leg deadlift trains the legs where
+// the conventional pull is filed under the back. "grip" alone still reads as forearms — last.
+const NAME_BP = [
+  [/\b(wrist|forearm|forearms|reverse curl)\b/, 'lower arms'],
+  [/\b(leg curl|leg curls|hamstring curl|nordic)\b/, 'upper legs'],
+  [/\b(romanian|rdl|stiff leg|stiff legged|straight leg)\b.*\bdeadlifts?\b|\brdl\b/, 'upper legs'],
+  [/\b(curl|curls|bicep|biceps|tricep|triceps|skullcrusher|pushdown)\b/, 'upper arms'],
+  [/\bchest supported\b/, 'back'],   // where the chest rests, not what it trains
+  [/\b(bench|chest|pec|fly|flye|crossover|crossovers|dip)\b/, 'chest'],
+  [/\b(row|rows|pulldown|pullup|pull up|chin up|lat|lats|back|deadlift|deadlifts|shrug)\b/, 'back'],
+  [/\b(shoulder|delt|delts|overhead|lateral raise|front raise|face pull|press up)\b/, 'shoulders'],
+  [/\b(calf|calves)\b/, 'lower legs'],
+  [/\b(squat|lunge|leg|glute|hamstring|quad|hip thrust)\b/, 'upper legs'],
+  [/\b(ab|abs|core|plank|crunch|sit up|oblique|russian twist)\b/, 'waist'],
+  [/\b(run|running|jog|bike|cycling|rope|ropes|jump|jacks|burpee|sprint|treadmill|stair)\b/, 'cardio'],
+  [/\bneck\b/, 'neck'],
+  [/\bgrip\b/, 'lower arms'],
+]
+// Hyphens, underscores and slashes read as spaces first: "Stiff-Legged Deadlift" and
+// "Chest-Supported Row" are the same names the rules above spell with a space, and the
+// matcher (wordsOf) already treats the two spellings as one exercise — the body part has to agree.
+export const bpFromName = name => {
+  const n = String(name || '').toLowerCase().replace(/[-_/]+/g, ' ').replace(/\s+/g, ' ').trim()
+  return (NAME_BP.find(([re]) => re.test(n)) || [])[1] || null
+}
+
 // Categories the exporters use -> the dataset's body parts, for exercises we invent.
 const CATEGORY_BP = {
   chest: 'chest', back: 'back', lats: 'back', shoulders: 'shoulders', delts: 'shoulders',
@@ -258,10 +322,10 @@ const LB_TO_KG = 0.45359237
 const p2 = n => String(n).padStart(2, '0')
 const MON = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 }
 
-/** "2020-12-30 18:51:52" · "2024-03-07" · "22 Dec 2025, 08:00" · "07/03/2024" -> { d, t } */
+/** "2020-12-30 18:51:52" · "2024-03-07" · "2024/03/07" · "2024.03.07" · "22 Dec 2025, 08:00" · "07/03/2024" -> { d, t } */
 export function parseWhen(s) {
   const v = String(s || '').trim()
-  let m = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ](\d{1,2}):(\d{2}))?/)
+  let m = v.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[T ](\d{1,2}):(\d{2}))?/)
   if (m) return { d: `${m[1]}-${p2(m[2])}-${p2(m[3])}`, t: hm(m[4], m[5]) }
   m = v.match(/^(\d{1,2})\s+([A-Za-z]{3})[a-z]*\.?\s+(\d{4})(?:,?\s+(\d{1,2}):(\d{2}))?/)
   if (m && MON[m[2].toLowerCase()]) return { d: `${m[3]}-${p2(MON[m[2].toLowerCase()])}-${p2(m[1])}`, t: hm(m[4], m[5]) }
@@ -351,14 +415,20 @@ export function parseWorkoutCSV(text, { unit = 'kg' } = {}) {
 
     const key = keyOf(name)
     let id = resolved.get(key)
-    if (id === undefined) { id = matchExercise(name); resolved.set(key, id) }
+    if (id === undefined) {
+      // Hevy CSV: prefer the generated English-title map (same table as the API import).
+      // Localized titles still fall through to the word-bag matcher.
+      id = (source === 'Hevy' ? matchHevyTitle(name) : null) || matchExercise(name)
+      resolved.set(key, id)
+    }
     if (id) matched++
     else {
       let c = created.get(key)
       if (!c) {
         c = {
           id: 'im' + uid(), n: name.toLowerCase(), custom: true, eq: 'custom', tg: '', desc: '',
-          bp: CATEGORY_BP[cell(r, 'category').toLowerCase()] || (km || (mins && !reps) ? 'cardio' : 'upper legs'),
+          bp: CATEGORY_BP[cell(r, 'category').toLowerCase()] || (km || (mins && !reps) ? 'cardio' : null)
+            || bpFromName(name.toLowerCase()) || 'upper legs',
         }
         created.set(key, c)
         unmatched.add(name)
@@ -428,7 +498,9 @@ export function parseWorkoutCSV(text, { unit = 'kg' } = {}) {
       id: 'iw' + uid(), d, start, end: end > start ? end : start,
       routineId: null, name: day.name || 'Imported', entries, prs: [],
     }
-    w.vol = entries.reduce((a, e) => a + e.sets.reduce((b, s) => b + (s.w || 0) * (s.r || 0), 0), 0)
+    // Work sets only, like `workoutVolume` for a workout finished in the app: warm-ups are
+    // promised to stay out of the volume, and this number is stored with the workout for good.
+    w.vol = entries.reduce((a, e) => a + e.sets.reduce((b, s) => b + (isWarmupRow(s) ? 0 : (s.w || 0) * (s.r || 0)), 0), 0)
     return w
   })
 
@@ -525,10 +597,23 @@ export function mergeImport(S, parsed) {
     return { added: fresh.length, skipped: parsed.bodyweight.length - fresh.length }
   }
   const have = new Set(S.workouts.map(w => w.d))
+  // Every parse invents fresh ids for the names it cannot match, and a later export of the same
+  // account names those exercises again. So a custom exercise is looked up by name among the ones
+  // already here — from an earlier import or made by hand — and the new days are pointed at it,
+  // the way mergeHevyRoutines and mergePlan do; otherwise the Library lists "Grip Trainer" twice,
+  // each with half the history. Only a name with no match becomes a new exercise.
+  S.customEx = S.customEx || []
+  const nameKey = n => String(n || '').toLowerCase().replace(/\s+/g, ' ').trim()
+  const exIdMap = {}
+  parsed.customEx.forEach(c => {
+    const same = S.customEx.find(x => x.id !== c.id && nameKey(x.n) === nameKey(c.n))
+    if (same) exIdMap[c.id] = same.id
+  })
   const fresh = parsed.workouts.filter(w => !have.has(w.d))
+    .map(w => ({ ...w, entries: w.entries.map(e => (exIdMap[e.id] ? { ...e, id: exIdMap[e.id] } : e)) }))
   const used = new Set(fresh.flatMap(w => w.entries.map(e => e.id)))
   const customs = parsed.customEx.filter(c => used.has(c.id) && !EXIDX[c.id])
-  S.customEx = [...(S.customEx || []), ...customs]
+  S.customEx = [...S.customEx, ...customs]
   S.workouts = [...S.workouts, ...fresh].sort((a, b) => (a.d < b.d ? -1 : 1))
   // seed the weight suggestions from the newest imported set of each lift
   fresh.forEach(w => w.entries.forEach(e => {

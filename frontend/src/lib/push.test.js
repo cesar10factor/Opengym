@@ -1,210 +1,100 @@
 // @vitest-environment happy-dom
-// N2: `ensurePushSubscription()` repairs the one failure that is invisible from the app — the
-// permission is granted, the client keeps asking the server to schedule rest-over pushes, and the
-// server keeps finding no subscription to send them to. Nothing throws anywhere along that path,
-// which is exactly why it needs tests: the only symptom is silence.
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+// @vitest-environment-options { "url": "https://gym.test/" }
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ api: vi.fn() }))
-vi.mock('./api.js', () => ({ api: mocks.api }))
+const calls = []
+vi.mock('./api.js', () => ({
+  api: vi.fn(async (path, opts) => {
+    calls.push([path, opts?.method || 'GET', opts?.body ? JSON.parse(opts.body) : null])
+    if (path === '/api/push/public-key') return { key: KEY }
+    if (path.startsWith('/api/push/status')) return { subscribed: serverHas }
+    return { ok: true }
+  })
+}))
 
-let subscribe, getSubscription, requestPermission, permission
-
-const FAKE_SUB = { endpoint: 'https://push.example/abc', toJSON: () => ({ endpoint: 'https://push.example/abc', keys: { p256dh: 'p', auth: 'a' } }) }
-
-function setup({ perm = 'granted', existing = null } = {}) {
-  permission = perm
-  subscribe = vi.fn(async () => FAKE_SUB)
-  getSubscription = vi.fn(async () => existing)
-  requestPermission = vi.fn(async () => perm)
-  const reg = { pushManager: { subscribe, getSubscription } }
-  globalThis.Notification = { get permission() { return permission }, requestPermission }
-  // happy-dom ships no ServiceWorkerContainer or PushManager; pushSupported() checks for both.
-  Object.defineProperty(navigator, 'serviceWorker', { value: { ready: Promise.resolve(reg) }, configurable: true })
-  window.PushManager = function PushManager() {}
-  mocks.api.mockImplementation(async url => (url === '/api/push/public-key' ? { key: 'AAAA' } : { ok: true }))
+const KEY = 'BPqx2m6xQ6pQK5hQtMz6d3kM2s7gq4yHqQvWzZ1sK1c'   // any base64url string
+const keyBytes = b64 => {
+  const padded = (b64 + '='.repeat((4 - b64.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/')
+  return Uint8Array.from(atob(padded), c => c.charCodeAt(0)).buffer
+}
+let serverHas = true
+let sub = null
+const makeSub = key => ({
+  endpoint: 'https://push.example/e1', options: { applicationServerKey: keyBytes(key) },
+  toJSON: () => ({ endpoint: 'https://push.example/e1', keys: { p256dh: 'p', auth: 'a' } }),
+  unsubscribe: vi.fn(async () => { sub = null; return true })
+})
+const reg = {
+  pushManager: {
+    getSubscription: vi.fn(async () => sub),
+    subscribe: vi.fn(async ({ applicationServerKey }) => { sub = makeSub(KEY); sub.options.applicationServerKey = applicationServerKey; return sub })
+  }
 }
 
-// The opt-out lives in localStorage on purpose (per browser, like the subscription itself), so it
-// outlives the module reloads below exactly as it outlives a page reload — clear it between tests.
-beforeEach(() => { vi.resetModules(); mocks.api.mockReset(); localStorage.clear() })
-afterEach(() => { delete globalThis.Notification; localStorage.clear() })
+beforeEach(() => {
+  calls.length = 0
+  serverHas = true
+  sub = null
+  localStorage.clear()
+  Object.defineProperty(navigator, 'serviceWorker', { value: { ready: Promise.resolve(reg) }, configurable: true })
+  globalThis.PushManager = function () {}
+  globalThis.Notification = { permission: 'granted', requestPermission: vi.fn(async () => 'granted') }
+})
 
-const load = () => import('./push.js?' + Math.random())
-
-describe('ensurePushSubscription', () => {
-  it('subscribes and registers with the server when permission is granted but nothing is subscribed', async () => {
-    setup({ perm: 'granted', existing: null })
-    const { ensurePushSubscription } = await load()
-
-    await expect(ensurePushSubscription()).resolves.toBe(true)
-
-    expect(subscribe).toHaveBeenCalledTimes(1)
-    expect(subscribe.mock.calls[0][0].userVisibleOnly).toBe(true)  // iOS revokes silent subs
-    const posted = mocks.api.mock.calls.find(c => c[0] === '/api/push/subscribe')
-    expect(posted).toBeTruthy()
-    expect(JSON.parse(posted[1].body).subscription.endpoint).toBe(FAKE_SUB.endpoint)
-  })
-
-  it('does nothing at all when permission has not been asked for — never ambushes with a prompt', async () => {
-    setup({ perm: 'default', existing: null })
-    const { ensurePushSubscription } = await load()
-
-    await expect(ensurePushSubscription()).resolves.toBe(false)
-
-    expect(requestPermission).not.toHaveBeenCalled()
-    expect(subscribe).not.toHaveBeenCalled()
-    expect(mocks.api).not.toHaveBeenCalled()
-  })
-
-  it('does nothing when permission was denied', async () => {
-    setup({ perm: 'denied', existing: null })
-    const { ensurePushSubscription } = await load()
-
-    await expect(ensurePushSubscription()).resolves.toBe(false)
-
-    expect(requestPermission).not.toHaveBeenCalled()
-    expect(subscribe).not.toHaveBeenCalled()
-  })
-
-  it('does not re-subscribe when a subscription already exists', async () => {
-    setup({ perm: 'granted', existing: FAKE_SUB })
-    const { ensurePushSubscription } = await load()
-
-    await expect(ensurePushSubscription()).resolves.toBe(false)
-
-    expect(subscribe).not.toHaveBeenCalled()
-  })
-
-  it('does no network work at all on repeat calls — one rest must not cost a round trip', async () => {
-    setup({ perm: 'granted', existing: FAKE_SUB })
-    const { ensurePushSubscription } = await load()
-
-    await ensurePushSubscription()
-    const afterFirst = mocks.api.mock.calls.length
-    await ensurePushSubscription()
-    await ensurePushSubscription()
-
-    expect(mocks.api.mock.calls.length).toBe(afterFirst)
-    expect(subscribe).not.toHaveBeenCalled()
-  })
-
-  it('swallows failures instead of letting them reach the UI', async () => {
-    setup({ perm: 'granted', existing: null })
-    mocks.api.mockImplementation(async () => { throw new Error('offline') })
-    const { ensurePushSubscription } = await load()
-
-    await expect(ensurePushSubscription()).resolves.toBe(false)
-  })
-
-  it('swallows a subscribe() rejection too', async () => {
-    setup({ perm: 'granted', existing: null })
-    subscribe.mockImplementation(async () => { throw new Error('AbortError') })
-    const { ensurePushSubscription } = await load()
-
-    await expect(ensurePushSubscription()).resolves.toBe(false)
-  })
-
-  it('enablePush still prompts and goes through the same registration', async () => {
-    setup({ perm: 'granted', existing: null })
-    const { enablePush } = await load()
-
-    await enablePush()
-
-    expect(requestPermission).toHaveBeenCalledTimes(1)
-    expect(subscribe).toHaveBeenCalledTimes(1)
-    expect(mocks.api.mock.calls.some(c => c[0] === '/api/push/subscribe')).toBe(true)
+describe('deviceId', () => {
+  it('makes one token per browser and keeps it', async () => {
+    const { deviceId } = await import('./push.js')
+    const a = deviceId()
+    expect(a).toMatch(/^[A-Za-z0-9_-]{8,64}$/)
+    expect(deviceId()).toBe(a)
+    expect(localStorage.getItem('gym_device')).toBe(a)
   })
 })
 
-/* The self-repair must not be able to overrule the user. Unsubscribing does NOT revoke the browser
-   permission, so after disablePush() the permission is still `granted` and no subscription exists —
-   the exact shape the repair path was written to fix. Without a recorded opt-out, the next rest
-   would resubscribe and the Settings toggle would be impossible to keep off. */
-describe('explicit opt-out vs. self-repair', () => {
-  const enabledThenDisabled = async () => {
-    // Full cycle through the real module: turn it on, then off, as Settings.jsx does.
-    setup({ perm: 'granted', existing: null })
-    const mod = await load()
-    await mod.enablePush()
-    // Now the browser reports the subscription enablePush created…
-    getSubscription.mockImplementation(async () => FAKE_SUB)
-    FAKE_SUB.unsubscribe = vi.fn(async () => true)
-    await mod.disablePush()
-    // …and after unsubscribing there is none left, while permission stays granted.
-    getSubscription.mockImplementation(async () => null)
-    subscribe.mockClear()
-    return mod
-  }
-
-  it('a rest started after the user switched push off leaves it off', async () => {
-    const mod = await enabledThenDisabled()
-    expect(Notification.permission).toBe('granted')   // the trap: the permission survived
-
-    await expect(mod.ensurePushSubscription()).resolves.toBe(false)
-
-    expect(subscribe).not.toHaveBeenCalled()
+describe('syncPushSubscription', () => {
+  it('does nothing without permission or without a subscription', async () => {
+    const { syncPushSubscription } = await import('./push.js')
+    Notification.permission = 'default'
+    expect(await syncPushSubscription()).toBe(false)
+    Notification.permission = 'granted'
+    expect(await syncPushSubscription()).toBe(false)
+    expect(calls).toEqual([])
   })
 
-  it('the opt-out survives a reload — a fresh module instance still respects it', async () => {
-    await enabledThenDisabled()
-
-    // A page reload is a brand-new module with all its in-memory flags gone; only storage carries
-    // over. Re-running setup() also rebuilds the mocks, exactly like a fresh browser session.
-    setup({ perm: 'granted', existing: null })
-    const fresh = await load()
-
-    await expect(fresh.ensurePushSubscription()).resolves.toBe(false)
-    expect(subscribe).not.toHaveBeenCalled()
+  it('asks the server and does not write when it already holds the endpoint', async () => {
+    const { syncPushSubscription } = await import('./push.js')
+    sub = makeSub(KEY)
+    expect(await syncPushSubscription()).toBe(true)
+    expect(calls.map(c => c[1] + ' ' + c[0].split('?')[0])).toEqual(['GET /api/push/public-key', 'GET /api/push/status'])
   })
 
-  it('turning push back on clears the opt-out, and repair works again afterwards', async () => {
-    const mod = await enabledThenDisabled()
-    await mod.enablePush()
-    subscribe.mockClear()
-    getSubscription.mockImplementation(async () => null)
-
-    await expect(mod.ensurePushSubscription()).resolves.toBe(true)
-    expect(subscribe).toHaveBeenCalledTimes(1)
+  it('re-registers a subscription the server lost, with the device id', async () => {
+    const { syncPushSubscription, deviceId } = await import('./push.js')
+    sub = makeSub(KEY)
+    serverHas = false
+    expect(await syncPushSubscription()).toBe(true)
+    const post = calls.find(c => c[0] === '/api/push/subscribe')
+    expect(post[2]).toEqual({ subscription: { endpoint: 'https://push.example/e1', keys: { p256dh: 'p', auth: 'a' } }, deviceId: deviceId() })
+    expect(reg.pushManager.subscribe).not.toHaveBeenCalled()
   })
 
-  it('the default state — toggle never touched — still repairs', async () => {
-    setup({ perm: 'granted', existing: null })
-    const { ensurePushSubscription } = await load()
-
-    await expect(ensurePushSubscription()).resolves.toBe(true)
-    expect(subscribe).toHaveBeenCalledTimes(1)
-  })
-
-  it('disablePush records the opt-out even when there was nothing left to unsubscribe', async () => {
-    setup({ perm: 'granted', existing: null })
-    const mod = await load()
-
-    await mod.disablePush()          // getSubscription() -> null, nothing to remove
-
-    await expect(mod.ensurePushSubscription()).resolves.toBe(false)
-    expect(subscribe).not.toHaveBeenCalled()
-  })
-
-  it('unreadable storage falls back to repairing, not to staying silent', async () => {
-    setup({ perm: 'granted', existing: null })
-    const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked') })
-    try {
-      const { ensurePushSubscription } = await load()
-      await expect(ensurePushSubscription()).resolves.toBe(true)
-    } finally { getItem.mockRestore() }
+  it('replaces a subscription made against a key the server no longer has', async () => {
+    const { syncPushSubscription } = await import('./push.js')
+    const old = makeSub('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')
+    sub = old
+    expect(await syncPushSubscription()).toBe(true)
+    expect(old.unsubscribe).toHaveBeenCalled()
+    expect(reg.pushManager.subscribe).toHaveBeenCalledTimes(1)
+    expect(new Uint8Array(reg.pushManager.subscribe.mock.calls[0][0].applicationServerKey)).toEqual(new Uint8Array(keyBytes(KEY)))
+    expect(calls.some(c => c[0] === '/api/push/subscribe')).toBe(true)
+    expect(calls.some(c => c[0].startsWith('/api/push/status'))).toBe(false)
   })
 })
 
-describe('enablePush', () => {
-  it('prompts and registers', async () => {
-    setup({ perm: 'granted', existing: null })
-    const { enablePush } = await load()
-
-    await enablePush()
-
-    expect(requestPermission).toHaveBeenCalledTimes(1)
-    expect(subscribe).toHaveBeenCalledTimes(1)
-    expect(mocks.api.mock.calls.some(c => c[0] === '/api/push/subscribe')).toBe(true)
+describe('pushSupported', () => {
+  it('needs the service worker, PushManager, Notification and an https origin', async () => {
+    const { pushSupported } = await import('./push.js')
+    expect(pushSupported()).toBe(true)
+    expect(location.protocol).toBe('https:')
   })
 })

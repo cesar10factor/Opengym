@@ -13,14 +13,11 @@ const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const CODE_LEN = 8;
 const LINK_TTL_MS = 15 * 60 * 1000;
 
-// A per-code attempt counter (the original design here) only ever punishes the legitimate owner
-// re-submitting their own correct code — an attacker guessing codes that don't exist finds no
-// matching link to increment, so the counter never rises for them. The throttle below is keyed
-// to nothing but the clock instead: every failure, real code or not, counts against one
-// instance-wide budget. It is deliberately global, not per-code and not per-IP: linking a new
-// device happens a handful of times a year, so locking out the whole instance for a while costs
-// a legitimate user nothing, and unlike an IP-keyed limit it cannot be evaded by rotating
-// addresses (or by trying a different guessed code — that's the whole point).
+// Per-code attempts only punish legitimate users (attackers guessing codes that don't exist
+// never increment any counter). The throttle is instance-wide instead: one global budget,
+// rejected only on clock time, to prevent DoS via rotating IPs or guessed codes. Trade-off:
+// anyone can spam bad requests and briefly block the instance, but linking is rare enough it
+// is not the primary DoS surface, and per-code/per-IP limits are worse. See the original logic.
 export const MAX_FAILS = 10;
 export const FAIL_WINDOW = 15 * 60 * 1000;
 
@@ -84,6 +81,16 @@ export function validateLink(links, code, now) {
 export function burnLink(links, code) {
   const norm = normalize(code);
   return links.filter(l => !codesMatch(normalize(l.code), norm));
+}
+
+// Combines validate-then-burn into one synchronous call to prevent race conditions (security
+// review, 2026-09-21). Between validation and burn, a second concurrent WebAuthn flow for the
+// same code could see it still valid and add a second credential. redeemLink() atomically
+// validates and burns, so the second caller always sees the burn already applied.
+export function redeemLink(links, code, uid, now) {
+  const result = validateLink(links, code, now);
+  if (!result.ok || result.uid !== uid) return { ok: false, reason: result.ok ? 'uid-mismatch' : result.reason, links };
+  return { ok: true, links: burnLink(links, code) };
 }
 
 export function pruneLinks(links, now) {

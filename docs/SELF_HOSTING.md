@@ -8,10 +8,10 @@ This guide takes you from "just cloned it" to "using it from my phone over the i
 Requirements: [Docker](https://docs.docker.com/get-docker/) with the Compose plugin.
 
 ```bash
-git clone https://gitlab.com/DuarteSantos8/opengym
+git clone https://github.com/DuarteSantos8/openGym   # or https://gitlab.com/DuarteSantos8/opengym — same repo
 cd openGym
 cp .env.example .env
-docker compose pull   # prebuilt images from GitLab (amd64 + arm64) — or skip and build from source
+docker compose pull   # prebuilt images from GitLab's registry (amd64 + arm64; the same images are on ghcr.io) — or skip and build from source
 docker compose up -d
 ```
 
@@ -42,7 +42,24 @@ passkey prompt won't appear. To use openGym from your phone you need a real HTTP
 
 (You can still open it over LAN in **guest mode**, which stores data only in that browser.)
 
+The standalone mobile app (`docs/MOBILE.md`) sidesteps this entirely for its "connect to my
+server" mode: instead of a passkey ceremony (impossible from inside its WebView, which never
+runs at your real hostname), it pairs by redeeming a short one-time code — minted from
+Settings → "Pair the mobile app" in an already signed-in browser tab — for a bearer token
+sent as an `Authorization` header rather than a cookie. Two consequences worth knowing if
+you're poking at the API directly:
+
+- `POST /api/pair/create` (needs a session) and `POST /api/pair/redeem` (doesn't) implement
+  this — see `api/server.js`. The returned token is the exact same signed value a cookie
+  carries, so "sign out everywhere" invalidates it too.
+- The server reflects `Access-Control-Allow-Origin` for any request that sends an `Origin`
+  header, so the app's own WebView origin can call the API cross-origin. It never sends
+  `Access-Control-Allow-Credentials`, so this doesn't let a browser read your cookie session
+  from another origin — only bearer-token requests benefit from it.
+
 ## 3. Expose it over HTTPS on your own domain
+
+> Want HTTPS **without** exposing anything to the internet — a valid certificate on a LAN-only address? See [SELF_HOSTING_HTTPS.md](./SELF_HOSTING_HTTPS.md) (wildcard cert via a DNS challenge, Caddy in front).
 
 Put openGym behind something that terminates TLS for a hostname you control, then point it at
 the `web` container. Pick whichever you already run:
@@ -63,7 +80,9 @@ gym.example.com {
 ### Option C — Traefik / nginx / Nginx Proxy Manager
 
 Route `gym.example.com` (HTTPS) → `web:80` (or `<docker-host>:8080`). Any reverse proxy works —
-openGym only needs the browser to reach it over `https://gym.example.com`.
+openGym only needs the browser to reach it over `https://gym.example.com`. If that proxy caps
+request bodies (nginx does, at 1 MiB by default), allow at least 5 MiB on `/api/` — the app syncs
+its whole history in one PUT; the bundled web image already allows 5 MiB, matching the API.
 
 Then set your domain in `.env` and restart:
 
@@ -140,6 +159,16 @@ same device.
 Prefer to keep the whole thing off the open internet? A VPN or an auth proxy (Authelia, Cloudflare
 Access…) in front still works, and composes with the above.
 
+Behind an auth proxy, let three files through without a login: `/icon-180.png`, `/icon-512.png`
+and `/manifest.json` — the app's icon and its manifest, nothing personal in them. iOS fetches the
+Home Screen icon outside the page, without your session cookie, so a gated icon comes back as the
+proxy's login page and iOS 26 draws a letter tile instead of the dumbbell (observed on iOS 26.6
+behind Teleport; Authelia users know the same from favicons and manifests). Authelia: a `bypass`
+rule for those paths; Authentik: unauthenticated paths; Cloudflare Access: a bypass policy;
+oauth2-proxy: `skip_auth_routes`. A proxy that cannot exempt a path (Teleport) has to serve the
+icons inline as `data:` URLs instead — Safari 26 accepts those, older iOS does not, which is why
+that is not the default here.
+
 ## 5. Fitting it into an existing stack
 
 The defaults assume openGym is the only thing here: a service called `api` on port 3000, and nginx
@@ -152,8 +181,17 @@ WEB_PORT=8080              # host port — what you browse to
 NGINX_PORT=80              # port the web container listens on, inside the container
 BACKEND=api                # name of the API service that /api is proxied to
 PORT=3000                  # port the API listens on; web proxies to the same value
+RESOLVER=127.0.0.11        # DNS nginx resolves BACKEND with — Docker's, unless you are not on Docker
+BASE_PATH=                 # subpath openGym is served under, e.g. /gym — see below; empty = site root
 SESSION_DAYS=90            # how long a sign-in lasts
 ```
+
+`RESOLVER` only matters off Docker. nginx re-resolves `BACKEND` on every `/api` request so a
+recreated API container does not leave it proxying to a dead IP, and `127.0.0.11` is where
+Docker answers those lookups. Nothing listens there on another runtime, and an unreachable
+resolver does not fail fast — every `/api` request hangs until it times out. On Kubernetes set
+it to the cluster DNS service address (`kubectl -n kube-system get svc kube-dns`, commonly
+`10.96.0.10`); under Podman, to whatever its network provides.
 
 The web image renders its nginx config from these when the container starts, so they take effect
 on a **prebuilt image** — no rebuild. `BACKEND` and `PORT` together are what `/api` is proxied to,
@@ -162,6 +200,40 @@ so they have to name a service the web container can actually reach on your comp
 Note the difference from `VITE_IMG_BASE` / `VITE_GIF_BASE` (see Troubleshooting): those are
 build-time values baked into the frontend bundle, and setting them next to `docker compose` does
 nothing to an image you pulled.
+
+### Serving openGym under a subpath
+
+openGym can live at `https://example.com/gym/` rather than on a host of its own. Which of the two
+setups below you need depends on one thing: whether your reverse proxy strips the prefix before
+the container sees the request.
+
+**The proxy strips the prefix** (Caddy's `handle_path`, Traefik's `StripPrefix` middleware,
+nginx `proxy_pass` with a trailing slash). Nothing to configure. The app's assets are relative
+and it asks its own address for the API, so everything stays inside the prefix on its own:
+
+```caddy
+example.com {
+    handle_path /gym/* {
+        reverse_proxy opengym-web:80
+    }
+}
+```
+
+**The proxy passes the prefix through.** Tell the web container what it is, without a trailing
+slash:
+
+```bash
+BASE_PATH=/gym
+```
+
+That is a start-up setting like the others above, so it works on a prebuilt image. Forward only
+the prefix to the container — openGym does not serve itself at the site root as well, and a copy
+reached there would look for an API that is not on that path.
+
+Either way, keep `ORIGIN` and `RP_ID` pointing at the address in the browser's bar
+(`ORIGIN=https://example.com`, `RP_ID=example.com`). Passkeys key on the host, not the path, so a
+subpath changes nothing about section 2 — but it does mean two instances under one hostname share
+a passkey scope and can see each other's credentials. Give each its own hostname if that matters.
 
 ## 6. Backups
 
@@ -176,6 +248,17 @@ on, `audit.log` with everyone's sign-in times. Worth knowing before you ship the
 backup service you don't run. Restore by unpacking it back into the project folder. (Individual
 users can also export their own data as JSON from Settings.)
 
+If you enabled the AI Coach with the Codex provider, note what this archive deliberately does
+**not** contain: `./coach-auth`, where that provider keeps its refreshable sign-in. It is a
+sibling of `./data` rather than a folder inside it precisely so that a live credential does not
+end up in every backup you are told to make — an archive like this gets copied to laptops and
+cloud drives, and a refresh token keeps working wherever it lands. Nothing in `./coach-auth`
+needs backing up: if you lose it, sign the provider in again.
+
+API keys for the HTTPS providers (Anthropic, OpenAI, Gemini, a compatible endpoint) are the
+other way round: they are in `./data/coach.json`, encrypted with `./data/secret`, so they *are*
+in this archive — and unreadable without the secret next to them, like everything else in it.
+
 ## 7. Notifications
 
 openGym can push two kinds of alert to your phone/desktop, even when the app isn't open:
@@ -187,6 +270,13 @@ No setup needed server-side, and nothing to configure per timezone: VAPID keys a
 first run and saved to `./data/vapid.json`, and each user's browser reports its own timezone
 automatically when they turn the reminder on — it fires at their local time, and follows them if
 they travel, regardless of what timezone the server itself runs in.
+
+Where it works: any desktop browser, Android Chrome, and on iOS only the app **added to the Home
+Screen** (Safari in a tab has no Web Push). The Android APK does not use Web Push at all — its
+day reminder is a local notification scheduled on the phone, and rest-timer alerts there only
+sound while the app is in the foreground. A reminder that was due while the server was down or
+restarting is still sent up to 15 minutes late, once; the browser re-registers its subscription
+with the server on every signed-in start, so a subscription the server lost heals itself.
 
 **Keep screen awake** (Settings → *During a workout*) has the same transport requirement: the
 Wake Lock API is only available over HTTPS or on `http://localhost`, so on a plain-LAN-IP
@@ -217,16 +307,64 @@ docker compose up -d --build
 The app shell is versioned (`?v=N`) so clients pick up changes on next load. Your `./data` and the
 downloaded media are untouched.
 
+## Passkeys fail even though `RP_ID` looks right
+
+The most common support question, and the values are usually *nearly* correct. Work through
+these in order — the first two account for most of it.
+
+**1. Ask the server what it actually loaded.** It prints both values on startup:
+
+```
+docker compose logs api | grep 'gym-api on'
+# gym-api on :3000 (rpID=gym.example.com, origin=https://gym.example.com)
+```
+
+If that disagrees with your `.env`, the container is still running the old environment.
+`docker compose restart` does **not** re-read `.env` — use `docker compose up -d`.
+
+**2. Check the exact shape of each value.** They are not the same kind of string:
+
+| | Correct | Wrong |
+|---|---|---|
+| `RP_ID` | `gym.example.com` | `https://gym.example.com`, `gym.example.com:8080`, `gym.example.com/` |
+| `ORIGIN` | `https://gym.example.com` | `gym.example.com`, `https://gym.example.com/` |
+
+`RP_ID` is a bare hostname: no scheme, no port, no trailing slash. `ORIGIN` is the full origin
+*with* the scheme and *without* a trailing slash. Both must match your address bar exactly.
+
+**3. Behind a tunnel or reverse proxy, use the public hostname.** With Cloudflare Tunnel,
+Traefik, nginx or Caddy in front, the browser only ever sees the public name — so that is what
+both values must be. Not the container name, not the LAN IP, not the internal port:
+
+```env
+RP_ID=gym.example.com
+ORIGIN=https://gym.example.com
+```
+
+The tunnel's own route may point wherever it likes (`http://localhost:8080` is fine). It is the
+browser-facing name that has to appear here.
+
+**4. `www.` is a different host.** A passkey registered on `gym.example.com` will not work on
+`www.gym.example.com`. Pick one and redirect the other.
+
+**5. Changing the hostname invalidates existing passkeys.** They were bound to the old one, so
+everybody registers again — which is why it pays to settle the domain before others join.
+
+> On a LAN without certificates there is nothing to configure that makes passkeys work over
+> plain `http://192.168.x.x`: browsers only allow WebAuthn on HTTPS (or `localhost`). Use guest
+> mode, the standalone mobile app (`docs/MOBILE.md`), or put a certificate in front of it.
+
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | No passkey prompt on my phone | You're on `http://` or an IP, not HTTPS. Set up a domain (section 3). |
-| "verification failed" on login | `RP_ID`/`ORIGIN` don't match the URL in the address bar. Make them exact, restart. |
+| "verification failed" on login | `RP_ID`/`ORIGIN` don't match the URL in the address bar. See the section above — start with what the server logged on startup. |
 | Media didn't download | `docker compose logs media`. Re-run `docker compose up -d`, or run `./scripts/fetch-media.sh`. |
 | Port 8080 already used | Set `WEB_PORT=9090` in `.env` (and update `ORIGIN` for local testing). |
 | No "Notifications" option in Settings | Requires a signed-in profile and HTTPS (or `localhost`) — guest mode and plain HTTP over LAN can't subscribe. |
 | Day reminder fires at the wrong time | Toggle it off and on in Settings so it re-detects your browser's timezone (also happens automatically on every app load — see section 7). |
+| Notifications switch is off although I turned it on | The server no longer holds the subscription (rebuilt `data/db.json`, regenerated `vapid.json`); the app re-registers on the next start, or switch it on again. On iOS, push only works from the Home Screen icon. |
 | Want to reset a stuck login | Delete the cookie in your browser; sessions are just signed cookies. |
 | `docker compose pull` fails with "denied" / "unauthorized" | The prebuilt images aren't published yet, or need to be, or the GHCR package is still private — build from source instead (`docker compose up -d --build`). |
 | Exercise images/GIFs blank when a routine is open | Fixed in current images (issue #79). On an older build, see the note below. |

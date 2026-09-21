@@ -8,23 +8,23 @@
 # specific native binaries, which is what breaks `vite build` with unrelated-looking
 # module-resolution errors.
 FROM --platform=$BUILDPLATFORM node:22-alpine AS build
-WORKDIR /app
+# The frontend sits at /app/frontend, not /app: the Coach's runtime-neutral core lives in
+# api/coach/core and is imported from frontend/src as ../../../api/coach/core/*, so the two
+# have to keep the same relative position they have in the repository. Copying frontend/ alone
+# is exactly what made the v1.2.15 web image fail to build.
+WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci 2>/dev/null || npm install
+# --ignore-scripts: the web image only needs `vite build`; the one heavy postinstall in this tree
+# (@capacitor/assets -> sharp, a libvips download from GitHub) is for drawing app icons and has
+# timed out on the shared runners — a lockfile-ignoring `npm install` fallback is no answer to that.
+RUN npm ci --ignore-scripts
+COPY api/coach/core/ /app/api/coach/core/
 COPY frontend/ ./
-# The version marker has to be baked into the bundle, so it must reach THIS stage — an ARG is
-# scoped to the stage that declares it, and the ones further down belong to the nginx stage's
-# OCI labels only. Declared here (after the npm install layer, so a new commit hash doesn't
-# re-run the install) and promoted to ENV because vite.config.js reads process.env. Left with no
-# default: an un-parameterised build gets empty strings, which the app treats as "no version"
-# and shows nothing at all.
-ARG VCS_REF
-ARG BUILD_DATE
-ENV VCS_REF=$VCS_REF
-ENV BUILD_DATE=$BUILD_DATE
 RUN npm run build
 
 FROM nginx:alpine
+# Same reason as in api/Dockerfile: alpine fixes land faster than the nginx image is rebuilt.
+RUN apk upgrade --no-cache
 ARG VERSION=dev
 ARG VCS_REF=dev
 ARG BUILD_DATE=unknown
@@ -41,13 +41,27 @@ LABEL maintainer="Duarte Santos https://gitlab.com/DuarteSantos8" \
     org.opencontainers.image.created=$BUILD_DATE
 
 COPY web/nginx.conf.template /etc/nginx/templates/default.conf.template
-COPY --from=build /app/dist /usr/share/nginx/html
+COPY --from=build /app/frontend/dist /usr/share/nginx/html
 # exercise media (img/gif) is mounted at runtime from the media volume
 
 # Set Default ENVs for nginx
 ENV NGINX_PORT=80
 ENV BACKEND=api
 ENV PORT=3000
+# The DNS nginx asks about BACKEND on every /api request. Docker's embedded resolver by
+# default, which is correct for compose. Nothing listens on it elsewhere, and an unreachable
+# resolver makes every /api request hang rather than fail, so any other runtime has to say
+# what its DNS is: on Kubernetes, the kube-dns/CoreDNS service address (commonly 10.96.0.10).
+ENV RESOLVER=127.0.0.11
+# Empty = the CF-Connecting-IP header is dropped before it reaches the API, so it cannot be
+# forged by a direct client. Set to $http_cf_connecting_ip only when Cloudflare is really in
+# front. Defined here too, not just in compose, so the template always renders for anyone
+# running the prebuilt image from their own compose file.
+ENV CF_CONNECTING_IP=""
+# Subpath deployments behind a reverse proxy that does NOT strip its prefix: "/gym", no trailing
+# slash. Empty (the default) serves the app at the root exactly as before. A proxy that strips
+# the prefix needs nothing here — the app derives the API address from its own URL.
+ENV BASE_PATH=""
 
 # Probe the port nginx was actually told to listen on (NGINX_PORT is configurable, so a
 # hardcoded http://localhost/ breaks on any instance that changed it), and address it as

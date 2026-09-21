@@ -9,6 +9,7 @@ import { normalizeCode, formatCode } from '../lib/link.js'
 import { useState, useRef, useEffect } from 'react'
 import Icon from '../components/Icon.jsx'
 import { Button, TextField } from '../components/ui.jsx'
+import { askAddDeviceData } from '../sheets.jsx'
 
 function RegisterSheet({ close }) {
   const { setUser, pushState, pullState, loadConfig } = useStore()
@@ -48,9 +49,11 @@ function RegisterSheet({ close }) {
 }
 
 // Redeems a code generated on another (already signed-in) device — attaches this device's
-// passkey to that same profile instead of creating a new one.
+// passkey to that same profile instead of creating a new one. Same adoptProfile() flow as
+// signing in below: the profile is the truth, and any data logged locally before linking is
+// offered to the user rather than silently dropped or silently kept.
 function LinkSheet({ close }) {
-  const { setUser, pullState } = useStore()
+  const { setUser, adoptProfile } = useStore()
   const [code, setCode] = useState('')
   const ref = useRef(null)
   useEffect(() => { setTimeout(() => ref.current?.focus(), 250) }, [])
@@ -60,7 +63,7 @@ function LinkSheet({ close }) {
     try {
       const u = await linkDevice(c)
       setUser(u); close()
-      await pullState()
+      await adoptProfile(askAddDeviceData)
       useUI.getState().toast(t('Device linked'))
     } catch (e) { if (e.name !== 'NotAllowedError' && e.name !== 'AbortError') useUI.getState().toast(e.message || t('Linking failed')) }
   }
@@ -76,11 +79,11 @@ function LinkSheet({ close }) {
 }
 
 export default function Login() {
-  const { setUser, pullState, setGuest } = useStore()
+  const { setUser, adoptProfile, setGuest } = useStore()
   const config = useStore(s => s.config)
   const canGuest = guestAllowed(config)
   const signIn = async () => {
-    try { const u = await passkeyLogin(); setUser(u); await pullState(); useUI.getState().toast(t('Welcome back, {0}', u.name)) }
+    try { const u = await passkeyLogin(); setUser(u); await adoptProfile(askAddDeviceData); useUI.getState().toast(t('Welcome back, {0}', u.name)) }
     catch (e) { if (e.name !== 'NotAllowedError' && e.name !== 'AbortError') useUI.getState().toast(e.message || t('Sign-in failed')) }
   }
   const head = <>
