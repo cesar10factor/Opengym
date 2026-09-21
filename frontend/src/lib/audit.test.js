@@ -35,8 +35,11 @@ describe('auditCat', () => {
   it('survives a missing event name', () => {
     expect(auditCat(undefined)).toBe('')
   })
-  it('puts every known event in exactly auth or admin', () => {
-    expect([...new Set(EVENTS.map(auditCat))].sort()).toEqual(['admin', 'auth'])
+  it('puts every known event in exactly auth, admin, link or device', () => {
+    // 'link' (code/options/verify) and 'device' (GET/DELETE /api/devices) are T2/T3's own
+    // categories, added alongside auth and admin rather than folded into either — linking isn't
+    // a login and device management isn't an admin action.
+    expect([...new Set(EVENTS.map(auditCat))].sort()).toEqual(['admin', 'auth', 'device', 'link'])
   })
 })
 
