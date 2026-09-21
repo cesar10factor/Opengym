@@ -288,10 +288,26 @@ describe('Strava routes with both env vars set (network-free paths)', () => {
     assert.equal(loc.origin, stub.base(), 'the authorize URL must be built from STRAVA_API_BASE, not hardcoded');
     assert.equal(loc.pathname, '/oauth/authorize');
     assert.equal(loc.searchParams.get('client_id'), 'test-client-id');
-    assert.equal(loc.searchParams.get('scope'), 'activity:write');
+    assert.equal(loc.searchParams.get('scope'), 'activity:write,activity:read_all');
     assert.equal(loc.searchParams.get('redirect_uri'), origin + '/api/strava/callback');
     const state = loc.searchParams.get('state');
     assert.ok(state && state.includes('.'), 'state must be present and signed (payload.mac)');
+  });
+
+  // Regression guard for a month of silently unhidden workouts. /connect asked for activity:write
+  // and nothing else, which uploads fine and can edit nothing: Strava grants editing "based on
+  // activity read access level", so with no read scope every hide_from_home PUT answered 404 and
+  // the sweeper retried a door that was never going to open. Asserted on the redirect itself
+  // because that is where the mistake lived — the upload path stayed green throughout.
+  it('the consent request asks for a read scope, not write alone — write alone can upload but never hide', async () => {
+    const r = await fetch(origin + '/api/strava/connect', { headers: { Cookie: cookie }, redirect: 'manual' });
+    const granted = new URL(r.headers.get('location')).searchParams.get('scope').split(',').map(s => s.trim());
+    assert.ok(granted.includes('activity:write'), 'uploading still needs write');
+    assert.ok(
+      granted.includes('activity:read_all'),
+      'without a read scope Strava sees no activity to edit and every mute answers 404; ' +
+      'read_all rather than read because an "Only You" activity is invisible to plain activity:read'
+    );
   });
 
   it('a second /connect for the same user replaces the first state — only one active state per user (per-user cap)', async () => {
@@ -348,13 +364,13 @@ describe('Strava routes with both env vars set (network-free paths)', () => {
     assert.equal(fs.existsSync(stravaFilePath(uid)), false, 'no token should ever have been written');
   });
 
-  it('a valid state with a code but missing the activity:write scope is refused with an actionable message, before any network call', async () => {
+  it('a valid state with a code but missing a required scope is refused with an actionable message, before any network call', async () => {
     const before2 = stub.requests.length;
     const state = await mintState(origin, cookie);
     const r = await fetch(origin + `/api/strava/callback?state=${encodeURIComponent(state)}&code=whatever&scope=read,profile:read_all`, { redirect: 'manual' });
     assert.equal(r.status, 400);
     const body = await r.json();
-    assert.match(body.error, /activity:write/);
+    assert.match(body.error, /activity:read_all/);
     assert.equal(fs.existsSync(stravaFilePath(uid)), false);
     assert.equal(stub.requests.length, before2, 'scope is checked before the token exchange — the stub must never be hit');
   });
@@ -364,7 +380,7 @@ describe('Strava routes with both env vars set (network-free paths)', () => {
     const r = await fetch(origin + `/api/strava/callback?state=${encodeURIComponent(state)}&code=whatever`, { redirect: 'manual' });
     assert.equal(r.status, 400);
     const body = await r.json();
-    assert.match(body.error, /activity:write/);
+    assert.match(body.error, /activity:read_all/);
   });
 
   it('POST /api/strava/disconnect with no existing connection is not an error, and makes no request to the stub', async () => {
@@ -426,7 +442,7 @@ describe('a successful code-for-token exchange (against the stub)', () => {
     });
 
     const state = await mintState(origin, cookie);
-    const r = await fetch(origin + `/api/strava/callback?state=${encodeURIComponent(state)}&code=abc123&scope=read,activity:write`, { redirect: 'manual' });
+    const r = await fetch(origin + `/api/strava/callback?state=${encodeURIComponent(state)}&code=abc123&scope=read,activity:write,activity:read_all`, { redirect: 'manual' });
     assert.equal(r.status, 302);
     assert.equal(r.headers.get('location'), origin + '/');
 
@@ -474,7 +490,7 @@ describe('failure shapes from the token exchange (against the stub)', () => {
   it('a 200 with an incomplete body (missing refresh_token) is refused, not persisted (FIX 1)', async () => {
     stub.setTokenHandler(() => ({ status: 200, body: { access_token: 'only_access', athlete: { id: 1 } } }));
     const state = await mintState(origin, cookie);
-    const r = await fetch(origin + `/api/strava/callback?state=${encodeURIComponent(state)}&code=abc&scope=activity:write`, { redirect: 'manual' });
+    const r = await fetch(origin + `/api/strava/callback?state=${encodeURIComponent(state)}&code=abc&scope=activity:write,activity:read_all`, { redirect: 'manual' });
     assert.equal(r.status, 502);
     assert.deepEqual(await r.json(), { error: 'strava exchange failed' });
     assert.equal(fs.existsSync(stravaFilePath(uid)), false, 'an incomplete token must never be written to disk');
@@ -483,7 +499,7 @@ describe('failure shapes from the token exchange (against the stub)', () => {
   it('a 200 with a completely empty body is refused, not persisted', async () => {
     stub.setTokenHandler(() => ({ status: 200, body: {} }));
     const state = await mintState(origin, cookie);
-    const r = await fetch(origin + `/api/strava/callback?state=${encodeURIComponent(state)}&code=abc&scope=activity:write`, { redirect: 'manual' });
+    const r = await fetch(origin + `/api/strava/callback?state=${encodeURIComponent(state)}&code=abc&scope=activity:write,activity:read_all`, { redirect: 'manual' });
     assert.equal(r.status, 502);
     assert.equal(fs.existsSync(stravaFilePath(uid)), false);
   });
@@ -491,7 +507,7 @@ describe('failure shapes from the token exchange (against the stub)', () => {
   it('a 500 from the exchange is surfaced as a 502, not persisted', async () => {
     stub.setTokenHandler(() => ({ status: 500, body: { message: 'stub internal error' } }));
     const state = await mintState(origin, cookie);
-    const r = await fetch(origin + `/api/strava/callback?state=${encodeURIComponent(state)}&code=abc&scope=activity:write`, { redirect: 'manual' });
+    const r = await fetch(origin + `/api/strava/callback?state=${encodeURIComponent(state)}&code=abc&scope=activity:write,activity:read_all`, { redirect: 'manual' });
     assert.equal(r.status, 502);
     assert.deepEqual(await r.json(), { error: 'strava exchange failed' });
     assert.equal(fs.existsSync(stravaFilePath(uid)), false);
@@ -538,7 +554,7 @@ describe('a hung Strava (stub accepts the connection and never responds) times o
     stub.setTokenHandler(() => HANG);
     const state = await mintState(origin, cookie);
     const startedAt = Date.now();
-    const r = await fetch(origin + `/api/strava/callback?state=${encodeURIComponent(state)}&code=abc&scope=activity:write`, { redirect: 'manual' });
+    const r = await fetch(origin + `/api/strava/callback?state=${encodeURIComponent(state)}&code=abc&scope=activity:write,activity:read_all`, { redirect: 'manual' });
     const elapsed = Date.now() - startedAt;
     assert.ok(elapsed < BOUND_MS, `expected the callback to give up around ${TEST_TIMEOUT_MS}ms, took ${elapsed}ms`);
     assert.equal(r.status, 502);
@@ -761,7 +777,7 @@ describe('audit log never contains a token, code, or raw state value', () => {
     stub.setTokenHandler(() => ({ status: 200, body: { access_token: ACCESS, refresh_token: REFRESH, expires_at: Math.floor(Date.now() / 1000) + 3600, athlete: { id: 1 } } }));
     const state3 = await mintState(origin, cookie);
     const successCode = 'CODE3_' + crypto.randomBytes(8).toString('hex');
-    const successR = await fetch(origin + `/api/strava/callback?state=${encodeURIComponent(state3)}&code=${successCode}&scope=activity:write`, { redirect: 'manual' });
+    const successR = await fetch(origin + `/api/strava/callback?state=${encodeURIComponent(state3)}&code=${successCode}&scope=activity:write,activity:read_all`, { redirect: 'manual' });
     assert.equal(successR.status, 302);
 
     const log = fs.readFileSync(path.join(dataDir, 'audit.log'), 'utf8');

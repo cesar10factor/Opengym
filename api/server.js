@@ -22,7 +22,7 @@ import { verifyError } from './verify-error.js';
 import { createLink, validateLink, redeemLink, pruneLinks, recordFailure, isThrottled } from './link.js';
 import {
   createState, signState, validateState, burnState, pruneStates,
-  needsRefresh, tokenFromExchange, tokenFromRefresh, isCompleteToken, hasRequiredScope,
+  needsRefresh, tokenFromExchange, tokenFromRefresh, isCompleteToken, hasRequiredScope, REQUIRED_SCOPE,
   classifyUploadStatus, UPLOAD_STATUS_SUCCESS, UPLOAD_STATUS_FAILURE,
   activityIdFromUpload, nextMuteAttemptAt, muteIsExpired, MUTE_RETRY_BASE_MS, MUTE_MAX_AGE_MS
 } from './strava.js';
@@ -1759,7 +1759,7 @@ if (STRAVA_ENABLED) {
     authUrl.searchParams.set('redirect_uri', ORIGIN + '/api/strava/callback');
     authUrl.searchParams.set('response_type', 'code');
     authUrl.searchParams.set('approval_prompt', 'auto');
-    authUrl.searchParams.set('scope', 'activity:write');
+    authUrl.searchParams.set('scope', REQUIRED_SCOPE);
     authUrl.searchParams.set('state', token);
     res.writeHead(302, { Location: authUrl.toString() });
     res.end();
@@ -1807,7 +1807,7 @@ if (STRAVA_ENABLED) {
     if (!hasRequiredScope(q.get('scope'))) {
       audit(req, 'strava.connect.fail', { ok: false, user, msg: 'scope-denied' });
       return json(res, 400, {
-        error: 'Debes conceder el permiso "Subir tus datos de actividad" (activity:write) en Strava para conectar tu cuenta. Vuelve a intentarlo y no lo desmarques en la pantalla de autorización.'
+        error: 'Debes conceder los DOS permisos en Strava: "Subir tus datos de actividad" (activity:write) y "Ver todas tus actividades" (activity:read_all). Sin el de lectura la subida funciona pero el entrenamiento no se puede ocultar del feed. Vuelve a intentarlo sin desmarcar ninguno.'
       });
     }
     let tokenRes;
