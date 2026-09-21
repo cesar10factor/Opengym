@@ -1,0 +1,82 @@
+{
+  "opengym_plan": 1,
+  "exported": "2026-09-07",
+  "name": "PPL — Especialización banca 100kg",
+  "week": {
+    "1": "pushABanca",
+    "3": "pullDay",
+    "4": "legDay",
+    "6": "pushBVolumen"
+  },
+  "routines": [
+    {
+      "id": "pushABanca",
+      "name": "Push A — Banca pesada",
+      "emoji": "barbell",
+      "ex": [
+        { "id": "0025", "sets": 4, "reps": 8, "repsMin": 6, "weight": 70, "prog": "double", "inc": 2.5, "rest": 120 },
+        { "id": "0047", "sets": 3, "reps": 10, "repsMin": 8, "weight": 50, "prog": "double", "inc": 2.5, "rest": 120 },
+        { "id": "0030", "sets": 3, "reps": 10, "repsMin": 8, "weight": 50, "prog": "double", "inc": 2.5, "rest": 120 },
+        { "id": "0405", "sets": 3, "reps": 10, "repsMin": 8, "weight": 40, "prog": "double", "inc": 2, "rest": 105 },
+        { "id": "0241", "sets": 3, "reps": 15, "repsMin": 12, "weight": 50, "prog": "double", "inc": 2.5, "rest": 60 },
+        { "id": "0334", "sets": 3, "reps": 15, "repsMin": 10, "weight": 20, "prog": "double", "inc": 2, "rest": 0, "sg": "sgPushA1" },
+        { "id": "0857", "sets": 3, "reps": 10, "prog": "off", "rest": 0, "sg": "sgPushA1" },
+        { "id": "0472", "sets": 3, "reps": 12, "prog": "off", "rest": 0, "sg": "sgPushA1" },
+        { "id": "0979", "sets": 3, "reps": 24, "side": true, "prog": "off", "rest": 45, "sg": "sgPushA1" }
+      ]
+    },
+    {
+      "id": "pullDay",
+      "name": "Pull",
+      "emoji": "pullup",
+      "ex": [
+        { "id": "0652", "sets": 4, "reps": 3, "repsMax": 6, "prog": "linear", "rest": 150 },
+        { "id": "pullupEcc", "sets": 3, "reps": 3, "prog": "off", "rest": 90 },
+        { "id": "0606", "sets": 3, "reps": 10, "repsMin": 8, "weight": 40, "prog": "double", "inc": 2.5, "rest": 120 },
+        { "id": "2330", "sets": 3, "reps": 12, "repsMin": 8, "weight": 65, "prog": "double", "inc": 2.5, "rest": 105 },
+        { "id": "0318", "sets": 3, "reps": 12, "repsMin": 8, "weight": 22, "prog": "double", "inc": 2, "rest": 0, "sg": "sgPull1" },
+        { "id": "0233", "sets": 3, "reps": 18, "repsMin": 12, "weight": 30, "prog": "double", "inc": 2.5, "rest": 45, "sg": "sgPull1" },
+        { "id": "0313", "sets": 3, "reps": 12, "repsMin": 8, "weight": 22, "prog": "double", "inc": 2, "rest": 0, "sg": "sgPull2" },
+        { "id": "0857", "sets": 3, "reps": 10, "prog": "off", "rest": 0, "sg": "sgPull2" },
+        { "id": "0472", "sets": 3, "reps": 12, "prog": "off", "rest": 0, "sg": "sgPull2" },
+        { "id": "0979", "sets": 3, "reps": 24, "side": true, "prog": "off", "rest": 45, "sg": "sgPull2" }
+      ]
+    },
+    {
+      "id": "legDay",
+      "name": "Leg",
+      "emoji": "legs",
+      "ex": [
+        { "id": "ankleDorsiWall", "sets": 2, "reps": 20, "side": true, "prog": "off" },
+        { "id": "0739", "sets": 4, "reps": 12, "repsMin": 8, "weight": 120, "prog": "double", "inc": 10, "rest": 120 },
+        { "id": "0085", "sets": 3, "reps": 10, "repsMin": 8, "weight": 60, "prog": "double", "inc": 5, "rest": 120 },
+        { "id": "0410", "sets": 3, "reps": 20, "repsMin": 16, "weight": 22, "side": true, "prog": "double", "inc": 2, "rest": 105 },
+        { "id": "0585", "sets": 3, "reps": 15, "repsMin": 12, "weight": 66, "prog": "double", "inc": 3, "rest": 0, "sg": "sgLeg1" },
+        { "id": "9001", "sets": 3, "reps": 30, "repsMin": 24, "weight": 40, "side": true, "prog": "double", "inc": 5, "rest": 45, "sg": "sgLeg1" },
+        { "id": "0586", "sets": 3, "reps": 12, "repsMin": 10, "weight": 35, "prog": "double", "inc": 2.5, "rest": 0, "sg": "sgLeg2" },
+        { "id": "0857", "sets": 3, "reps": 10, "prog": "off", "rest": 0, "sg": "sgLeg2" },
+        { "id": "0472", "sets": 3, "reps": 12, "prog": "off", "rest": 0, "sg": "sgLeg2" },
+        { "id": "0979", "sets": 3, "reps": 24, "side": true, "prog": "off", "rest": 45, "sg": "sgLeg2" }
+      ]
+    },
+    {
+      "id": "pushBVolumen",
+      "name": "Push B — Volumen",
+      "emoji": "barbell",
+      "ex": [
+        { "id": "9002", "sets": 4, "reps": 10, "repsMin": 8, "weight": 57.5, "prog": "double", "inc": 2.5, "rest": 120 },
+        { "id": "0314", "sets": 3, "reps": 12, "repsMin": 10, "weight": 24, "prog": "double", "inc": 2, "rest": 105 },
+        { "id": "0188", "sets": 3, "reps": 15, "repsMin": 12, "weight": 50, "prog": "double", "inc": 2.5, "rest": 60 },
+        { "id": "0334", "sets": 4, "reps": 15, "repsMin": 12, "weight": 20, "prog": "double", "inc": 2, "rest": 60 },
+        { "id": "0430", "sets": 3, "reps": 12, "repsMin": 10, "weight": 19, "prog": "double", "inc": 2, "rest": 0, "sg": "sgPushB1" },
+        { "id": "0857", "sets": 3, "reps": 10, "prog": "off", "rest": 0, "sg": "sgPushB1" },
+        { "id": "0472", "sets": 3, "reps": 12, "prog": "off", "rest": 0, "sg": "sgPushB1" },
+        { "id": "0979", "sets": 3, "reps": 24, "side": true, "prog": "off", "rest": 45, "sg": "sgPushB1" }
+      ]
+    }
+  ],
+  "customEx": [
+    { "id": "pullupEcc", "n": "Dominadas excéntricas", "bp": "back", "desc": "Subida con salto o cajón, bajada controlada 4-5s" },
+    { "id": "ankleDorsiWall", "n": "Dorsiflexión de tobillo en pared", "bp": "lower legs", "desc": "Calentamiento — 2x10 por lado" }
+  ]
+}
