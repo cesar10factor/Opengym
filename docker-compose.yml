@@ -44,6 +44,12 @@ services:
     build:
       context: ./api
       target: ${API_TARGET:-default}
+      # Version marker: scripts/auto-deploy.ps1 exports these before calling compose; anyone
+      # building by hand leaves them unset, which interpolates to the empty string — the app
+      # then reports no version instead of a made-up one.
+      args:
+        VCS_REF: ${VCS_REF:-}
+        BUILD_DATE: ${BUILD_DATE:-}
     restart: unless-stopped
     env_file: .env
     environment:
@@ -65,6 +71,11 @@ services:
     build:
       context: .
       dockerfile: web/Dockerfile
+      # Same pair as the api service: here they reach the OCI labels. Defaults from a
+      # hand-built image are 'dev' and 'unknown', so it reports no version rather than a fake one.
+      args:
+        VCS_REF: ${VCS_REF:-}
+        BUILD_DATE: ${BUILD_DATE:-}
     restart: unless-stopped
     depends_on:
       media:

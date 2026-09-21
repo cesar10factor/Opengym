@@ -51,7 +51,8 @@ COPY package.json package-lock.json* ./
 # build host happened to be.
 RUN npm ci --omit=dev --omit=optional && npm cache clean --force
 
-COPY server.js push-messages.js verify-error.js ./
+COPY *.js ./
+RUN rm -f *.test.js
 COPY coach ./coach
 ENV NODE_ENV=production
 ENV PORT=3000
