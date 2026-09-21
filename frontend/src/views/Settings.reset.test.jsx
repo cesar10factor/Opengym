@@ -44,13 +44,19 @@ vi.mock('../store/useUI.js', () => {
 })
 vi.mock('react-router-dom', () => ({ useNavigate: () => () => {} }))
 vi.mock('../lib/api.js', () => ({
-  api: (...a) => mocks.api(...a), webauthnOK: () => false, passkeyLogin: vi.fn(), passkeyRegister: vi.fn(), IS_ANDROID: false,
+  api: (...a) => mocks.api(...a), appBase: () => '/', webauthnOK: () => false, passkeyLogin: vi.fn(), passkeyRegister: vi.fn(), IS_ANDROID: false,
   // Settings now mounts a Devices card whenever signed in (T3's DevicesCard), which fetches this
   // on mount independent of anything this suite cares about ("Reset everything") — resolved with
   // nothing so that effect doesn't blow up with an unmocked export.
   linkCode: vi.fn(() => Promise.resolve({ code: 'AAAA-AAAA', exp: Date.now() + 900000 })),
   listDevices: vi.fn(() => Promise.resolve({ devices: [] })),
   removeDevice: vi.fn(() => Promise.resolve({ ok: true })),
+  // Same reason, for the Strava card (T11): it probes GET /api/strava/status on mount whenever
+  // signed in, independent of anything this suite cares about. Rejected (not resolved), so
+  // isUnconfiguredStrava's status check reads it as "not configured" and the card renders
+  // nothing at all — nearest thing to the real behaviour of an instance with no Strava env vars.
+  stravaStatus: vi.fn(() => Promise.reject(Object.assign(new Error('not found'), { status: 404 }))),
+  stravaDisconnect: vi.fn(() => Promise.resolve({ ok: true })),
 }))
 vi.mock('../lib/push.js', () => ({ pushSupported: () => false, enablePush: vi.fn(), disablePush: vi.fn(), sendTestPush: vi.fn() }))
 vi.mock('../lib/wakelock.js', () => ({ wakeLockSupported: () => false }))
