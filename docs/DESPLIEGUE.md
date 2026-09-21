@@ -170,6 +170,26 @@ fijado (paso 2) y el stack respondiendo (paso 3) — el callback de Strava tiene
 URL real. El `client_secret` no sale nunca del servidor, igual que el fichero `data/secret` que
 firma las cookies de sesión: ni la app cliente ni ninguna respuesta HTTP lo ven jamás.
 
+### Variables de entorno adicionales (Strava y respaldo)
+
+Si necesitas ajustar comportamientos de Strava, estas variables están disponibles en `.env`:
+
+- `STRAVA_HIDE_FROM_HOME` (default: `1`): si no es `0`/`false`/`no`/`off`, los entrenamientos
+  subidos a Strava se ocultan de la actividad "desde casa" de Strava; no es privacidad, es
+  cosmética (Strava no proporciona control fino desde la API).
+- `STRAVA_API_BASE` (default: `https://www.strava.com`): solo para tests; apunta a un stub
+  local en vez de Strava real.
+- `STRAVA_TIMEOUT_MS`, `STRAVA_UPLOAD_POLL_DELAY_MS`, `STRAVA_MUTE_SWEEP_MS`,
+  `STRAVA_MUTE_RETRY_BASE_MS`, `STRAVA_MUTE_MAX_AGE_MS`: temporizadores internos para sondeo
+  de cambios, reintentos en caso de fallo y timeout de conexión. Úsalas solo para depuración
+  y tests; una instalación normal los deja en sus defaults.
+
+Los datos de Strava se guardan en `data/` y **deben incluirse en el respaldo**:
+
+- `data/strava-<uid>.json`: credencial de acceso para conectar con Strava (token de la API).
+- `data/strava-uploads-<uid>.json`: historial de intentos de subida (para no re-enviar lo mismo).
+- `data/strava-mutes-<uid>.json`: eventos mutados (no se reintentarán hasta la próxima ventana).
+
 ## 12. Desplegar cambios nuevos (después de un merge a `main`)
 
 Un `git push` a `main` no llega solo al servidor — este es un despliegue por Docker Compose
@@ -264,12 +284,15 @@ tarea programada que registrar.
 
 ## Limitaciones conocidas
 
-- **La sincronización es "el último gana" sobre el estado completo** — `PUT /api/data` reemplaza
-  todo el estado del usuario de una vez, no fusiona por campo. Regla práctica: **el móvil es el
-  único que escribe**. Si necesitas analizar los datos desde otro sitio, lee
-  `data/state-<uid>.json` directamente en disco — se escribe de forma atómica, así que nunca lo
-  encontrarás a medio escribir — en vez de escribir ahí y esperar que se fusione con lo que
-  suba el teléfono.
+- **La sincronización fusiona cambios de ambos lados, no reemplaza todo.** `PUT /api/data`
+  implementa una fusión inteligente: el servidor mantiene `_rev` (número de revisión), rechaza
+  escrituras sobre un documento obsoleto (respuesta 409), y fusiona conflictos por campo usando
+  la copia con timestamp más reciente (`_ts`). Entrenamientos, rutinas y ejercicios se fusionan
+  por ID; pesos corporales por día; y los PRs de una máquina se preservan incluso si otro
+  dispositivo bajó el peso de asistencia en el mismo intervalo. Si necesitas analizar los datos
+  desde otro sitio fuera del proceso de sincronización, lee `data/state-<uid>.json` directamente
+  en disco — se escribe de forma atómica — en vez de escribir ahí y esperar que se fusione con
+  lo que suba otro dispositivo.
 - **Los GIFs de los ejercicios solo están disponibles sin conexión si ya se vieron con red
   antes** — la caché del service worker para media es *cache-first*, no los precarga todos.
   Abre la rutina del día en casa (con red) antes de ir al gimnasio si esperas entrenar sin

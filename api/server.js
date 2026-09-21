@@ -4,12 +4,22 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import https from 'node:https';
+import dns from 'node:dns';
+import net from 'node:net';
 import {
   generateRegistrationOptions, verifyRegistrationResponse,
   generateAuthenticationOptions, verifyAuthenticationResponse
 } from '@simplewebauthn/server';
 import webpush from 'web-push';
-import { createLink, validateLink, burnLink, pruneLinks, recordFailure, isThrottled } from './link.js';
+import * as coachConfig from './coach/config.js';
+import * as coachJobs from './coach/jobs.js';
+import { coachRoutes } from './coach/routes.js';
+import { startCadence } from './coach/cadence.js';
+import { startWarmup } from './coach/warmup.js';
+import { dayReminderPush, restTimerPush, testPush } from './push-messages.js';
+import { verifyError } from './verify-error.js';
+import { createLink, validateLink, redeemLink, pruneLinks, recordFailure, isThrottled } from './link.js';
 import {
   createState, signState, validateState, burnState, pruneStates,
   needsRefresh, tokenFromExchange, tokenFromRefresh, isCompleteToken, hasRequiredScope,
@@ -37,7 +47,7 @@ const ALLOW_GUEST = !/^(0|false|no|off)$/i.test(process.env.ALLOW_GUEST || '');
 // baked into each cookie when it's issued, so lowering this never cuts an existing session short.
 const SESSION_DAYS = Math.max(1, +(process.env.SESSION_DAYS || 90) || 90);
 // Strava OAuth (T11): both are required or the feature is fully OFF — an instance that doesn't
-// use Strava must not advertise it exists, so the four /api/strava/* routes below are only ever
+// use Strava must not advertise it exists, so the five /api/strava/* routes below are only ever
 // added to the route table when STRAVA_ENABLED is true (see near the bottom of this file). A
 // half-configured instance (only one of the two set) is treated the same as neither being set.
 const STRAVA_CLIENT_ID = (process.env.STRAVA_CLIENT_ID || '').trim();
@@ -49,8 +59,8 @@ const STRAVA_ENABLED = !!(STRAVA_CLIENT_ID && STRAVA_CLIENT_SECRET);
 // party's uptime or posting fabricated tokens to it. Trailing slash stripped so `base + '/oauth/x'`
 // never ends up with a doubled slash regardless of how the value was set.
 const STRAVA_API_BASE = (process.env.STRAVA_API_BASE || 'https://www.strava.com').trim().replace(/\/+$/, '');
-// OAuth (authorize/token/deauthorize) lives at the root of strava.com, but the REST API — right now
-// just POST /uploads — is namespaced under /api/v3 (see https://developers.strava.com/docs/reference/:
+// OAuth (authorize/token/deauthorize) lives at the root of strava.com, but the REST API — uploads
+// and activities — is namespaced under /api/v3 (see https://developers.strava.com/docs/reference/:
 // base https://www.strava.com/api/v3, e.g. https://www.strava.com/api/v3/uploads). Derived from
 // STRAVA_API_BASE rather than a second env var, so pointing STRAVA_API_BASE at a local stub (tests)
 // still sends every call — oauth AND v3 — to that one server, just on different paths.
@@ -103,31 +113,24 @@ const STRAVA_MUTE_EXTRA_POLLS = Math.max(0, +(process.env.STRAVA_MUTE_EXTRA_POLL
 const STRAVA_MUTE_SWEEP_MS = Math.max(50, +(process.env.STRAVA_MUTE_SWEEP_MS || 15000) || 15000);
 const STRAVA_MUTE_RETRY_BASE_MS = Math.max(10, +(process.env.STRAVA_MUTE_RETRY_BASE_MS || MUTE_RETRY_BASE_MS) || MUTE_RETRY_BASE_MS);
 const STRAVA_MUTE_MAX_AGE_MS = Math.max(100, +(process.env.STRAVA_MUTE_MAX_AGE_MS || MUTE_MAX_AGE_MS) || MUTE_MAX_AGE_MS);
-// Version marker (N6): which commit this container was built from. The image has no .git, so the
-// values arrive as build args promoted to ENV in api/Dockerfile — see docker-compose.yml and
-// scripts/auto-deploy.ps1 for who fills them in. Everything here is optional: an image built
-// without them (a plain `docker compose up --build`, `node server.js` in a checkout) reports
-// nulls, and the Settings screen then shows nothing rather than a placeholder.
-//
-// Both values are validated, not just trimmed, because the Dockerfiles' own ARG defaults are the
-// placeholder strings 'dev' and 'unknown' — printing those as if they were a commit would be
-// worse than printing nothing. A short hash is hex, so 'dev' can never pass ('v' isn't a hex
-// digit); a date has to be one Date.parse understands.
-const versionRef = v => {
-  const s = String(v || '').trim().toLowerCase();
-  return /^[0-9a-f]{7,40}$/.test(s) ? s : null;
-};
-const versionDate = v => {
-  const s = String(v || '').trim();
-  return s && !Number.isNaN(Date.parse(s)) ? s : null;
-};
-const SERVER_VERSION = { ref: versionRef(process.env.VCS_REF), date: versionDate(process.env.BUILD_DATE) };
-
 const MAX_BODY = 5 * 1024 * 1024;
 // Secure cookies require HTTPS; over plain http://localhost the flag would drop the cookie
 const SECURE = /^https:/i.test(ORIGIN) ? ' Secure;' : '';
 
 fs.mkdirSync(DATA, { recursive: true });
+/* The secrets are locked down file by file rather than by sealing the whole directory.
+ *
+ * A blanket `chmod 0700` on DATA looks stronger and is worse: ./data is a host bind mount and
+ * this container runs as root, so it lands on the host as root-owned 0700 and anything else
+ * the owner runs against their own data directory — a backup script, the MCP server in #19,
+ * their own `jq` — gets EACCES on files that are theirs. Locking the four files that actually
+ * hold secrets keeps the Coach runtime out of them without taking the directory hostage.
+ *
+ * Best-effort throughout: a bind-mounted host filesystem may refuse chmod, and that is not a
+ * reason to refuse to boot. The privilege drop in adapters/spawn.js is the control that does
+ * fail closed. */
+const lock = f => { try { fs.chmodSync(path.join(DATA, f), 0o600); } catch { /* not present yet, or host says no */ } };
+['secret', 'db.json', 'coach.json'].forEach(lock);
 
 /* ---------- secret + db ---------- */
 const secretFile = path.join(DATA, 'secret');
@@ -143,23 +146,18 @@ db.invites = db.invites || [];
 // starts empty rather than throwing. See api/link.js for the pure logic these back.
 db.links = db.links || [];
 db.linkFails = db.linkFails || [];
-// Scheduled rest-over alerts, one entry `{ uid, at }` per user. Additive like the two above, so an
-// older db.json just starts empty. These live on disk (not only in the in-memory `restTimers` Map)
-// because a container restart mid-rest used to lose the alert outright — and losing it is silent:
-// nothing throws, nothing logs, the user simply never learns their rest ended. See the re-arm block
-// further down, next to scheduleRestTimer/cancelRestTimer.
-db.restTimers = db.restTimers || [];
 const isAdmin = user => !!user && (user.admin === true || ADMIN_UIDS.includes(user.id));
-function saveDb() { atomicWrite(dbFile, JSON.stringify(db, null, 2)); }
-function atomicWrite(file, content) {
+// 0600: db.json holds passkey credential material. It used to be covered by a blanket 0700 on
+// the whole directory; now that the directory stays traversable, the file carries its own mode.
+function saveDb() { atomicWrite(dbFile, JSON.stringify(db, null, 2), 0o600); }
+function atomicWrite(file, content, mode) {
   const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, content);
+  fs.writeFileSync(tmp, content, mode ? { mode } : undefined);
   fs.renameSync(tmp, file);
 }
 // Drop any link codes that expired while the server was down, and persist that immediately —
-// otherwise a code that looks pruned in memory would reappear from disk on the next restart.
-// Only write when pruning actually changed something: an unconditional saveDb() here would turn
-// a read-only db.json (fine before this route existed) into a hard startup failure.
+// but only if something was actually pruned, so an old db.json with no `links` key at all (see
+// api/link.integration.test.js) is not force-rewritten on a boot that had nothing to clean up.
 {
   const prunedAtBoot = pruneLinks(db.links, Date.now());
   if (prunedAtBoot.length !== db.links.length) { db.links = prunedAtBoot; saveDb(); }
@@ -172,18 +170,20 @@ function readState(uid) {
 
 /* ---------- Strava token storage (T11) ---------- */
 // One file per user, same pattern as stateFile above — NOT part of db.json, so a pre-Strava
-// db.json needs no migration at all: "connected" is simply "does this file exist".
+// db.json needs no migration at all: "connected" is simply "does this file exist". Mode 0600
+// because it holds access/refresh tokens — same treatment as secret/db.json above.
 const stravaFile = uid => path.join(DATA, 'strava-' + uid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
 function readStrava(uid) {
   try { return JSON.parse(fs.readFileSync(stravaFile(uid), 'utf8')); } catch { return null; }
 }
-function writeStrava(uid, tok) { atomicWrite(stravaFile(uid), JSON.stringify(tok)); }
+function writeStrava(uid, tok) { atomicWrite(stravaFile(uid), JSON.stringify(tok), 0o600); }
 function deleteStrava(uid) { try { fs.unlinkSync(stravaFile(uid)); } catch { /* already gone */ } }
 // Dedup store for uploaded workouts (T12): one file per user, same convention as stravaFile
 // above, holding a plain array of workout ids already sent to Strava. This is deliberately
-// server-side, not client state — client sync is last-writer-wins, which is exactly the wrong
-// place to decide "have I already uploaded this" when a phone can sync the same workout twice
-// (e.g. after a flaky connection retries a request whose response never arrived).
+// server-side, not client state — client sync merges copies by `_rev` (see PUT /api/data), which
+// is exactly the wrong place to decide "have I already uploaded this": a phone can sync the same
+// workout twice (e.g. after a flaky connection retries a request whose response never arrived),
+// and two devices independently finishing the same workout must still upload it only once.
 const stravaUploadsFile = uid => path.join(DATA, 'strava-uploads-' + uid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
 // Returns the recorded ids, [] when the file does not exist yet, or NULL when it exists but
 // cannot be read. That third case must not collapse into [] : an unreadable file would then be
@@ -202,7 +202,15 @@ function recordStravaUpload(uid, workoutId) {
   const ids = readStravaUploads(uid);
   if (ids === null) return false;          // refuse to overwrite what we could not read
   if (!ids.includes(workoutId)) ids.push(workoutId);
-  atomicWrite(stravaUploadsFile(uid), JSON.stringify(ids));
+  // A transient write failure here (e.g. a Windows rename momentarily refused by another process
+  // touching ./data) must read exactly like the unreadable-file case above: false, not a thrown
+  // exception. The upload already reached Strava by this point — an exception here would bubble
+  // to the dispatcher as a 500, the client would retry, and that retry would be a genuine SECOND
+  // upload of the same workout, which is precisely what this store exists to prevent. The
+  // caller's fallback (external_id-based duplicate detection at Strava) is a second-order defence
+  // that depends on Strava's own wording, not something to rely on when the real record failed.
+  try { atomicWrite(stravaUploadsFile(uid), JSON.stringify(ids)); }
+  catch (e) { console.error('strava uploads write failed', uid, e.message); return false; }
   return true;
 }
 // The recorded ids only land after Strava accepts the upload, so between the duplicate check and
@@ -251,7 +259,14 @@ function queueStravaMute(uid, entry) {
   if (list === null) return false;
   if (list.some(p => p.uploadId === entry.uploadId)) return true;
   list.push(entry);
-  writeStravaMutes(uid, list);
+  // Called from the upload route AFTER the upload is already recorded as done — muting is
+  // cosmetic (see STRAVA_HIDE_FROM_HOME above: hide_from_home is not privacy) and must never cost
+  // the workout. A transient write failure here (same EPERM-on-Windows class the sweeper's own
+  // write already guards against) must read as "could not queue the mute", not throw — throwing
+  // would 500 a request whose upload already succeeded and is already recorded, and the client's
+  // retry would upload a second copy to fix something that is only ever a feed-visibility detail.
+  try { writeStravaMutes(uid, list); }
+  catch (e) { console.error('strava mutes write failed', uid, e.message); return false; }
   pendingMuteUsers.add(uid);
   return true;
 }
@@ -276,8 +291,7 @@ function loadPendingMuteUsers() {
   }
 }
 // Refreshes the stored token if it's expired (or close enough — see strava.js's REFRESH_MARGIN_MS)
-// and persists the new one. Not called by any route in T11 (there is no upload route yet — T12
-// adds it); kept here so T12 can call it directly rather than re-deriving the exchange call.
+// and persists the new one.
 async function ensureFreshStravaToken(uid) {
   const tok = readStrava(uid);
   if (!tok) return null;
@@ -303,6 +317,17 @@ async function ensureFreshStravaToken(uid) {
   return fresh;
 }
 
+// An entry is an object a reader can dereference, and `records` is every entry of a stored
+// list. PUT /api/data drops the rest on the way in — a null workout, a routine that is a
+// number — and refuses a list that is not an array at all, but a file written before it did
+// answers to nobody, and the readers below walk those lists (`r.id`, `w.d`, `.slice()`). One
+// throw inside an admin route is a 500 for that whole profile: the drill-down never leaves
+// "Loading…", the Disable button lives inside it, and the account an operator opened the
+// dashboard to stop is exactly the one they then cannot. Answering with the entries that are
+// there is the honest reading of such a file — what was dropped carried nothing to show.
+const record = x => !!x && typeof x === 'object' && !Array.isArray(x);
+const records = v => (Array.isArray(v) ? v.filter(record) : []);
+
 /* ---------- push notifications (Web Push / VAPID) ---------- */
 const vapidFile = path.join(DATA, 'vapid.json');
 let vapid;
@@ -311,211 +336,237 @@ catch { vapid = webpush.generateVAPIDKeys(); fs.writeFileSync(vapidFile, JSON.st
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || (SECURE ? ORIGIN : 'mailto:admin@localhost');
 webpush.setVapidDetails(VAPID_SUBJECT, vapid.publicKey, vapid.privateKey);
 
-/* INVARIANT — every push sent from here MUST result in a user-visible notification.
-   This is not a style preference, it is a platform rule with teeth:
-     - iOS/Safari revokes the push subscription when a delivered push does not show a notification
-       (reports put the cut-off at 3 breaches), and it does so SILENTLY — no error, no event, the
-       endpoint simply stops working and the user never hears another alert.
-     - Chrome enforces the same contract through `userVisibleOnly: true`, which the client already
-       passes when subscribing (frontend/src/lib/push.js), and shows its own "site updated in the
-       background" notification if the service worker shows none.
-   Consequence, binding on anything built on top of sendPush: NO silent/data-only pushes, and no
-   design that relies on a push arriving without painting something. In particular this rules out
-   the "silent notification replaced by tag" pattern for a live next-exercise banner. If you need
-   background state without an alert, it does not go through Web Push. */
+/* A push subscription's `endpoint` is a URL this server connects out to, chosen by whoever is
+   signed in — so without a check /api/push/* is a request-forgery lever, and the api container
+   sits on the same Docker network as the rest of the self-hoster's stack. Three limits below:
 
-/* Where a notification takes you when tapped. Declarative Web Push makes this MANDATORY: Safari
-   paints the notification itself, without ever running the service worker, so there is no code
-   left to decide the destination at click time — it has to travel inside the payload, absolute.
-   Anything unusable (missing, malformed, or pointing off this origin — a notification must never
-   be a redirect to somewhere else) falls back to the app root rather than shipping a broken link. */
-function pushNavigate(target) {
-  const root = new URL('/', ORIGIN).href;
-  if (!target) return root;
-  try {
-    const u = new URL(target, ORIGIN);
-    return u.origin === new URL(ORIGIN).origin ? u.href : root;
-  } catch { return root; }
+   1. PUSH_AGENT rejects any connection to a private/loopback/link-local address at the moment
+      the socket is opened. Validating the URL alone would leave a DNS-rebinding window — the
+      name is resolved a second time inside web-push — so the check has to live in the lookup
+      the request itself uses, not in a prior pass. A literal IP address never goes through
+      that lookup at all — Node hands it straight to connect() — so literals are judged by
+      pushEndpointError instead: at subscribe, and again in sendPush for an endpoint that got
+      into db.json some other way.
+   2. PUSH_TIMEOUT_MS: an endpoint that accepts TCP and then stalls used to hang the request
+      handler that awaited it, indefinitely. web-push sets no timeout of its own.
+   3. PUSH_CONCURRENCY: one small request must not turn into an unbounded burst of outbound
+      connections (with MAX_SUBS_PER_USER below, that is the other half of the same problem). */
+const PUSH_TIMEOUT_MS = 10000;
+const PUSH_CONCURRENCY = 6;
+const MAX_SUBS_PER_USER = 20;
+
+function isPrivateAddr(ip) {
+  const v = String(ip).toLowerCase();
+  const m4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(v);
+  if (m4) {
+    const a = +m4[1], b = +m4[2];
+    if (a === 0 || a === 10 || a === 127) return true;            // this-network, private, loopback
+    if (a === 169 && b === 254) return true;                      // link-local (cloud metadata)
+    if (a === 172 && b >= 16 && b <= 31) return true;             // private
+    if (a === 192 && b === 168) return true;                      // private
+    if (a === 192 && b === 0) return true;                        // 192.0.0.0/24, 192.0.2.0/24
+    if (a === 100 && b >= 64 && b <= 127) return true;            // CGNAT
+    if (a >= 224) return true;                                    // multicast + reserved
+    return false;
+  }
+  // IPv6 is judged on its eight groups, never on the text: the same address arrives as
+  // `::ffff:127.0.0.1` from dns.lookup, as `::ffff:7f00:1` from new URL, and in whatever
+  // spelling a caller chose, and a rule keyed to one spelling misses the others.
+  const g = ipv6Groups(v);
+  if (!g) return false;
+  if (g.slice(0, 5).every(x => x === 0) && g[5] === 0xffff) {     // IPv4-mapped IPv6
+    return isPrivateAddr(`${g[6] >> 8}.${g[6] & 255}.${g[7] >> 8}.${g[7] & 255}`);
+  }
+  if (g.slice(0, 7).every(x => x === 0) && g[7] <= 1) return true; // unspecified, loopback
+  if ((g[0] & 0xffc0) === 0xfe80) return true;                    // link-local fe80::/10
+  if ((g[0] & 0xfe00) === 0xfc00) return true;                    // unique local fc00::/7
+  return false;
 }
 
-/* Dual-format payload (Declarative Web Push, Safari 18.4+ / iOS 18.4+). One message serves both:
-     - Safari reads `web_push: 8030` and renders `notification` itself, with no service worker
-       involved at all — which is what makes push work on an iPhone PWA.
-     - Chrome/Android ignores the envelope and goes through sw.js, which reads either shape.
-   `title` and `navigate` are required in declarative mode, so both are always filled in here; the
-   defaults match the ones sw.js applies, so both renderings say the same thing.
-   web-push needs nothing special for this: it already encrypts with the standard aes128gcm
-   (RFC 8291) and WebKit only cares about the decrypted JSON — checked against the library source
-   and WebKit's documentation, there is no content-type or encoding switch to set. */
-/* How long a push service may keep an alert it could not deliver yet, when the caller says nothing.
+// The eight 16-bit groups of an IPv6 literal in any textual form — compressed, zero-padded,
+// upper-case, with a dotted IPv4 tail — or null when the string is not one.
+function ipv6Groups(v) {
+  if (!net.isIPv6(v)) return null;
+  let s = v.replace(/%.*$/, '');                                  // zone id
+  const m4 = /:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(s);
+  if (m4) {
+    const [a, b, c, d] = m4[1].split('.').map(Number);
+    s = s.slice(0, -m4[1].length) + ((a << 8) | b).toString(16) + ':' + ((c << 8) | d).toString(16);
+  }
+  const [head, tail = ''] = s.split('::');
+  const groups = head ? head.split(':') : [];
+  const rest = tail ? tail.split(':') : [];
+  if (s.includes('::')) while (groups.length + rest.length < 8) groups.push('0');
+  return groups.concat(rest).map(x => parseInt(x, 16));
+}
 
-   `web-push` defaults to FOUR WEEKS, and that default is what made alerts turn up in a batch. An
-   undeliverable push (no coverage, the phone in Doze, Chrome frozen by battery optimisation) is not
-   dropped, it is QUEUED — and the whole queue is flushed the moment the device becomes reachable
-   again, which in practice is when the app is opened. Urgency only buys a faster attempt; nothing
-   but TTL decides when an alert stops being worth delivering.
+// Same shape as dns.lookup, so https.Agent can use it directly.
+function guardedLookup(hostname, options, cb) {
+  dns.lookup(hostname, options, (err, address, family) => {
+    if (err) return cb(err);
+    const list = Array.isArray(address) ? address : [{ address, family }];
+    if (list.some(a => isPrivateAddr(a.address))) {
+      return cb(Object.assign(new Error('refusing to connect to a private address: ' + hostname), { code: 'EPUSHBLOCKED' }));
+    }
+    cb(null, address, family);
+  });
+}
+const PUSH_AGENT = new https.Agent({ lookup: guardedLookup, keepAlive: false });
 
-   Nothing this server sends survives the day it was sent, so every caller passes its own `ttl` and
-   this default is deliberately short: it covers the test notification and anything added later,
-   where "it could not be delivered now" means the alert failed, not that it should surface at some
-   unrelated moment half an hour on. */
+// Cheap pre-check so a bad endpoint is refused at subscribe time with a useful message, rather
+// than silently never delivering. For a hostname PUSH_AGENT is what actually enforces the address
+// rule; for a literal address this is the check, which is why sendPush runs it again.
+function pushEndpointError(raw) {
+  let u;
+  try { u = new URL(String(raw || '')); } catch { return 'endpoint is not a valid URL'; }
+  if (u.protocol !== 'https:') return 'endpoint must be an https:// URL';
+  if (u.username || u.password) return 'endpoint must not carry credentials';
+  // A literal address is judged right here — and only here: Node hands a literal straight to
+  // connect() without consulting the Agent's lookup. Hostnames are left to PUSH_AGENT, which is
+  // the check that has to hold against rebinding.
+  const host = u.hostname.replace(/^\[|\]$/g, '');
+  if (/^[0-9.]+$/.test(host) || host.includes(':')) {
+    if (isPrivateAddr(host)) return 'endpoint must not point at a private address';
+  }
+  return null;
+}
+
+/* How long a push service may keep an alert it could not deliver yet, when the caller says
+   nothing. `web-push` defaults to FOUR WEEKS, and that default is what turned "no coverage in the
+   gym" into a batch of alerts arriving hours later, all at once, on the next app open. An
+   undeliverable push is not dropped, it is QUEUED — urgency only buys a faster attempt; TTL alone
+   decides when an alert stops being worth delivering. Each caller below passes its own TTL that
+   matches how long its alert stays true; this is only the fallback for one that doesn't. */
 const PUSH_TTL_DEFAULT_S = 60;
 
 /* The Topic header collapses the queue: a push replaces any undelivered one carrying the same
-   topic for that subscription, instead of stacking behind it. The tag is the right value because it
-   already means exactly that on screen — same tag, one notification, the newest wins — so queue and
-   tray agree. It is a belt to the TTL brace, for the case of two rests in a row with no coverage.
+   topic for that subscription, instead of stacking behind it. The tag is the right value because
+   it already means exactly that on screen — same tag, one notification, the newest wins — so
+   queue and tray agree. It is a belt to the TTL brace, for two rests in a row with no coverage.
    web-push THROWS on a topic outside this alphabet or over 32 chars, and a throw here would cost
    the notification itself, so a tag that doesn't qualify simply travels without a topic. */
 const PUSH_TOPIC_OK = /^[A-Za-z0-9\-_]{1,32}$/;
 
-async function sendPush(userId, payload) {
-  const subs = db.subs.filter(s => s.userId === userId);
+// `deviceId` narrows the send to the subscriptions one browser registered (the rest-timer alert
+// belongs to the device that started the rest); a subscription stored without one — an older
+// client — still gets everything, as before.
+async function sendPush(userId, payload, deviceId) {
+  let subs = db.subs.filter(s => s.userId === userId);
+  if (deviceId && subs.some(s => s.deviceId === deviceId)) subs = subs.filter(s => s.deviceId === deviceId);
   if (!subs.length) return;
   const tag = payload.tag || 'opengym';
-  const body = JSON.stringify({
-    web_push: 8030,
-    notification: {
-      title: payload.title || 'openGym',
-      body: payload.body || '',
-      tag,
-      navigate: pushNavigate(payload.navigate)
-    }
-  });
+  // `ttl` is a delivery instruction for the push service, not notification content — it is read
+  // above and must not ride along inside the JSON the browser parses.
+  const { ttl: payloadTtl, ...content } = payload;
+  const body = JSON.stringify(content);
   // Rounded and floored rather than trusted: web-push rejects a non-integer or negative TTL by
   // throwing, which would turn a caller's typo into a silently missing notification.
-  const ttl = Number.isFinite(payload.ttl) ? Math.max(0, Math.round(payload.ttl)) : PUSH_TTL_DEFAULT_S;
-  const options = { urgency: 'high', TTL: ttl };
+  const ttl = Number.isFinite(payloadTtl) ? Math.max(0, Math.round(payloadTtl)) : PUSH_TTL_DEFAULT_S;
+  const options = { urgency: 'high', timeout: PUSH_TIMEOUT_MS, agent: PUSH_AGENT, TTL: ttl };
   if (PUSH_TOPIC_OK.test(tag)) options.topic = tag;
   let dirty = false;
-  await Promise.all(subs.map(async sub => {
-    // urgency 'high' is the one lever we have over delivery SPEED — iOS/Android throttle
-    // low-urgency background push far more aggressively under battery-saving modes, and a normal
-    // -urgency message can sit in Doze until the next maintenance window. It is legitimate here:
-    // every push this server sends paints a visible notification at once, which is precisely the
-    // condition the standard attaches to high urgency.
-    try { await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, body, options); }
-    catch (e) {
-      console.error('push send failed', userId, e.statusCode, e.body || e.message);
-      if (e.statusCode === 404 || e.statusCode === 410) {
+  let next = 0;
+  const worker = async () => {
+    while (next < subs.length) {
+      const sub = subs[next++];
+      // Re-judged before every send: PUSH_AGENT never sees a literal address, so an endpoint
+      // that is private (however it got into db.json) is dropped here rather than connected to.
+      const bad = pushEndpointError(sub.endpoint);
+      if (bad) {
+        console.error('push endpoint refused', userId, bad);
         db.subs = db.subs.filter(s => s.endpoint !== sub.endpoint); dirty = true;
+        continue;
+      }
+      // urgency 'high' is the one lever we have over delivery SPEED — iOS/Android throttle
+      // low-urgency background push more aggressively under battery-saving modes. It says nothing
+      // about how long an undelivered alert survives; only TTL above decides that.
+      try {
+        await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, body, options);
+      } catch (e) {
+        console.error('push send failed', userId, e.statusCode, e.body || e.message);
+        // 404/410: the push service says the subscription is gone. 403: it refuses our VAPID
+        // signature — a subscription made against a key this instance no longer has (data/vapid.json
+        // regenerated). Neither will ever deliver again; keeping them only hides the fact from the
+        // Settings toggle, which reads the browser's side. The client re-subscribes on its next boot.
+        if (e.statusCode === 404 || e.statusCode === 410 || e.statusCode === 403) {
+          db.subs = db.subs.filter(s => s.endpoint !== sub.endpoint); dirty = true;
+        }
       }
     }
-  }));
+  };
+  await Promise.all(Array.from({ length: Math.min(PUSH_CONCURRENCY, subs.length) }, worker));
   if (dirty) saveDb();
 }
 
 // Rest-timer alerts: client schedules on start/extend, cancels on skip or on-screen completion —
 // this only fires when the tab was backgrounded/suspended and never got to cancel it itself.
-const restTimers = new Map(); // userId -> Timeout
+// One timer per device, not per account: a phone resting in the gym and a desktop tab at home
+// each carry their own, so the tab's on-screen completion (which cancels) cannot silence the
+// phone's alert. A client that sends no device id gets the old account-wide behaviour.
+// In memory only — an API restart drops whatever is pending.
+const restTimers = new Map(); // `${userId}:${deviceId}` -> Timeout
+const restKey = (userId, deviceId) => `${userId}:${deviceId || ''}`;
 
-/* How late a rest alert may be and still be worth firing after the server was down.
-   A restart of the api container takes seconds, so every normal restart lands well inside this.
-   Rests themselves run 60-180s: an alert up to 2 minutes late still arrives during the same
-   exercise and is the reminder it was meant to be. Past that the user is already mid-next-set or
-   has left the gym, and a stale "rest over" is pure noise — worse, it would break the one-push-
-   per-rest correspondence the notification design depends on. So: fire once if barely late,
-   drop it otherwise. Never fire twice, and never keep it around for the next boot. */
+/* How late a rest alert may be and still be worth delivering. Rests themselves run 60-180s, so an
+   alert up to 2 minutes late still lands during the same exercise; past that the user is already
+   mid-next-set or gone, and a stale "rest over" is noise, not a reminder. This is also the TTL
+   handed to the push service: a push this server would refuse to fire itself once that late must
+   not be one a push service still delivers hours later from its queue. */
 const REST_TIMER_MAX_LATE_MS = 2 * 60 * 1000;
 
 /* The "what's next" line the client composes (frontend/src/lib/next-up.js) and ships with the
    schedule request, e.g. "Bench press — set 3/4 · 8 reps × 60 kg". The server never builds it: it
    knows neither the user's language nor the state of the workout.
-
-   It is USER CONTENT — the exercise name can be one the owner typed — so it is validated and capped
-   here rather than trusted, and it is never interpolated into HTML anywhere: its only destination is
-   the `body` field of a notification payload, which is JSON-encoded plain text. Same treatment on
-   the way back off disk, since db.json is editable by anything with filesystem access.
-   The cap is the server's own and deliberately above the client's NEXT_UP_MAX (140): both phone
-   OSes truncate a notification body long before either number, so this only exists to stop an
-   absurd string bloating db.json and the push payload. */
+   It is USER CONTENT — the exercise name can be one the owner typed — so it is validated and
+   capped here rather than trusted, and it only ever becomes the `body` of a notification payload
+   (JSON-encoded plain text, never HTML). The cap is deliberately above the client's own NEXT_UP_MAX
+   (140): both phone OSes truncate a notification body long before either number, so this only
+   exists to stop an absurd string from bloating the push payload. */
 const REST_BODY_MAX = 160;
 function sanitizeRestBody(v) {
-  if (typeof v !== 'string') return '';                        // number, object, null — all "absent"
-  // Control characters (newlines included) have no meaning in a notification body and only serve to
-  // break log lines and layouts.
+  if (typeof v !== 'string') return '';                         // number, object, null — all "absent"
+  // Control characters (newlines included) have no meaning in a notification body and only serve
+  // to break log lines and layouts.
   return v.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, REST_BODY_MAX);
 }
-const REST_BODY_FALLBACK = 'Time for your next set.';
 
-// Keeps at most one persisted entry per user (`at === null` removes it) — this is the cleanup that
-// stops db.json growing a row per rest ever taken. `body` rides along so a restart mid-rest re-arms
-// an alert that still says what is next, instead of degrading to the generic line.
-function persistRestTimer(userId, at, body = '') {
-  db.restTimers = db.restTimers.filter(r => r.uid !== userId);
-  if (at !== null) db.restTimers.push(body ? { uid: userId, at, body } : { uid: userId, at });
-  saveDb();
-}
-function armRestTimer(userId, delayMs, body = '') {
-  const t = restTimers.get(userId);
+function scheduleRestTimer(userId, deviceId, sec, lang, body) {
+  const k = restKey(userId, deviceId);
+  const t = restTimers.get(k);
   if (t) clearTimeout(t);
-  restTimers.set(userId, setTimeout(() => {
-    restTimers.delete(userId);
-    // Drop the persisted entry BEFORE sending: a crash mid-send must not leave a row that a later
-    // boot would re-arm and fire a second time.
-    persistRestTimer(userId, null);
+  restTimers.set(k, setTimeout(() => {
+    restTimers.delete(k);
+    const msg = restTimerPush(lang);
     sendPush(userId, {
-      title: 'Rest over 💪',
-      body: body || REST_BODY_FALLBACK,
-      tag: 'rest-timer',
-      // Deliberately the same threshold the reboot path uses above: an alert this server refuses
-      // to fire itself once it is that late must not be one it lets a push service deliver later.
-      // Past it you are already mid-next-set, and "rest over" is noise — the exact shape of the
-      // batch-on-open symptom, only sourced from the queue instead of from disk.
+      ...msg,
+      ...(body ? { body } : {}),
       ttl: REST_TIMER_MAX_LATE_MS / 1000,
-      // The app is a HashRouter (frontend/src/App.jsx), so the workout screen is /#/workout —
+      // The app is a HashRouter (frontend/src/App.jsx), so the workout screen is at /#/workout —
       // "/workout" would 404 into the app root and look like the deep link almost worked.
       navigate: '/#/workout'
-    });
-  }, Math.max(0, delayMs)));
+    }, deviceId);
+  }, sec * 1000));
 }
-function scheduleRestTimer(userId, sec, body = '') {
-  const at = Date.now() + sec * 1000;
-  persistRestTimer(userId, at, body);
-  armRestTimer(userId, sec * 1000, body);
-}
-function cancelRestTimer(userId) {
-  const t = restTimers.get(userId);
-  if (t) { clearTimeout(t); restTimers.delete(userId); }
-  if (db.restTimers.some(r => r.uid === userId)) persistRestTimer(userId, null);
-}
-
-// Re-arm the rests that were pending when the process last stopped. Placed here rather than up with
-// the db.links pruning because `restTimers` is a const declared just above — reading it earlier
-// would hit the temporal dead zone. Same write discipline as the links pruning: only touch disk if
-// something actually changed, so a read-only db.json still boots.
-{
-  const now = Date.now();
-  const kept = [];
-  for (const r of db.restTimers) {
-    if (!r || typeof r.uid !== 'string' || !Number.isFinite(r.at)) continue; // malformed row, drop
-    const late = now - r.at;
-    // Re-sanitized rather than trusted: this came off disk, and a row with a non-string or
-    // control-character body must degrade to the generic text, not into the payload.
-    const body = sanitizeRestBody(r.body);
-    if (late <= 0) { kept.push(r); armRestTimer(r.uid, r.at - now, body); }
-    else if (late <= REST_TIMER_MAX_LATE_MS) { kept.push(r); armRestTimer(r.uid, 0, body); }
-    // else: too stale to be useful — dropped, never fired.
+function cancelRestTimer(userId, deviceId) {
+  // no device id: an older client — clear everything the account has pending, as it always did
+  for (const [k, t] of restTimers) {
+    if (deviceId ? k === restKey(userId, deviceId) : k.startsWith(userId + ':')) { clearTimeout(t); restTimers.delete(k); }
   }
-  if (kept.length !== db.restTimers.length) { db.restTimers = kept; saveDb(); }
-  else db.restTimers = kept;
 }
-
-/* How long the "workout planned today" reminder stays worth delivering.
-   Long enough to survive a morning with the phone in a dead zone or switched off, short enough that
-   it can never arrive in the middle of the night or on the following day — which for a reminder
-   about TODAY would be actively misleading, not merely late. The daily `lastReminder` guard stops
-   it repeating; this stops a stale copy of it appearing hours after the gym closed. */
-const DAY_REMINDER_TTL_S = 3 * 3600;
+// A device id is what the browser made up for itself (lib/push.js): one short token per browser
+// profile, nothing identifying. Anything else is treated as absent.
+const deviceIdOf = v => (typeof v === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(v) ? v : undefined);
 
 // "Workout planned today" reminder — one per user per day, at their chosen time.
 // Duplicated (not imported) from frontend/src/lib/history.js effectiveRoutineId — tiny pure helper, not worth sharing across the two runtimes.
+// The `?.` on each entry is this copy's own: it reads whatever is on disk, including a file written before PUT /api/data dropped null entries.
+// A weekday can hold a routine-id list (combine routines); the reminder only needs the first.
 function effectiveRoutineId(S, iso) {
   const ov = S.dayPlan?.[iso];
   if (ov === 'rest') return null;
-  if (ov && S.routines?.some(r => r.id === ov)) return ov;
+  if (ov && S.routines?.some(r => r?.id === ov)) return ov;
   const wd = new Date(iso + 'T12:00:00').getDay();
-  return S.week?.[wd] || null;
+  return [].concat(S.week?.[wd] || []).find(id => S.routines?.some(r => r?.id === id)) || null;
 }
 // Computes "now" in an arbitrary IANA zone (e.g. "Europe/Lisbon") instead of the server's own —
 // each user's reminder fires by their own clock, wherever they and their phone actually are.
@@ -526,34 +577,75 @@ function userNow(tz) {
       year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
     }).formatToParts(new Date());
     const g = t => parts.find(p => p.type === t)?.value;
-    return { date: `${g('year')}-${g('month')}-${g('day')}`, hhmm: `${g('hour')}:${g('minute')}` };
+    const date = `${g('year')}-${g('month')}-${g('day')}`;
+    // Weekday is derived from the zone's own date, not the server's — a Sunday-evening review
+    // has to be Sunday where the user is, which is what the reminder already assumes for time.
+    return { date, hhmm: `${g('hour')}:${g('minute')}`, weekday: new Date(date + 'T12:00:00Z').getUTCDay() };
   } catch { return null; } // unknown/invalid tz string — skip this user rather than guess
+}
+// The tick used to want the exact minute: `reminder.time === now.hhmm`, checked every 10 s. Any
+// restart, redeploy or stalled event loop across that one minute lost the whole day's reminder —
+// "sometimes it just doesn't come". A reminder that is due is now sent for up to this many
+// minutes after its time, once per local date (`user.lastReminder`); later than that it is
+// skipped rather than delivered at a time nobody asked for.
+const REMINDER_WINDOW_MIN = 15;
+// How often the tick looks. 10 s keeps a reminder within ~9 s of its minute; the tests shorten it.
+const REMINDER_TICK_MS = Math.max(50, +(process.env.REMINDER_TICK_MS || 10000));
+// How long the "workout planned today" reminder stays worth delivering: long enough to survive a
+// morning with the phone in a dead zone, short enough that it can never arrive in the middle of
+// the night or on the following day — which for a reminder about TODAY would be actively
+// misleading, not merely late. REMINDER_WINDOW_MIN above stops it repeating; this stops a queued
+// copy of it turning up hours after the gym closed.
+const DAY_REMINDER_TTL_S = 3 * 3600;
+const hhmmToMin = v => {
+  const m = /^(\d{2}):(\d{2})$/.exec(v || '');
+  return m ? Number(m[1]) * 60 + Number(m[2]) : NaN;
+};
+// Minutes since the reminder's time on the user's clock; negative before it, NaN when either
+// side does not parse. Same-day only — a 23:55 reminder is not owed at 00:05 the next day.
+const minutesLate = (time, now) => hhmmToMin(now.hhmm) - hhmmToMin(time);
+// The tick reads every subscribed user's state file every 10 s. Most of those files do not
+// change between ticks; a stat is far cheaper than a read and a parse of a state that can be
+// megabytes, and it keeps the tick short — a slow tick was one more way to miss the minute.
+const stateCache = new Map(); // uid -> { mtimeMs, size, S }
+function readStateCached(uid) {
+  let st;
+  try { st = fs.statSync(stateFile(uid)); } catch { stateCache.delete(uid); return null; }
+  const hit = stateCache.get(uid);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.S;
+  const S = readState(uid);
+  stateCache.set(uid, { mtimeMs: st.mtimeMs, size: st.size, S });
+  return S;
 }
 setInterval(() => {
   for (const user of db.users) {
     if (!db.subs.some(s => s.userId === user.id)) continue;
-    const S = readState(user.id);
-    if (!S?.reminder?.on) continue;
-    const now = userNow(S.reminder.tz || 'UTC');
-    if (!now || S.reminder.time !== now.hhmm) continue;
-    if (user.lastReminder === now.date) continue;
-    if ((S.workouts || []).some(w => w.d === now.date)) continue;
-    const rid = effectiveRoutineId(S, now.date);
-    if (!rid) continue; // rest day — nothing planned
-    const routine = (S.routines || []).find(r => r.id === rid);
-    console.log('reminder firing', user.id, rid);
-    user.lastReminder = now.date;
-    saveDb();
-    sendPush(user.id, {
-      title: routine ? `${routine.emoji || '🏋️'} ${routine.name} today` : 'Workout planned today',
-      body: "It's on your plan — let's go 💪",
-      tag: 'day-reminder',
-      ttl: DAY_REMINDER_TTL_S
-    });
+    // One user's state file is one user's problem: a shape this tick cannot read is logged and
+    // skipped, not allowed to take the process — and everyone else's reminders — down with it.
+    // PUT /api/data refuses the obvious shapes, but a file already on disk answers to nobody.
+    try {
+      const S = readStateCached(user.id);
+      if (!S?.reminder?.on) continue;
+      const now = userNow(S.reminder.tz || 'UTC');
+      if (!now) continue;
+      const late = minutesLate(S.reminder.time, now);
+      if (!(late >= 0 && late <= REMINDER_WINDOW_MIN)) continue;
+      if (user.lastReminder === now.date) continue;
+      if ((S.workouts || []).some(w => w?.d === now.date)) continue;
+      const rid = effectiveRoutineId(S, now.date);
+      if (!rid) continue; // rest day — nothing planned
+      const routine = (S.routines || []).find(r => r?.id === rid);
+      console.log('reminder firing', user.id, rid);
+      user.lastReminder = now.date;
+      saveDb();
+      sendPush(user.id, { ...dayReminderPush(S.lang, routine), ttl: DAY_REMINDER_TTL_S });
+    } catch (e) {
+      console.error('reminder tick', user.id, e);
+    }
   }
 // Checked every 10s (not 60s) — ticks aren't aligned to the top of the minute, so a 60s
 // interval could sit on your target minute for up to 59s before noticing. 10s caps that at ~9s.
-}, 10000).unref();
+}, REMINDER_TICK_MS).unref();
 
 /* ---------- sessions (signed cookie) ---------- */
 function sign(payload) {
@@ -580,11 +672,44 @@ function makeSession(user) {
   const exp = Date.now() + SESSION_DAYS * 86400000;
   return sign(user.id + ':' + exp + ':' + sessionVersion(user));
 }
+// With the __Host- prefix the *browser* guarantees the cookie is host-only (no Domain attribute
+// is even allowed) — which is what stops a sibling subdomain, e.g. anything-else.example.com
+// against gym.example.com, from planting a second session cookie for the shared parent domain
+// and having it shadow the real one. The prefix also requires Secure, so it only works on an
+// https ORIGIN; over plain http://localhost the old name stays, and localhost has no sibling
+// subdomains to worry about. Both names are accepted on the way in, so upgrading an instance
+// does not sign anybody out — they move onto the prefixed cookie at their next sign-in.
+const COOKIE = SECURE ? '__Host-gymsid' : 'gymsid';
+const LEGACY_COOKIE = 'gymsid';
+// Every value for a given name, in the order the browser sent them. Not an object: reducing
+// duplicates to one entry silently picks a winner, and picking the *last* one handed a shadowing
+// cookie the session outright.
+function cookieValues(req, name) {
+  const out = [];
+  for (const c of (req.headers.cookie || '').split(';')) {
+    const i = c.indexOf('=');
+    if (i < 0) continue;
+    if (c.slice(0, i).trim() === name) out.push(c.slice(i + 1).trim());
+  }
+  return out;
+}
+function cookieToken(req) {
+  for (const name of (COOKIE === LEGACY_COOKIE ? [COOKIE] : [COOKIE, LEGACY_COOKIE])) {
+    const vals = cookieValues(req, name);
+    if (!vals.length) continue;
+    // Two different values under one name is not something a browser does on its own — it means
+    // somebody else got to set one. There is no safe way to guess which is the real session, so
+    // refuse both: a signed-out user signs back in, a shadowing attempt gets nothing.
+    if (vals.some(v => v !== vals[0])) return null;
+    return vals[0];
+  }
+  return null;
+}
 function readSession(req) {
-  const cookies = Object.fromEntries((req.headers.cookie || '').split(';').map(c => {
-    const i = c.indexOf('='); return i < 0 ? ['', ''] : [c.slice(0, i).trim(), c.slice(i + 1).trim()];
-  }));
-  const tok = cookies.gymsid;
+  // The paired mobile app has no cookie jar shared with the API's origin, so it carries the same
+  // signed token in an Authorization header instead — same payload, same verification below.
+  const auth = req.headers.authorization || '';
+  const tok = cookieToken(req) || (auth.startsWith('Bearer ') ? auth.slice(7).trim() : null);
   if (!tok) return null;
   const payload = verifySig(tok);
   if (!payload) return null;
@@ -608,10 +733,60 @@ function requireAdmin(req, res) {
   if (!isAdmin(user)) { audit(req, 'admin.denied', { ok: false, user }); json(res, 403, { error: 'forbidden' }); return null; }
   return user;
 }
+const expireCookie = name => `${name}=; Path=/; Max-Age=0; HttpOnly;${SECURE} SameSite=Lax`;
 function sessionCookie(user) {
-  return `gymsid=${makeSession(user)}; Path=/; Max-Age=${SESSION_DAYS * 86400}; HttpOnly;${SECURE} SameSite=Lax`;
+  const fresh = `${COOKIE}=${makeSession(user)}; Path=/; Max-Age=${SESSION_DAYS * 86400}; HttpOnly;${SECURE} SameSite=Lax`;
+  // Signing in also retires any pre-upgrade cookie, so nobody is left carrying an unprefixed one
+  // (or a shadowing copy of it) alongside the new session.
+  return COOKIE === LEGACY_COOKIE ? [fresh] : [fresh, expireCookie(LEGACY_COOKIE)];
 }
-const clearCookie = `gymsid=; Path=/; Max-Age=0; HttpOnly;${SECURE} SameSite=Lax`;
+const clearCookie = COOKIE === LEGACY_COOKIE
+  ? [expireCookie(LEGACY_COOKIE)]
+  : [expireCookie(COOKIE), expireCookie(LEGACY_COOKIE)];
+
+/* ---------- CSRF ---------- */
+// SameSite=Lax keeps the session cookie off a genuinely cross-*site* request. It does not keep it
+// off a *sibling subdomain*: gym.example.com and anything-else.example.com are the same site, and
+// that is the ordinary self-hosting layout — one domain, one reverse proxy, several apps. Nothing
+// else in a request was being checked either; readBody() JSON.parse's the body whatever the
+// Content-Type claims, so a hostile page could reach the state-changing routes with a form-style
+// POST that needs no CORS preflight at all.
+//
+// So a state-changing request that came from a browser has to come from ORIGIN. The exemptions
+// below are not holes: each of those routes carries its own credential in the body (a WebAuthn
+// challenge id, a one-shot pairing code), none of them acts on the caller's existing session, and
+// they have to keep working from the mobile WebView, whose origin is never ORIGIN.
+const CSRF_EXEMPT = new Set([
+  'POST /api/register/options', 'POST /api/register/verify',
+  'POST /api/login/options', 'POST /api/login/verify',
+  'POST /api/pair/redeem',
+  // Same shape as register/login options+verify: unauthenticated, no ambient cookie session to
+  // forge with, and the code/challenge carried in the body IS the credential — a device that has
+  // never signed in yet is exactly what these two exist for.
+  'POST /api/link/options', 'POST /api/link/verify'
+]);
+const originsMatch = (a, b) => a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
+function csrfOk(req, key) {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return true;
+  if (CSRF_EXEMPT.has(key)) return true;
+  // The paired mobile app authenticates with a Bearer token. A browser never attaches one on its
+  // own, so there is no ambient authority for a hostile page to borrow and no origin to check.
+  if ((req.headers.authorization || '').startsWith('Bearer ')) return true;
+  // Sec-Fetch-Site is set by the browser itself and no page can forge it, and it states exactly
+  // the property wanted here — more precisely than comparing origins can. 'same-origin' is the
+  // app talking to its own backend; a hostile page reports 'cross-site'; a sibling subdomain,
+  // the case SameSite=Lax misses entirely, reports 'same-site'. It is also what keeps the Vite
+  // dev server working, where the page is on another port and its Origin is legitimately not
+  // ORIGIN. Absent on older Safari and on proxies that strip it, hence the fallback below.
+  const site = req.headers['sec-fetch-site'];
+  if (site) return site === 'same-origin' || site === 'none';
+  const origin = req.headers.origin;
+  // No Origin header at all means no browser sent this — curl, a script, a monitoring check.
+  // Browsers put an Origin on every state-changing request and a page cannot suppress it, so the
+  // forgery this exists to stop always carries one.
+  if (!origin) return true;
+  return originsMatch(origin, ORIGIN);
+}
 
 /* ---------- challenge store (in-memory, 5 min TTL) ---------- */
 const challenges = new Map(); // cid -> {challenge, name?, uid?, exp}
@@ -639,27 +814,74 @@ if (STRAVA_ENABLED) {
   setInterval(() => { stravaStates = pruneStates(stravaStates, Date.now()); }, 60000).unref();
 }
 
+// ---------- device pairing (mobile app "connect to my server", no WebAuthn ceremony) ----------
+// A passkey ceremony can't run inside the app's WebView (its origin never matches RP_ID), so the
+// app authenticates by redeeming a short code minted from an already signed-in browser tab —
+// same 5-min-TTL/one-shot shape as the WebAuthn challenge store above.
+const pairings = new Map(); // code -> {uid, exp}
+const PAIR_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I — read off a screen
+function makePairCode() {
+  let code;
+  do {
+    code = Array.from(crypto.randomBytes(8)).map(b => PAIR_CODE_ALPHABET[b % PAIR_CODE_ALPHABET.length]).join('');
+  } while (pairings.has(code));
+  return code;
+}
+setInterval(() => { for (const [k, v] of pairings) if (v.exp < Date.now()) pairings.delete(k); }, 60000).unref();
+
 /* ---------- helpers ---------- */
 function json(res, code, obj, extraHeaders) {
   const body = JSON.stringify(obj);
   res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...(extraHeaders || {}) });
   res.end(body);
 }
+// A request the caller got wrong. The catch-all at the bottom answers it with this status and
+// message and does not log it: three of the routes below are reachable without a session, and a
+// stack trace per malformed body would let anyone fill the container log with noise that looks
+// like a crash. Anything else that escapes a handler is still a real 500 and still logged.
+class HttpError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
 function readBody(req) {
   return new Promise((resolve, reject) => {
-    let size = 0; const chunks = [];
+    let size = 0, over = false; const chunks = [];
     req.on('data', d => {
       size += d.length;
-      if (size > MAX_BODY) { reject(new Error('body too large')); req.destroy(); return; }
+      if (over) {
+        // The 413 is already on its way. The rest of the upload is read and thrown away rather
+        // than the socket destroyed under it: closing with unread bytes on the wire makes the
+        // kernel send a reset, and a client (node's own http client included) that hits the
+        // reset before it has parsed the answer reports a dropped connection instead of the
+        // 413. A client that keeps streaming past twice the cap is not a mistaken one, and is
+        // cut off.
+        if (size > 2 * MAX_BODY) req.destroy();
+        return;
+      }
+      if (size > MAX_BODY) {
+        over = true; chunks.length = 0;
+        reject(new HttpError(413, 'body too large'));
+        return;
+      }
       chunks.push(d);
     });
     req.on('end', () => {
-      try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}); }
-      catch { reject(new Error('bad json')); }
+      if (over) return;
+      if (!chunks.length) return resolve({});
+      let body;
+      try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+      catch { return reject(new HttpError(400, 'invalid json')); }
+      // Every handler reads fields off the result, so a JSON `null`, string, number or array is
+      // as much a client mistake as unparseable text — refused once here rather than dereferenced
+      // (and turned into a TypeError) in each route.
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return reject(new HttpError(400, 'invalid json'));
+      resolve(body);
     });
     req.on('error', reject);
   });
 }
+// A caller-supplied field that is meant to be text. String() alone is not safe on a parsed body:
+// `{"code":{"toString":1}}` is valid JSON and String() throws on it.
+const text = v => (typeof v === 'string' ? v : typeof v === 'number' ? String(v) : '');
 const b64uToBuf = s => Buffer.from(s, 'base64url');
 
 /* ---------- live presence (in-memory) ---------- */
@@ -710,7 +932,10 @@ function clientIp(req) {
   if (!req || !req.headers) return null;
   const raw = String(req.headers['cf-connecting-ip'] || '').trim()
     || String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
-    || String(req.headers['x-real-ip'] || '').trim();
+    || String(req.headers['x-real-ip'] || '').trim()
+    // Nothing in front at all: the socket peer is the client, and it cannot be forged. Behind
+    // the bundled web container a header always wins before this is reached.
+    || String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '').trim();
   const ip = raw.replace(/^\[|\]$/g, '').slice(0, 45);
   if (!/^[0-9a-fA-F:.]{3,45}$/.test(ip)) return null;    // never store a header verbatim
   if (AUDIT_IP === 'full') return ip;
@@ -771,13 +996,16 @@ if (AUDIT_ON) {
 
 /* ---------- routes ---------- */
 const routes = {
-  // `ok` and `users` are load-bearing (the Dockerfile HEALTHCHECK probes this route, and every
-  // integration suite waits on it), so `version` is purely additive. Its shape is constant —
-  // `{ ref, date }` with nulls when unknown — so a client never has to branch on the key existing.
-  'GET /api/health': async (req, res) => json(res, 200, { ok: true, users: db.users.length, version: SERVER_VERSION }),
+  'GET /api/health': async (req, res) => json(res, 200, { ok: true, users: db.users.length }),
 
-  // Public config the login screen needs before anyone is signed in.
-  'GET /api/config': async (req, res) => json(res, 200, { invite_only: INVITE_ONLY, allow_guest: ALLOW_GUEST }),
+  // Public config the login screen needs before anyone is signed in. `coach` is absent unless
+  // the instance has both switched the Coach on and successfully connected a provider — the
+  // single flag every piece of Coach UI hangs off, so an unconfigured instance is byte-for-byte
+  // the app it was before the feature existed.
+  'GET /api/config': async (req, res) => {
+    const coach = coachConfig.publicConfig();
+    json(res, 200, { invite_only: INVITE_ONLY, allow_guest: ALLOW_GUEST, ...(coach ? { coach } : {}) });
+  },
 
   'GET /api/me': async (req, res) => {
     const user = readSession(req);
@@ -787,9 +1015,9 @@ const routes = {
 
   'POST /api/register/options': async (req, res) => {
     const body = await readBody(req);
-    const name = String(body.name || '').trim().slice(0, 40);
+    const name = text(body.name).trim().slice(0, 40);
     if (!name) return json(res, 400, { error: 'name required' });
-    const code = String(body.code || '').trim().toUpperCase();
+    const code = text(body.code).trim().toUpperCase();
     if (INVITE_ONLY && !db.invites.some(i => i.code === code && !i.usedBy && !i.revoked)) {
       // The rejected code itself is never recorded — a near-miss guess in the log is a liability.
       audit(req, 'auth.register.denied', { ok: false, name, msg: 'invite-rejected' });
@@ -812,7 +1040,7 @@ const routes = {
     const c = takeChallenge(body.cid);
     // A challenge minted by /api/link/options also carries a `uid` (the existing user being
     // linked to), so `!c.uid` alone does not tell the two kinds apart. Without the `c.link` check
-    // a link challenge could be redeemed here instead: no burnLink ever runs (that only happens
+    // a link challenge could be redeemed here instead: no redeemLink ever runs (that only happens
     // on the link route), so the code stays reusable for its whole TTL, AND db.users gets a
     // second row reusing that uid (with name undefined, since register challenges carry `name`
     // and link challenges don't) — corrupting every id-keyed lookup (readSession, /api/me, admin
@@ -833,7 +1061,7 @@ const routes = {
     } catch (e) {
       // e.message can echo attacker-supplied response fields, so only the reason code is kept.
       audit(req, 'auth.register.fail', { ok: false, name: c.name, msg: 'verify-error' });
-      return json(res, 400, { error: 'verification failed: ' + e.message });
+      return json(res, 400, { error: verifyError(e, { rpId: RP_ID, origin: ORIGIN }) });
     }
     if (!verification.verified) {
       audit(req, 'auth.register.fail', { ok: false, name: c.name, msg: 'not-verified' });
@@ -860,8 +1088,7 @@ const routes = {
       id: credential.id, userId: user.id,
       publicKey: Buffer.from(credential.publicKey).toString('base64url'),
       counter: credential.counter || 0,
-      transports: body.credential?.response?.transports || [],
-      created: new Date().toISOString()
+      transports: body.credential?.response?.transports || []
     });
     saveDb();
     audit(req, 'auth.register.ok', { user, msg: invite ? invite.code : null });
@@ -908,7 +1135,7 @@ const routes = {
       });
     } catch (e) {
       audit(req, 'auth.login.fail', { ok: false, user: db.users.find(u => u.id === cred.userId), uid: cred.userId, msg: 'verify-error' });
-      return json(res, 400, { error: 'verification failed: ' + e.message });
+      return json(res, 400, { error: verifyError(e, { rpId: RP_ID, origin: ORIGIN }) });
     }
     if (!verification.verified) {
       audit(req, 'auth.login.fail', { ok: false, user: db.users.find(u => u.id === cred.userId), uid: cred.userId, msg: 'not-verified' });
@@ -945,17 +1172,57 @@ const routes = {
     const user = readSession(req);
     if (!user) return json(res, 401, { error: 'not signed in' });
     user.sv = sessionVersion(user) + 1;
+    // An unredeemed pairing code is a session-in-waiting for this account; it goes too.
+    for (const [k, v] of pairings) if (v.uid === user.id) pairings.delete(k);
+    // A live link code is stronger than a pairing code — redeeming it plants a permanent passkey,
+    // not just a session — so "sign out everywhere" (pressed exactly when a code may have been
+    // seen or a device stolen) has to revoke it too.
+    db.links = db.links.filter(l => l.uid !== user.id);
     saveDb();
     audit(req, 'auth.logout.all', { user });
     json(res, 200, { ok: true }, { 'Set-Cookie': clearCookie });
   },
 
+  // Mobile app pairing: called from an already signed-in browser tab (Settings → "Pair the
+  // mobile app") to mint a short code the phone can redeem below.
+  'POST /api/pair/create': async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    const code = makePairCode();
+    pairings.set(code, { uid: user.id, exp: Date.now() + 5 * 60000 });
+    audit(req, 'auth.pair.create', { user });
+    json(res, 200, { code });
+  },
+
+  // Called from the mobile app itself with the code shown in the browser. No session required —
+  // the code IS the credential, one-shot and 5-minute-lived like a WebAuthn challenge.
+  'POST /api/pair/redeem': async (req, res) => {
+    const body = await readBody(req);
+    const code = text(body.code).trim().toUpperCase();
+    const p = pairings.get(code);
+    if (p) pairings.delete(code);
+    if (!p || p.exp < Date.now()) {
+      audit(req, 'auth.pair.fail', { ok: false, msg: 'code-invalid' });
+      return json(res, 400, { error: 'invalid or expired code' });
+    }
+    const user = db.users.find(u => u.id === p.uid);
+    if (!user || user.disabled) {
+      audit(req, 'auth.pair.fail', { ok: false, uid: p.uid, msg: 'user-unavailable' });
+      return json(res, 400, { error: 'invalid or expired code' });
+    }
+    audit(req, 'auth.pair.ok', { user });
+    json(res, 200, { token: makeSession(user), user: { id: user.id, name: user.name, admin: isAdmin(user) } });
+  },
+
   /* ---------- device linking ---------- */
   // Adds a second (or third...) passkey to an EXISTING account, so a new device can reach the
   // same profile without creating a fresh one. See api/link.js for the pure code/throttle logic —
-  // single-use is enforced here, not there: every success path below must call burnLink().
+  // single-use is enforced here, not there: the success path below must call redeemLink().
   // INVITE_ONLY deliberately does not apply here — linking never creates a profile, it only adds
-  // a credential to one that already exists.
+  // a credential to one that already exists. Not the same thing as /api/pair/* above: pairing
+  // hands the Capacitor app a Bearer token for an account it can already reach, and never touches
+  // WebAuthn; this attaches a brand-new passkey to a profile from a device that has never signed
+  // in before.
 
   'POST /api/link/code': async (req, res) => {
     const user = readSession(req);
@@ -987,7 +1254,7 @@ const routes = {
     }
     // fail() is defined before the body is even parsed so a malformed JSON body (readBody rejects)
     // can be routed through it too — otherwise it would fall through to the generic dispatcher
-    // catch and come back as a differently-shaped 500, and (worse) not count as a failure at all.
+    // catch and come back as a differently-shaped error, and (worse) not count as a failure at all.
     const fail = reason => {
       db.linkFails = recordFailure(db.linkFails, now);
       saveDb();
@@ -1004,6 +1271,13 @@ const routes = {
     if (!result.ok) return fail(result.reason);
     const user = db.users.find(u => u.id === result.uid);
     if (!user) return fail('user-missing'); // orphaned link (owner deleted) — same generic error
+    // Same generic error as any other dead code — same shape as /api/pair/redeem's `!user ||
+    // user.disabled` check — so a caller can't tell "disabled" apart from "wrong/expired code".
+    // Without this, disabling an account with a live link code (up to 15 min old) would leave
+    // that code redeemable: the session it mints would be inert while disabled stays set, but
+    // the passkey it plants in db.creds is permanent and would work again the moment the account
+    // is re-enabled.
+    if (user.disabled) return fail('account-disabled');
     const excludeCredentials = db.creds
       .filter(c => c.userId === user.id)
       .map(c => ({ id: c.id, transports: c.transports || [] }));
@@ -1027,15 +1301,15 @@ const routes = {
       audit(req, 'link.fail', { ok: false, msg: 'challenge-expired' });
       return json(res, 400, { error: 'challenge expired — try again' });
     }
-    // The challenge alone is not enough: it lives for its own 5-minute TTL independent of the
-    // code's, so a code that the owner has since replaced (POST /api/link/code drops the old one)
-    // or that simply expired must not still be redeemable just because this in-flight ceremony
-    // hasn't timed out yet. Revalidate the code against the live db.links before touching
-    // anything, and fail with the same generic message /api/link/options uses — this endpoint is
-    // also unauthenticated, so it gets no more information than that one does.
-    const now = Date.now();
-    const recheck = validateLink(db.links, c.code, now);
-    if (!recheck.ok || recheck.uid !== c.uid) {
+    // A cheap early exit, NOT the enforcement point (that's the redeemLink() call below, after
+    // the crypto verification): the challenge's own 5-minute TTL is independent of the code's, so
+    // a code the owner has since replaced (POST /api/link/code drops the old one) or that simply
+    // expired can still have a live, unexpired challenge sitting on it. Catching that here, before
+    // spending a WebAuthn verification on a credential that can never be attached to anything,
+    // also keeps the response the same generic "invalid or expired code" instead of whatever
+    // verifyRegistrationResponse would have said about a credential that was never going anywhere.
+    const preCheck = validateLink(db.links, c.code, Date.now());
+    if (!preCheck.ok || preCheck.uid !== c.uid) {
       audit(req, 'link.fail', { ok: false, uid: c.uid, msg: 'code-revoked' });
       return json(res, 400, { error: 'invalid or expired code' });
     }
@@ -1050,12 +1324,21 @@ const routes = {
       });
     } catch (e) {
       audit(req, 'link.fail', { ok: false, uid: c.uid, msg: 'verify-error' });
-      return json(res, 400, { error: 'verification failed: ' + e.message });
+      return json(res, 400, { error: verifyError(e, { rpId: RP_ID, origin: ORIGIN }) });
     }
     if (!verification.verified) {
       audit(req, 'link.fail', { ok: false, uid: c.uid, msg: 'not-verified' });
       return json(res, 400, { error: 'not verified' });
     }
+    // Everything from here to the redeemLink() call below is synchronous — no `await` in between
+    // — and that is load-bearing, not incidental. /api/link/options never burns a code (only a
+    // SUCCESSFUL verify does), so two concurrent /api/link/verify calls for the same code, each
+    // with its own cid from its own /api/link/options round trip, both reach this point having
+    // each awaited their own verifyRegistrationResponse. If the liveness check ran before that
+    // await (as an earlier version of this route did) both would see the code still alive and
+    // both would succeed, planting two credentials off one "single-use" code. redeemLink() folds
+    // the recheck and the burn into one call so this route can't split them across an await by
+    // accident again — see its comment in api/link.js.
     const { credential } = verification.registrationInfo;
     if (db.creds.find(x => x.id === credential.id)) {
       // Code is deliberately NOT burned here: the device didn't get linked, so the owner should
@@ -1068,6 +1351,24 @@ const routes = {
       audit(req, 'link.fail', { ok: false, uid: c.uid, msg: 'user-missing' });
       return json(res, 400, { error: 'user missing' });
     }
+    // Same generic error as any other dead code (see /api/link/options) — an account disabled
+    // after the code was minted must not still be linkable, and the response gives no more away
+    // than "invalid or expired code" does anywhere else on this route. Not burned either: this is
+    // a dead end for the caller, same as credential-exists above, not a spent attempt.
+    if (user.disabled) {
+      audit(req, 'link.fail', { ok: false, uid: c.uid, msg: 'account-disabled' });
+      return json(res, 400, { error: 'invalid or expired code' });
+    }
+    // The atomic recheck-and-burn (see the comment above and api/link.js's redeemLink): a second,
+    // concurrent /api/link/verify for this same code that gets here after this one has already
+    // returned false — its own redeemLink() call sees the code gone and bails out here, before
+    // ever reaching db.creds.push below.
+    const redeemed = redeemLink(db.links, c.code, c.uid, Date.now());
+    if (!redeemed.ok) {
+      audit(req, 'link.fail', { ok: false, uid: c.uid, msg: 'code-revoked' });
+      return json(res, 400, { error: 'invalid or expired code' });
+    }
+    db.links = redeemed.links;
     // No db.users.push here — this is the whole point of linking: attach a credential to the
     // EXISTING profile instead of minting a new one.
     db.creds.push({
@@ -1077,9 +1378,6 @@ const routes = {
       transports: body.credential?.response?.transports || [],
       created: new Date().toISOString()
     });
-    // Single-use enforcement lives here, per api/link.js's header comment: validateLink() never
-    // burns anything, so the caller (this route) must do it on the success path.
-    db.links = burnLink(db.links, c.code);
     saveDb();
     audit(req, 'link.ok', { user });
     json(res, 200, { user: { id: user.id, name: user.name, admin: isAdmin(user) } }, { 'Set-Cookie': sessionCookie(user) });
@@ -1103,8 +1401,8 @@ const routes = {
 
   // Revokes one of the caller's own passkeys, e.g. after selling/losing the device it lives on.
   // Path parameters aren't a thing this dispatcher supports (routes are matched by exact
-  // "METHOD pathname" string — see the bottom of this file), so the credential id travels as a
-  // query string param, same pattern already used by GET /api/admin/user's `?id=`.
+  // "METHOD pathname" string, since url.pathname excludes the query string — see the bottom of
+  // this file), so the credential id travels as a query string param instead.
   'DELETE /api/devices': async (req, res) => {
     const user = readSession(req);
     if (!user) return json(res, 401, { error: 'not signed in' });
@@ -1130,13 +1428,22 @@ const routes = {
     json(res, 200, { ok: true });
   },
 
+  // `rev` is the server's own count of writes to this profile (also stored inside the document as
+  // `_rev`, so every other reader of the file — reminder tick, admin, Coach, MCP — is unaffected).
+  // A client pushes it back as `baseRev`, and a write over a document it never saw is refused.
   'GET /api/data': async (req, res) => {
     const user = readSession(req);
     if (!user) return json(res, 401, { error: 'not signed in' });
-    try {
-      const state = JSON.parse(fs.readFileSync(stateFile(user.id), 'utf8'));
-      json(res, 200, { state });
-    } catch { json(res, 200, { state: null }); }
+    const state = readState(user.id);
+    json(res, 200, { state, rev: state?._rev || 0 });
+  },
+  // Just the revision: the client asks this every half minute while it is open and on every
+  // return to the foreground, and fetches the document only when the number moved — a signed-in
+  // device is meant to show what the server has, and this is what keeps that cheap.
+  'GET /api/data/rev': async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    json(res, 200, { rev: readState(user.id)?._rev || 0 });
   },
 
   'PUT /api/data': async (req, res) => {
@@ -1144,9 +1451,34 @@ const routes = {
     if (!user) return json(res, 401, { error: 'not signed in' });
     const body = await readBody(req);
     if (!body.state || typeof body.state !== 'object') return json(res, 400, { error: 'state required' });
+    // The reminder tick and the admin routes iterate these two on the server's side, so a truthy
+    // non-array would throw there on every pass for as long as it sat on disk. Absent or null is
+    // fine — every client fills its own defaults. An array is `typeof 'object'` but no document:
+    // `_rev` set on it is dropped by JSON.stringify, so the file would read back as rev 0 while
+    // the response claimed the next revision.
+    const list = v => v == null || Array.isArray(v);
+    if (Array.isArray(body.state) || !list(body.state.workouts) || !list(body.state.routines)) return json(res, 400, { error: 'invalid state' });
+    // The same readers walk every entry (`w.d`, `w.name`). They skip what is not an entry now
+    // (`records` above), but nothing should be storing one. Dropped, not refused:
+    // such an entry carries nothing worth keeping, whereas a 400 would strand a client whose own
+    // copy is already malformed — it keeps re-sending the same document and never syncs again.
+    for (const k of ['workouts', 'routines']) if (Array.isArray(body.state[k])) body.state[k] = records(body.state[k]);
+    // Conditional write: a `baseRev` that is not the current revision means this client last
+    // read an older document — another device has written since — and the copy it is about to
+    // push would silently drop that write. The current document travels back with the 409, so
+    // the client can merge and try again without a second request. No `baseRev` (a client from
+    // before revisions, or a deliberate replace such as a backup import) overwrites, as before.
+    // readState and atomicWrite are synchronous with nothing awaited between them, so the
+    // compare-and-write is atomic for this process.
+    const cur = readState(user.id);
+    const curRev = cur?._rev || 0;
+    if (body.baseRev != null && body.baseRev !== curRev) {
+      return json(res, 409, { error: 'conflict', rev: curRev, state: cur });
+    }
     delete body.state.active;              // in-progress workouts stay device-local
+    body.state._rev = curRev + 1;          // server-owned; whatever the client sent is ignored
     atomicWrite(stateFile(user.id), JSON.stringify(body.state));
-    json(res, 200, { ok: true, ts: body.state._ts || null });
+    json(res, 200, { ok: true, ts: body.state._ts || null, rev: body.state._rev });
   },
 
   'GET /api/push/public-key': async (req, res) => json(res, 200, { key: vapid.publicKey }),
@@ -1157,10 +1489,38 @@ const routes = {
     const body = await readBody(req);
     const sub = body.subscription;
     if (!sub?.endpoint || !sub?.keys?.p256dh || !sub?.keys?.auth) return json(res, 400, { error: 'invalid subscription' });
+    const bad = pushEndpointError(sub.endpoint);
+    if (bad) return json(res, 400, { error: bad });
+    // Only the two keys the push protocol needs are kept: `sub` is caller-supplied and would
+    // otherwise put arbitrary fields into db.json, which every admin route reads back out.
+    const keys = { p256dh: String(sub.keys.p256dh), auth: String(sub.keys.auth) };
+    const deviceId = deviceIdOf(body.deviceId);
+    // An upsert: the client re-sends its subscription on every boot (lib/push.js) so a row this
+    // instance lost — pruned after a dead send, a rebuilt db.json — comes back without anyone
+    // touching Settings. The same endpoint sent again keeps its original `created`.
+    const prev = db.subs.find(s => s.endpoint === sub.endpoint);
     db.subs = db.subs.filter(s => s.endpoint !== sub.endpoint);
-    db.subs.push({ userId: user.id, endpoint: sub.endpoint, keys: sub.keys, created: new Date().toISOString() });
+    // A browser holds one subscription per device, so this cap is far above real use. Without
+    // it a single account could pile up endpoints without limit — every one of them a target
+    // sendPush() would then contact, and a whole rewrite of db.json per addition.
+    const mine = db.subs.filter(s => s.userId === user.id);
+    if (mine.length >= MAX_SUBS_PER_USER) {
+      const drop = new Set(mine.slice(0, mine.length - MAX_SUBS_PER_USER + 1).map(s => s.endpoint));
+      db.subs = db.subs.filter(s => !drop.has(s.endpoint));
+    }
+    db.subs.push({ userId: user.id, endpoint: sub.endpoint, keys, ...(deviceId ? { deviceId } : {}), created: prev?.created || new Date().toISOString() });
     saveDb();
     json(res, 200, { ok: true });
+  },
+
+  // Whether this instance still holds the caller's subscription for `endpoint`. The browser's
+  // side (PushManager.getSubscription) says nothing about ours — a row pruned after a dead send
+  // leaves the browser subscribed to nowhere — so Settings asks here before it shows "on".
+  'GET /api/push/status': async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    const endpoint = new URL(req.url, 'http://x').searchParams.get('endpoint') || '';
+    json(res, 200, { subscribed: db.subs.some(s => s.userId === user.id && s.endpoint === endpoint) });
   },
 
   'POST /api/push/unsubscribe': async (req, res) => {
@@ -1175,7 +1535,7 @@ const routes = {
   'POST /api/push/test': async (req, res) => {
     const user = readSession(req);
     if (!user) return json(res, 401, { error: 'not signed in' });
-    await sendPush(user.id, { title: 'openGym', body: 'Test notification ✅ — this is what alerts look like.', tag: 'test' });
+    await sendPush(user.id, testPush(readState(user.id)?.lang));
     json(res, 200, { ok: true });
   },
 
@@ -1183,18 +1543,22 @@ const routes = {
     const user = readSession(req);
     if (!user) return json(res, 401, { error: 'not signed in' });
     const body = await readBody(req);
-    const sec = Math.max(1, Math.min(3600, Math.round(+body.seconds || 0)));
-    if (!sec) return json(res, 400, { error: 'seconds required' });
-    // `body` is the client-composed "what's next" line; absent, empty or not a string all mean
-    // "nothing to announce" and fall back to the generic text inside armRestTimer.
-    scheduleRestTimer(user.id, sec, sanitizeRestBody(body.body));
+    // Validated before it is clamped: the clamp used to run first, which turned a missing or
+    // unusable value into a 1-second push and made the 400 below unreachable. `Number()` only
+    // on a number or a string — on an object it can throw.
+    const raw = body.seconds;
+    const n = typeof raw === 'number' || typeof raw === 'string' ? Number(raw) : NaN;
+    if (!(n >= 1)) return json(res, 400, { error: 'seconds required' });
+    const sec = Math.min(3600, Math.round(n));
+    scheduleRestTimer(user.id, deviceIdOf(body.deviceId), sec, readState(user.id)?.lang, sanitizeRestBody(body.body));
     json(res, 200, { ok: true });
   },
 
   'POST /api/push/rest-timer/cancel': async (req, res) => {
     const user = readSession(req);
     if (!user) return json(res, 401, { error: 'not signed in' });
-    cancelRestTimer(user.id);
+    const body = await readBody(req);
+    cancelRestTimer(user.id, deviceIdOf(body.deviceId));
     json(res, 200, { ok: true });
   },
 
@@ -1205,7 +1569,7 @@ const routes = {
     const body = await readBody(req);
     if (body.active) {
       presence.set(user.id, {
-        name: String(body.name || '').slice(0, 60),
+        name: text(body.name).slice(0, 60),
         exIdx: +body.exIdx || 0, exTotal: +body.exTotal || 0,
         setsDone: +body.setsDone || 0, setsTotal: +body.setsTotal || 0,
         startedAt: +body.startedAt || Date.now(),
@@ -1221,7 +1585,7 @@ const routes = {
     if (!requireAdmin(req, res)) return;
     const users = db.users.map(u => {
       const S = readState(u.id) || {};
-      const workouts = S.workouts || [];
+      const workouts = records(S.workouts);
       const last = workouts[workouts.length - 1];
       return {
         id: u.id, name: u.name, created: u.created || null,
@@ -1247,9 +1611,9 @@ const routes = {
       user: { id: u.id, name: u.name, created: u.created || null, disabled: !!u.disabled, admin: isAdmin(u), invitedBy: u.invitedBy || null },
       unit: S.unit || 'kg',
       lastSync: S._ts || null,
-      routines: (S.routines || []).map(r => ({ id: r.id, name: r.name, emoji: r.emoji, count: (r.ex || []).length })),
-      bodyweight: S.bodyweight || [],
-      workouts: (S.workouts || []).slice().reverse()   // newest first for display
+      routines: records(S.routines).map(r => ({ id: r.id, name: r.name, emoji: r.emoji, count: records(r.ex).length })),
+      bodyweight: records(S.bodyweight),
+      workouts: records(S.workouts).reverse()   // records() already copied, so this reverse is ours: newest first for display
     });
   },
 
@@ -1264,6 +1628,33 @@ const routes = {
     saveDb();
     audit(req, u.disabled ? 'admin.user.disable' : 'admin.user.enable', { user: admin, target: u });
     json(res, 200, { ok: true, id: u.id, disabled: u.disabled });
+  },
+
+  // Disable locks an account out; this removes it. The one destructive action in the app, so the
+  // client asks twice and this end refuses the two cases that cannot be undone from the UI
+  // afterwards: an admin deleting themselves, and the last admin standing (issue #107).
+  // The invite code that let them in stays burned — it was used, and freeing it would quietly
+  // widen an invite-only instance. `GET /api/admin/user` is the export: the dashboard offers it
+  // before the confirm, so the training history can be kept if anyone wants it.
+  'POST /api/admin/user/delete': async (req, res) => {
+    const admin = requireAdmin(req, res); if (!admin) return;
+    const body = await readBody(req);
+    const u = db.users.find(x => x.id === body.id);
+    if (!u) return json(res, 404, { error: 'no such user' });
+    if (u.id === admin.id) return json(res, 400, { error: 'you cannot delete your own account' });
+    if (isAdmin(u) && db.users.filter(isAdmin).length <= 1) return json(res, 400, { error: 'cannot delete the last admin' });
+    const name = u.name;
+    db.users = db.users.filter(x => x.id !== u.id);
+    db.creds = (db.creds || []).filter(c => c.userId !== u.id);
+    db.subs = (db.subs || []).filter(x => x.userId !== u.id);
+    presence.delete(u.id);
+    // The training history and any Coach credential of theirs, both outside db.json.
+    try { fs.unlinkSync(stateFile(u.id)); } catch { /* already gone */ }
+    try { coachConfig.clearProfileAuth(u.id); } catch { /* nothing stored */ }
+    saveDb();
+    // Logged with the name, because the id is about to mean nothing to anyone reading this back.
+    audit(req, 'admin.user.delete', { user: admin, msg: name });
+    json(res, 200, { ok: true, id: u.id });
   },
 
   'GET /api/admin/invites': async (req, res) => {
@@ -1284,7 +1675,7 @@ const routes = {
     // good, so the code itself has to be the thing that isn't worth guessing. Codes already in
     // db.json keep working — validation is an exact string compare, never a length or format check.
     do { code = crypto.randomBytes(8).toString('hex').toUpperCase(); } while (db.invites.some(i => i.code === code));
-    const invite = { code, note: String(body.note || '').slice(0, 60), createdBy: admin.id, created: new Date().toISOString() };
+    const invite = { code, note: text(body.note).slice(0, 60), createdBy: admin.id, created: new Date().toISOString() };
     db.invites.push(invite);
     saveDb();
     audit(req, 'admin.invite.create', { user: admin, msg: code });
@@ -1294,7 +1685,7 @@ const routes = {
   'POST /api/admin/invites/revoke': async (req, res) => {
     const admin = requireAdmin(req, res); if (!admin) return;
     const body = await readBody(req);
-    const inv = db.invites.find(i => i.code === String(body.code || '').toUpperCase());
+    const inv = db.invites.find(i => i.code === text(body.code).toUpperCase());
     if (!inv) return json(res, 404, { error: 'no such code' });
     if (inv.usedBy) return json(res, 400, { error: 'already used — cannot revoke' });
     db.invites = db.invites.filter(i => i.code !== inv.code);
@@ -1337,10 +1728,16 @@ const routes = {
     auditCount = 0;
     audit(req, 'admin.audit.clear', { user: admin });
     json(res, 200, { ok: true });
-  }
+  },
+
+  /* ---------- AI Coach ---------- */
+  // Routes live in coach/routes.js and are handed the helpers above rather than importing
+  // them: they are closures over db and SECRET, and passing them in keeps that module free of
+  // a cycle. Every one of them is inert while the feature is unconfigured.
+  ...coachRoutes({ json, readBody, readSession, requireAdmin })
 };
 
-/* ---------- Strava OAuth (T11) ----------
+/* ---------- Strava OAuth + upload (T11/T12/T14/T15) ----------
    Only added to the route table when STRAVA_ENABLED — an unregistered key falls straight through
    the dispatcher's existing 404 below, so a Strava-less instance never even discloses these paths
    exist. Tokens (access/refresh) NEVER appear in any response here, and NEVER go into audit(). */
@@ -1375,8 +1772,15 @@ if (STRAVA_ENABLED) {
     const now = Date.now();
     const result = validateState(stravaStates, SECRET, q.get('state'), now);
     if (!result.ok) {
-      // Never log the raw state value/token — only the generic reason code.
-      audit(req, 'strava.connect.fail', { ok: false, msg: result.reason });
+      // Logged, not audited: this route is reachable with no session at all (see the header
+      // comment above), and a bad `state` is exactly what anyone can produce just by guessing —
+      // same reasoning as csrfOk's refusal above. An audit entry per attempt would let a bare
+      // curl loop against ?state=x expire the audit log's legitimate old entries out from under
+      // AUDIT_MAX, which is a way to erase the trace of an earlier real incident, not a cost worth
+      // eating for a request nobody has proven anything about yet. Once `state` itself validates
+      // (below) the caller has demonstrated they hold a token this server actually signed — not
+      // reachable by guessing — so failures past that point ARE audited.
+      console.warn('strava callback: invalid state', 'reason=' + result.reason);
       return json(res, 400, { error: 'invalid or expired state' });
     }
     // Burn immediately, before the network exchange: a replay attempt arriving while the first
@@ -1467,8 +1871,8 @@ if (STRAVA_ENABLED) {
   };
 
   // Refreshes on read when the stored token is at or past REFRESH_MARGIN_MS out — this is the one
-  // place in T11 that actually exercises ensureFreshStravaToken over HTTP (T12's upload route will
-  // be the other). A failed refresh attempt (network hiccup, Strava briefly down) must not read as
+  // place in T11 that actually exercises ensureFreshStravaToken over HTTP (T12's upload route is
+  // the other). A failed refresh attempt (network hiccup, Strava briefly down) must not read as
   // "disconnected" for someone who is genuinely still linked, so that case falls back to the token
   // on disk as-is rather than reporting connected:false.
   routes['GET /api/strava/status'] = async (req, res) => {
@@ -1485,10 +1889,12 @@ if (STRAVA_ENABLED) {
   // only attaches the token and forwards it. The client secret never reaches the browser, and the
   // browser never sees an access/refresh token — same split as every other route in this file.
   //
-  // Dedup is enforced HERE, not trusted from the client: client sync is last-writer-wins, so a
-  // phone that syncs twice (e.g. a retried request after a flaky connection) must not upload the
-  // same workout twice. The duplicate check runs BEFORE any token refresh or network call — a
-  // repeat upload of an already-recorded workout never reaches Strava at all.
+  // Dedup is enforced HERE, not trusted from the client: client sync merges copies by `_rev` (see
+  // PUT /api/data above), which is exactly the wrong place to decide "have I already uploaded
+  // this" — a phone can sync the same workout twice (e.g. a retried request after a flaky
+  // connection), and two devices independently finishing the same workout must still upload it
+  // only once. The duplicate check runs BEFORE any token refresh or network call — a repeat upload
+  // of an already-recorded workout never reaches Strava at all.
   //
   // A failure at Strava (network, timeout, or a non-2xx response) is surfaced with its reason and
   // the workout id is NEVER recorded — marking on failure would silently lose that workout for
@@ -1523,9 +1929,6 @@ if (STRAVA_ENABLED) {
     // caller in this codebase (frontend/src/lib/api.js's api() throws on any non-ok response,
     // and store/useStore.js only calls markStravaUploaded on success) — it lands as a real,
     // counted attempt with a quiet retry-later toast instead, same as any other failed upload.
-    // That's the closest fit available without changing the client (a silent "come back in a
-    // few seconds, don't count this against maxAttempts" response would need frontend awareness
-    // of a new response shape — flagged, not built here; see the PR notes).
     const key = inFlightKey(user.id, workoutId);
     if (stravaInFlight.has(key)) {
       return json(res, 409, { error: 'an upload for this workout is already in progress — try again shortly', inFlight: true });
@@ -1577,12 +1980,10 @@ if (STRAVA_ENABLED) {
       // later upload that reuses it — silently, since /uploads still answers 201 either way.
       //
       // workoutId is the stable, per-activity identifier this route already has (assigned once,
-      // client-side, when the workout is created — see frontend/src/lib/format.js#uid). Deriving
-      // the filename from it means a RETRY of the same failed workout keeps the same external_id
-      // (so Strava can recognise a retried upload rather than filing a duplicate), while two
-      // different workouts always get two different ones. A timestamp or random value at upload
-      // time would satisfy uniqueness too, but would mint a fresh external_id on every retry and
-      // give up that recognition for no benefit.
+      // client-side, when the workout is created). Deriving the filename from it means a RETRY of
+      // the same failed workout keeps the same external_id (so Strava can recognise a retried
+      // upload rather than filing a duplicate), while two different workouts always get two
+      // different ones.
       //
       // Sanitised because workoutId rides in from the client as a free-form string (only checked
       // for non-empty), and it is about to become both a filename and a multipart header value.
@@ -1727,7 +2128,7 @@ if (STRAVA_ENABLED) {
       }
     }
     json(res, 200, body200);
-  };
+  }
 
   // PUT /api/v3/activities/{id} { hide_from_home: true } — keeps a synced workout out of
   // followers' feeds. See STRAVA_HIDE_FROM_HOME at the top of this file for what this does and,
@@ -1824,8 +2225,14 @@ if (STRAVA_ENABLED) {
           pending.nextAt = muteAttemptAt(pending.attempts);
           keep.push(pending);
         }
-        writeStravaMutes(uid, keep);
-        if (!keep.length) pendingMuteUsers.delete(uid);
+        // A transient disk error here (e.g. a rename momentarily refused by another process
+        // touching ./data) must not take the whole sweeper — and with it every pending mute for
+        // every other user — down with it. Same "never let one entry cost more than itself"
+        // discipline as the attemptPendingMute try/catch above: the in-memory queue is left
+        // exactly as it was, so the next tick reads the (still accurate, on-disk) list and simply
+        // retries the write.
+        try { writeStravaMutes(uid, keep); if (!keep.length) pendingMuteUsers.delete(uid); }
+        catch (e) { console.error('strava mutes write failed', uid, e.message); }
       }
     } finally { sweeping = false; }
   }
@@ -1836,13 +2243,60 @@ if (STRAVA_ENABLED) {
   }
 }
 
+/* ---------- Coach: boot recovery, notifications, scheduled reviews ---------- */
+// A job that was running when the process died is not coming back; say so rather than leaving
+// a spinner that never resolves.
+coachJobs.recoverOnBoot();
+// A ready proposal is the one Coach event worth a notification. Failures and "nothing to
+// change" stay silent on purpose (FR-38/E4).
+coachJobs.setProposalHook((uid, pending) => {
+  const n = (pending?.changes || []).length;
+  if (!n) return;
+  sendPush(uid, {
+    title: 'Your Coach has been reading',
+    body: n === 1 ? '1 suggestion after this week' : `${n} suggestions after this week`,
+    tag: 'coach-proposal', url: '#/coach'
+  });
+});
+startCadence({ users: () => db.users, userNow });
+startWarmup();
+
 http.createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://x');
+  // Same-origin (the deployed nginx-proxied web app) never triggers CORS, so this only matters
+  // for the paired mobile app calling in from its own WebView origin. It carries no cookie
+  // (auth is the Authorization header instead), so Allow-Credentials is deliberately never set —
+  // reflecting the origin here can't expose the cookie session to anyone.
+  const origin = req.headers.origin;
+  if (origin) { res.setHeader('Access-Control-Allow-Origin', origin); res.setHeader('Vary', 'Origin'); }
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Max-Age': '86400'
+    });
+    return res.end();
+  }
+  // A target that does not parse (`//`, `//api%2Fhealth`) is a bad request, not a server error —
+  // and the try below only covers the route handler, so it is refused here.
+  let url;
+  try { url = new URL(req.url, 'http://x'); }
+  catch { return json(res, 400, { error: 'bad request' }); }
   const key = req.method + ' ' + url.pathname;
   const handler = routes[key];
   if (!handler) return json(res, 404, { error: 'not found' });
+  if (!csrfOk(req, key)) {
+    // Logged, not audited: this is reachable without a session, and an audit entry per attempt
+    // would let anyone fill the log. An operator who has genuinely mis-set ORIGIN needs to see
+    // the mismatch, and the container log is where they will look.
+    console.warn('refused cross-origin', key, 'origin=' + req.headers.origin, 'expected=' + ORIGIN);
+    return json(res, 403, { error: 'cross-origin request refused' });
+  }
   try { await handler(req, res); }
   catch (e) {
+    if (e instanceof HttpError) {
+      if (!res.headersSent) json(res, e.status, { error: e.message });
+      return;
+    }
     console.error(key, e);
     if (!res.headersSent) json(res, 500, { error: 'server error' });
   }

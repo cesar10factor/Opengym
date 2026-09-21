@@ -1,7 +1,15 @@
+import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
 const backend = process.env.API_TARGET || 'http://127.0.0.1:3000'
+// The API refuses a state-changing request that a browser sent from anywhere other than its own
+// ORIGIN (the CSRF guard in api/server.js). The dev server is on a different port, so the page's
+// real Origin is not ORIGIN — modern browsers get through on Sec-Fetch-Site: same-origin, and
+// presenting the expected Origin here covers the ones that don't send it. Match your .env if you
+// changed ORIGIN: API_ORIGIN=https://gym.example.com npm run dev
+const apiOrigin = process.env.API_ORIGIN || 'http://localhost:8080'
 const media = process.env.MEDIA_TARGET || 'http://127.0.0.1:8888'
 
 // Optional web analytics (Umami). Injected only when BOTH vars are set at build time,
@@ -22,25 +30,38 @@ const umami = {
   }
 }
 
-// Version marker (N6). web/Dockerfile's BUILD stage promotes the VCS_REF/BUILD_DATE build args
-// to environment variables before `npm run build`, so the commit the bundle was built from is
-// baked into the JS itself — the browser has no other way to know, and the service worker can
-// happily keep serving an old bundle against a freshly deployed server. Absent everywhere else
-// (`npm run dev`, `npm run build` by hand, vitest): both become empty strings, which Settings
-// reads as "unknown" and renders as nothing at all.
-const vcsRef = process.env.VCS_REF || ''
-const buildDate = process.env.BUILD_DATE || ''
+// The service worker's cache is named after the build (public/sw.js carries a `__BUILD__`
+// placeholder): a deploy is then a new worker with its own cache, and the previous build's
+// shell and chunks are dropped on activate instead of piling up under one fixed name. The
+// stamp is a hash of the built index.html — it changes exactly when the bundle does.
+const swStamp = {
+  name: 'opengym-sw-stamp',
+  apply: 'build',
+  closeBundle() {
+    const dir = new URL('./dist/', import.meta.url)
+    const html = new URL('index.html', dir), sw = new URL('sw.js', dir)
+    if (!existsSync(html) || !existsSync(sw)) return
+    const stamp = createHash('sha256').update(readFileSync(html)).digest('hex').slice(0, 10)
+    writeFileSync(sw, readFileSync(sw, 'utf8').replace('__BUILD__', stamp))
+  }
+}
+
+// The version people are asked for in #install-help and on every bug report. Read from
+// package.json so it cannot drift from the release it was built in, and inlined at build
+// time so no runtime fetch is involved.
+const pkgVersion = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version
 
 export default defineConfig({
-  plugins: [react(), umami],
+  define: { __APP_VERSION__: JSON.stringify(pkgVersion) },
+  plugins: [react(), umami, swStamp],
   base: './',
-  define: {
-    __VCS_REF__: JSON.stringify(vcsRef),
-    __BUILD_DATE__: JSON.stringify(buildDate)
-  },
   server: {
+    // The Coach's core (payload, validator, prompts, HTTP adapters) lives in ../api/coach/core
+    // and is imported by the phone build. vite build and vitest already reach it; the dev
+    // server needs to be told the workspace is wider than frontend/.
+    fs: { allow: ['..'] },
     proxy: {
-      '/api': { target: backend, changeOrigin: true },
+      '/api': { target: backend, changeOrigin: true, headers: { Origin: apiOrigin } },
       '/img': { target: media, changeOrigin: true },
       '/gif': { target: media, changeOrigin: true }
     }

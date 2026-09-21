@@ -7,7 +7,11 @@
    "nothing to announce" case degrades to no body at all rather than to a wrong one.
 
    The failure mode is invisible from the app: everything on screen looks right and only the
-   notification, seen on a locked phone during a rest, is wrong. */
+   notification, seen on a locked phone during a rest, is wrong.
+
+   Adapted for upstream's per-device rest timer (frontend/src/lib/push.js deviceId()): every
+   schedule request now also carries `deviceId`, so the payload assertions below pin it as
+   `expect.any(String)` rather than the exact value. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({ api: vi.fn(() => Promise.resolve({})) }))
@@ -51,7 +55,9 @@ describe('the rest-over notification body travels with the schedule', () => {
 
     useUI.getState().startRest(90)
 
-    expect(lastPayload()).toEqual({ seconds: 90, body: `${NAME} — set 3/4 · 8 reps × 60 kg` })
+    // This branch also carries `deviceId` (frontend/src/lib/push.js) — a fork feature upstream
+    // added on its own, kept here as an opaque string since the value is not what this test pins.
+    expect(lastPayload()).toEqual({ seconds: 90, deviceId: expect.any(String), body: `${NAME} — set 3/4 · 8 reps × 60 kg` })
   })
 
   it('uses the profile weight unit rather than assuming kilos', () => {
@@ -86,7 +92,7 @@ describe('the rest-over notification body travels with the schedule', () => {
     useUI.getState().startRest(60)
     useUI.getState().addRest(15)
 
-    expect(lastPayload()).toEqual({ seconds: 75, body: `${NAME} — set 2/4 · 8 reps × 60 kg` })
+    expect(lastPayload()).toEqual({ seconds: 75, deviceId: expect.any(String), body: `${NAME} — set 2/4 · 8 reps × 60 kg` })
     // Extending replaces the pending alert; it never adds a second one, and nothing is emitted
     // per marked set.
     expect(mocks.api.mock.calls.filter(c => c[0] === SCHEDULE).length).toBe(2)

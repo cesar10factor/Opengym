@@ -4,9 +4,6 @@ media/gif/
 
 # Runtime data — users, passkeys, per-user state, session secret
 data/
-# Copies of the above taken before a risky change. Same contents, same secrets, so they must be
-# just as uncommittable — and an untracked directory here also makes auto-deploy skip the deploy.
-data-backup-*/
 
 # Local config
 .env
@@ -17,7 +14,11 @@ node_modules/
 *.log
 .DS_Store
 node_modules
-
-# agent scratch plans
-.agent/
 .claude/
+.agents/
+.agent/
+
+# CI reports (test:* jobs write these next to the suites)
+junit.xml
+coverage/
+frontend/bundle-size.json

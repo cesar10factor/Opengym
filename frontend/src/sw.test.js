@@ -5,11 +5,13 @@
    running when the app is closed, which is exactly when its bugs happen and exactly when nobody is
    looking. It is loaded below as source and evaluated against a fake `self`.
 
-   What is pinned: an alert of a different kind is closed before the new one is painted (one
-   openGym notification at a time, rather than a tray that grows until dismissed by hand), a
-   same-tag one is left for showNotification to replace atomically, and — the invariant with teeth —
-   the notification is still shown even when the tray housekeeping fails. A delivered push that
-   paints nothing is what silently costs the subscription on iOS. */
+   What is pinned: the whole tray is cleared before painting a new alert (upstream's own fix for
+   issue #172 — iOS does not reliably replace a same-tag notification by itself — extended here to
+   also drop stale alerts of a different kind, so a "workout planned today" nobody dismissed is
+   never still sitting there once the rests start arriving); `navigate` is read from either payload
+   shape and is refused when it points off this origin; and — the invariant with teeth — the
+   notification is still shown even when the tray housekeeping fails. A delivered push that paints
+   nothing is what silently costs the subscription on iOS. */
 import fs from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -18,14 +20,18 @@ const SW_SRC = fs.readFileSync(path.resolve(import.meta.dirname, '../public/sw.j
 
 // `self`, `caches` and `location` arrive as function parameters, which shadow the real globals
 // inside the worker source without touching anything in this process.
-function loadSW({ open = [], getNotifications } = {}) {
+function loadSW({ open = [], getNotifications, clients = [] } = {}) {
   const handlers = {}
   const notifications = open.map(tag => ({ tag, close: vi.fn() }))
   const self = {
     addEventListener: (type, fn) => { handlers[type] = fn },
     skipWaiting: vi.fn(),
-    clients: { claim: vi.fn(), matchAll: vi.fn(() => Promise.resolve([])), openWindow: vi.fn() },
-    location: { href: 'https://gym.example/sw.js' },
+    clients: {
+      claim: vi.fn(),
+      matchAll: vi.fn(() => Promise.resolve(clients)),
+      openWindow: vi.fn()
+    },
+    location: { href: 'https://gym.example/', origin: 'https://gym.example' },
     registration: {
       showNotification: vi.fn(() => Promise.resolve()),
       getNotifications: getNotifications || vi.fn(() => Promise.resolve(notifications))
@@ -51,7 +57,10 @@ async function push(ctx, payload) {
   await Promise.all(pending)
 }
 
-const REST = { web_push: 8030, notification: { title: 'Rest over 💪', body: 'Bench press — set 3/4', tag: 'rest-timer', navigate: 'https://gym.example/#/workout' } }
+// The flat shape this server actually sends (api/server.js sendPush): no Declarative Web Push
+// envelope, so the service worker runs on every platform, including iOS — see the removal of the
+// `web_push: 8030` magic number, which is the whole point of this task.
+const REST = { title: 'Rest over 💪', body: 'Bench press — set 3/4', tag: 'rest-timer', navigate: '/#/workout' }
 
 describe('sw.js push handler — one openGym notification at a time', () => {
   it('closes an alert of a different kind before painting the new one', async () => {
@@ -64,24 +73,22 @@ describe('sw.js push handler — one openGym notification at a time', () => {
     expect(ctx.self.registration.showNotification.mock.calls[0][1].tag).toBe('rest-timer')
   })
 
-  it('leaves a same-tag alert alone — showNotification replaces that one itself', async () => {
-    // Closing it by hand first would blink the tray and throw away `renotify`.
+  it('also closes a same-tag alert already in the tray — iOS does not replace it by itself (#172)', async () => {
     const ctx = loadSW({ open: ['rest-timer'] })
 
     await push(ctx, REST)
 
-    expect(ctx.notifications[0].close).not.toHaveBeenCalled()
+    expect(ctx.notifications[0].close).toHaveBeenCalled()
     expect(ctx.self.registration.showNotification).toHaveBeenCalledTimes(1)
   })
 
-  it('closes several stale alerts at once, keeping only the new one', async () => {
+  it('closes every stale alert at once, whatever its tag', async () => {
     const ctx = loadSW({ open: ['day-reminder', 'test', 'rest-timer'] })
 
     await push(ctx, REST)
 
-    expect(ctx.notifications[0].close).toHaveBeenCalled()
-    expect(ctx.notifications[1].close).toHaveBeenCalled()
-    expect(ctx.notifications[2].close).not.toHaveBeenCalled()   // same tag as the incoming one
+    for (const n of ctx.notifications) expect(n.close).toHaveBeenCalled()
+    expect(ctx.self.registration.showNotification).toHaveBeenCalledTimes(1)
   })
 
   it('still shows the notification when the tray cannot be read', async () => {
@@ -105,12 +112,56 @@ describe('sw.js push handler — one openGym notification at a time', () => {
     expect(ctx.self.registration.showNotification.mock.calls[0][1].tag).toBe('opengym')
   })
 
-  it('still reads the old flat payload shape a stale server might send', async () => {
-    const ctx = loadSW({ open: ['day-reminder'] })
+  it('reads navigate from a nested `notification` payload too — old/new server, old/new worker', async () => {
+    const ctx = loadSW()
 
-    await push(ctx, { title: 'Rest over', body: 'next set', tag: 'rest-timer' })
+    await push(ctx, { notification: { title: 'Rest over', body: 'next set', tag: 'rest-timer', navigate: '/#/workout' } })
 
     expect(ctx.self.registration.showNotification.mock.calls[0][1].tag).toBe('rest-timer')
-    expect(ctx.notifications[0].close).toHaveBeenCalled()
+    expect(ctx.self.registration.showNotification.mock.calls[0][1].data.navigate).toBe('/#/workout')
+  })
+})
+
+describe('sw.js notificationclick — navigate never leaves this origin', () => {
+  function click(ctx, navigate) {
+    const pending = []
+    const notification = { close: vi.fn(), data: { navigate } }
+    ctx.handlers.notificationclick({ notification, waitUntil: p => pending.push(p) })
+    return Promise.all(pending)
+  }
+
+  it('opens a window at the relative path the payload carried', async () => {
+    const ctx = loadSW()
+
+    await click(ctx, '/#/workout')
+
+    expect(ctx.self.clients.openWindow).toHaveBeenCalledWith('https://gym.example/#/workout')
+  })
+
+  it('falls back to the app root when navigate points at another origin', async () => {
+    const ctx = loadSW()
+
+    await click(ctx, 'https://evil.example/phish')
+
+    expect(ctx.self.clients.openWindow).toHaveBeenCalledWith('https://gym.example/')
+  })
+
+  it('falls back to the app root when there is no navigate at all', async () => {
+    const ctx = loadSW()
+
+    await click(ctx, null)
+
+    expect(ctx.self.clients.openWindow).toHaveBeenCalledWith('https://gym.example/')
+  })
+
+  it('reuses an already-open window and steers it to the target, rather than opening a second one', async () => {
+    const win = { focus: vi.fn(() => win), navigate: vi.fn(() => Promise.resolve(win)), url: 'https://gym.example/' }
+    const ctx = loadSW({ clients: [win] })
+
+    await click(ctx, '/#/workout')
+
+    expect(ctx.self.clients.openWindow).not.toHaveBeenCalled()
+    expect(win.focus).toHaveBeenCalled()
+    expect(win.navigate).toHaveBeenCalledWith('https://gym.example/#/workout')
   })
 })
