@@ -208,6 +208,22 @@ function pushEndpointError(raw) {
   return null;
 }
 
+/* How long a push service may keep an alert it could not deliver yet, when the caller says
+   nothing. `web-push` defaults to FOUR WEEKS, and that default is what turned "no coverage in the
+   gym" into a batch of alerts arriving hours later, all at once, on the next app open. An
+   undeliverable push is not dropped, it is QUEUED — urgency only buys a faster attempt; TTL alone
+   decides when an alert stops being worth delivering. Each caller below passes its own TTL that
+   matches how long its alert stays true; this is only the fallback for one that doesn't. */
+const PUSH_TTL_DEFAULT_S = 60;
+
+/* The Topic header collapses the queue: a push replaces any undelivered one carrying the same
+   topic for that subscription, instead of stacking behind it. The tag is the right value because
+   it already means exactly that on screen — same tag, one notification, the newest wins — so
+   queue and tray agree. It is a belt to the TTL brace, for two rests in a row with no coverage.
+   web-push THROWS on a topic outside this alphabet or over 32 chars, and a throw here would cost
+   the notification itself, so a tag that doesn't qualify simply travels without a topic. */
+const PUSH_TOPIC_OK = /^[A-Za-z0-9\-_]{1,32}$/;
+
 // `deviceId` narrows the send to the subscriptions one browser registered (the rest-timer alert
 // belongs to the device that started the rest); a subscription stored without one — an older
 // client — still gets everything, as before.
@@ -215,7 +231,16 @@ async function sendPush(userId, payload, deviceId) {
   let subs = db.subs.filter(s => s.userId === userId);
   if (deviceId && subs.some(s => s.deviceId === deviceId)) subs = subs.filter(s => s.deviceId === deviceId);
   if (!subs.length) return;
-  const body = JSON.stringify(payload);
+  const tag = payload.tag || 'opengym';
+  // `ttl` is a delivery instruction for the push service, not notification content — it is read
+  // above and must not ride along inside the JSON the browser parses.
+  const { ttl: payloadTtl, ...content } = payload;
+  const body = JSON.stringify(content);
+  // Rounded and floored rather than trusted: web-push rejects a non-integer or negative TTL by
+  // throwing, which would turn a caller's typo into a silently missing notification.
+  const ttl = Number.isFinite(payloadTtl) ? Math.max(0, Math.round(payloadTtl)) : PUSH_TTL_DEFAULT_S;
+  const options = { urgency: 'high', timeout: PUSH_TIMEOUT_MS, agent: PUSH_AGENT, TTL: ttl };
+  if (PUSH_TOPIC_OK.test(tag)) options.topic = tag;
   let dirty = false;
   let next = 0;
   const worker = async () => {
@@ -229,14 +254,11 @@ async function sendPush(userId, payload, deviceId) {
         db.subs = db.subs.filter(s => s.endpoint !== sub.endpoint); dirty = true;
         continue;
       }
-      // urgency 'high' is the one lever we have over delivery speed — iOS/Android throttle
-      // low-urgency background push more aggressively under battery-saving modes. TTL is left
-      // at the library default (long) so a briefly-offline device still gets it once reconnected,
-      // rather than risking it being dropped for the sake of shaving off latency that TTL doesn't
-      // actually control anyway.
+      // urgency 'high' is the one lever we have over delivery SPEED — iOS/Android throttle
+      // low-urgency background push more aggressively under battery-saving modes. It says nothing
+      // about how long an undelivered alert survives; only TTL above decides that.
       try {
-        await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, body,
-          { urgency: 'high', timeout: PUSH_TIMEOUT_MS, agent: PUSH_AGENT });
+        await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, body, options);
       } catch (e) {
         console.error('push send failed', userId, e.statusCode, e.body || e.message);
         // 404/410: the push service says the subscription is gone. 403: it refuses our VAPID
@@ -261,13 +283,45 @@ async function sendPush(userId, payload, deviceId) {
 // In memory only — an API restart drops whatever is pending.
 const restTimers = new Map(); // `${userId}:${deviceId}` -> Timeout
 const restKey = (userId, deviceId) => `${userId}:${deviceId || ''}`;
-function scheduleRestTimer(userId, deviceId, sec, lang) {
+
+/* How late a rest alert may be and still be worth delivering. Rests themselves run 60-180s, so an
+   alert up to 2 minutes late still lands during the same exercise; past that the user is already
+   mid-next-set or gone, and a stale "rest over" is noise, not a reminder. This is also the TTL
+   handed to the push service: a push this server would refuse to fire itself once that late must
+   not be one a push service still delivers hours later from its queue. */
+const REST_TIMER_MAX_LATE_MS = 2 * 60 * 1000;
+
+/* The "what's next" line the client composes (frontend/src/lib/next-up.js) and ships with the
+   schedule request, e.g. "Bench press — set 3/4 · 8 reps × 60 kg". The server never builds it: it
+   knows neither the user's language nor the state of the workout.
+   It is USER CONTENT — the exercise name can be one the owner typed — so it is validated and
+   capped here rather than trusted, and it only ever becomes the `body` of a notification payload
+   (JSON-encoded plain text, never HTML). The cap is deliberately above the client's own NEXT_UP_MAX
+   (140): both phone OSes truncate a notification body long before either number, so this only
+   exists to stop an absurd string from bloating the push payload. */
+const REST_BODY_MAX = 160;
+function sanitizeRestBody(v) {
+  if (typeof v !== 'string') return '';                         // number, object, null — all "absent"
+  // Control characters (newlines included) have no meaning in a notification body and only serve
+  // to break log lines and layouts.
+  return v.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, REST_BODY_MAX);
+}
+
+function scheduleRestTimer(userId, deviceId, sec, lang, body) {
   const k = restKey(userId, deviceId);
   const t = restTimers.get(k);
   if (t) clearTimeout(t);
   restTimers.set(k, setTimeout(() => {
     restTimers.delete(k);
-    sendPush(userId, restTimerPush(lang), deviceId);
+    const msg = restTimerPush(lang);
+    sendPush(userId, {
+      ...msg,
+      ...(body ? { body } : {}),
+      ttl: REST_TIMER_MAX_LATE_MS / 1000,
+      // The app is a HashRouter (frontend/src/App.jsx), so the workout screen is at /#/workout —
+      // "/workout" would 404 into the app root and look like the deep link almost worked.
+      navigate: '/#/workout'
+    }, deviceId);
   }, sec * 1000));
 }
 function cancelRestTimer(userId, deviceId) {
@@ -314,6 +368,12 @@ function userNow(tz) {
 const REMINDER_WINDOW_MIN = 15;
 // How often the tick looks. 10 s keeps a reminder within ~9 s of its minute; the tests shorten it.
 const REMINDER_TICK_MS = Math.max(50, +(process.env.REMINDER_TICK_MS || 10000));
+// How long the "workout planned today" reminder stays worth delivering: long enough to survive a
+// morning with the phone in a dead zone, short enough that it can never arrive in the middle of
+// the night or on the following day — which for a reminder about TODAY would be actively
+// misleading, not merely late. REMINDER_WINDOW_MIN above stops it repeating; this stops a queued
+// copy of it turning up hours after the gym closed.
+const DAY_REMINDER_TTL_S = 3 * 3600;
 const hhmmToMin = v => {
   const m = /^(\d{2}):(\d{2})$/.exec(v || '');
   return m ? Number(m[1]) * 60 + Number(m[2]) : NaN;
@@ -355,7 +415,7 @@ setInterval(() => {
       console.log('reminder firing', user.id, rid);
       user.lastReminder = now.date;
       saveDb();
-      sendPush(user.id, dayReminderPush(S.lang, routine));
+      sendPush(user.id, { ...dayReminderPush(S.lang, routine), ttl: DAY_REMINDER_TTL_S });
     } catch (e) {
       console.error('reminder tick', user.id, e);
     }
@@ -1253,7 +1313,7 @@ const routes = {
     const n = typeof raw === 'number' || typeof raw === 'string' ? Number(raw) : NaN;
     if (!(n >= 1)) return json(res, 400, { error: 'seconds required' });
     const sec = Math.min(3600, Math.round(n));
-    scheduleRestTimer(user.id, deviceIdOf(body.deviceId), sec, readState(user.id)?.lang);
+    scheduleRestTimer(user.id, deviceIdOf(body.deviceId), sec, readState(user.id)?.lang, sanitizeRestBody(body.body));
     json(res, 200, { ok: true });
   },
 

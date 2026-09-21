@@ -31,29 +31,57 @@ self.addEventListener('activate', e => {
 // The payload is parsed inside waitUntil: a push whose handler throws before showing anything is
 // a "silent push", which Chrome counts against the site and eventually revokes. A body that is
 // not JSON still shows a notification.
+//
+// The payload itself may arrive flat (title/body/tag/navigate at the top level — what this server
+// sends) or nested under `notification` — a service worker already installed can be older than the
+// server sending to it, or newer than one not yet redeployed, and neither order may lose an alert.
 self.addEventListener('push', e => {
   e.waitUntil((async () => {
     let data = {}
     try { data = e.data ? e.data.json() : {} } catch { data = { body: (() => { try { return e.data.text() } catch { return '' } })() } }
-    // One alert per kind: a new rest-timer push replaces the last one instead of stacking
-    // up in the tray (issue #172). `tag` alone should do that, but iOS keeps every one, so
-    // the previous notification with the same tag is closed by hand first.
-    const tag = data.tag || 'opengym'
-    try { for (const n of await self.registration.getNotifications({ tag })) n.close() } catch {}
-    await self.registration.showNotification(data.title || 'openGym', {
-      body: data.body || '',
+    const n = (data && data.notification) || data || {}
+    const tag = n.tag || 'opengym'
+    // Every notification this app sends is about right now: a same-tag one was not reliably
+    // replaced by showNotification on iOS (issue #172), and an older, different-tag one (say a
+    // stale day-reminder still sitting there) is never worth keeping once a fresher alert exists.
+    // So the whole tray is cleared before painting the new one, rather than only the same tag.
+    // Wrapped: getNotifications() failing must never be allowed to cost the notification itself.
+    try { for (const old of await self.registration.getNotifications()) old.close() } catch {}
+    await self.registration.showNotification(n.title || 'openGym', {
+      body: n.body || '',
       icon: 'icon-512.png',
       badge: 'icon-180.png',
       tag,
-      renotify: true
+      renotify: true,
+      // Carried through so the click handler can go where the payload says, not always to root.
+      data: { navigate: n.navigate || null }
     })
   })())
 })
 self.addEventListener('notificationclick', e => {
   e.notification.close()
+  // `navigate` must never turn a notification into a redirect to somewhere else: same origin
+  // only, anything unusable falls back to the app root. The app is a HashRouter
+  // (frontend/src/App.jsx), so the workout screen is at /#/workout, not /workout.
+  let target = new URL('./', self.location.href).href
+  const raw = e.notification.data && e.notification.data.navigate
+  if (raw) {
+    try {
+      const u = new URL(raw, self.location.href)
+      if (u.origin === self.location.origin) target = u.href
+    } catch { /* keep the root fallback */ }
+  }
   e.waitUntil(self.clients.matchAll({ type: 'window' }).then(clients => {
     const c = clients.find(c => 'focus' in c)
-    return c ? c.focus() : self.clients.openWindow('./')
+    if (!c) return self.clients.openWindow(target)
+    // Reuse the window that is already open rather than a second copy of the app, and steer it to
+    // the target. `navigate` is unavailable on some clients, so a failure there leaves the
+    // existing window focused rather than dropping the click.
+    return Promise.resolve(c.focus()).then(w => {
+      const win = w || c
+      if (win.url === target || typeof win.navigate !== 'function') return win
+      return Promise.resolve(win.navigate(target)).catch(() => win)
+    })
   }))
 })
 // The push service rotated the subscription (key change, expiry): subscribe again with the same
