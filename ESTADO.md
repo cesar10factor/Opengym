@@ -485,8 +485,8 @@ aparte, arrancada desde upstream, sin fusionar a nada todavía.
 | # | Tarea | Rama | Estado | Modelo |
 |---|-------|------|--------|--------|
 | U0 | Copia de seguridad, etiqueta de retorno, rama desde upstream, línea base | `rebase/v1.3.7` | **hecho** (`6f17fe4`, sin fusionar) | orquestador |
-| U1 | Vinculación y gestión de dispositivos | `rebase/u1-linking` | **abierto — el siguiente** | Sonnet + revisión Opus |
-| U2 | Notificaciones | `rebase/u2-push` | abierto | Sonnet |
+| U1 | Vinculación y gestión de dispositivos | `rebase/u1-linking` | **hecho** (`739d845` en `rebase/v1.3.7`) | Sonnet + revisión Opus |
+| U2 | Notificaciones | `rebase/u2-push` | **abierto — el siguiente** | Sonnet |
 | U3 | Strava | `rebase/u3-strava` | abierto | Sonnet + revisión Opus |
 | U4 | Despliegue doméstico | `rebase/u4-deploy` | abierto | Haiku |
 | U5 | Migración de datos | `rebase/u5-data` | abierto | Sonnet |
@@ -627,6 +627,49 @@ Consecuencias para el resto del ciclo 6, ya comprobadas:
 U1–U6 para restaurar ficheros propios. `v1.2.9-fork-final` se conserva como punto de retorno de `main`
 anterior a este despliegue, pero **está incompleta**: no la uses para restaurar nada.
 
+### U1 (2026-09-21) — hallazgos
+
+Cifras: **api 256 tests / 239 pasan** (los 17 fallos siguen siendo los del entrenador IA de
+upstream, intactos) y **frontend 1599 / todos pasan**. La línea base era 193/176 y 1584.
+
+- **Los tests propios del fork NO se estaban ejecutando, y nadie lo habría notado.** Upstream movió
+  su suite a `api/test/` y `npm test` solo corre `test/*.test.js`; los ficheros de test propios
+  venían de la raíz de `api/`, donde el comando ya no mira. Se movieron a `api/test/` y se adaptaron
+  sus rutas al patrón de `test/server-pairing.test.js`. **Sin esto habríamos tenido 55 tests de
+  seguridad fantasma dando cobertura falsa.** Cualquier tarea que traiga tests del fork
+  (U2 y U3 traen muchos) tiene que comprobar que acaban en `api/test/` y que **el conteo total sube**.
+- **Dos agujeros que el fork tenía desde v1.2.9 y que la revisión Opus destapó.** No son regresiones
+  del rebase: estaban en producción.
+  1. **Un challenge de vinculación se podía canjear en `/api/register/verify`.** Ese challenge lleva
+     un `uid` real, así que la guarda `!c.uid` de upstream lo dejaba pasar: habría creado un usuario
+     duplicado y **sin quemar el código**. Arreglado con `|| c.link`.
+  2. **Carrera en el "un solo uso".** Entre validar el código y quemarlo había un
+     `await verifyRegistrationResponse`, así que dos canjes simultáneos del mismo código pasaban los
+     dos y plantaban dos credenciales. Ahora `redeemLink()` funde revalidar+quemar en una sola
+     llamada síncrona, invocada **después** del `await` y sin nada asíncrono hasta `db.creds.push`.
+- **Esa invariante está vigilada por una aserción sobre la forma del código**
+  (`link/verify keeps redeem and credential-insert in one synchronous run`), no por un test de
+  comportamiento: llegar a esa rama por HTTP exige una ceremonia WebAuthn real, así que un `await`
+  introducido ahí mañana dejaría las 256 pruebas en verde y la carrera volvería en silencio. Si
+  alguien reordena esa ruta, el test dirá exactamente por qué se queja.
+- **`user.disabled` no se comprobaba** en `link/options` ni `link/verify`, mientras todas las rutas
+  hermanas sí. Un código vivo de una cuenta recién deshabilitada plantaba una passkey **permanente**:
+  la sesión era inerte, pero al rehabilitar la cuenta el dispositivo entraba. Ahora se comprueba, con
+  el **mismo error genérico** para no distinguirlo de un código incorrecto.
+- **`logout/all` no revocaba los códigos de vinculación.** Upstream sí borra allí los de pairing, y
+  uno de vinculación es más potente (da credencial permanente, no un token). Es justo el botón que
+  se pulsa cuando crees que te han visto el código. Ya los borra, y un test comprueba que **no** toca
+  los de otros usuarios.
+- **El límite de intentos global tiene un coste que el comentario negaba.** Cualquiera sin sesión
+  puede mandar 10 cuerpos basura a `/api/link/options` y dejar la vinculación apagada 15 minutos,
+  repetible indefinidamente. **El diseño global se mantiene** (uno por código no contaría nada: quien
+  ataca prueba códigos inexistentes), pero el comentario de `api/link.js` ya no dice que salga gratis.
+- **`MOBILE` es un flag de compilación (`VITE_MOBILE`), no "el usuario va en un móvil".** Marca la
+  build de Capacitor. La sección de dispositivos se oculta con `!MOBILE && !DEMO`, lo cual **sí** la
+  muestra en la PWA del dueño. No confundir estas dos cosas al revisar UI en U2/U3.
+- La vinculación **convive** con `/api/pair/*` de upstream, que quedó intacto (verificado: las únicas
+  líneas tocadas en su vecindad son una coma de lista y las dos rutas nuevas en `CSRF_EXEMPT`).
+
 ## Registro
 
 | Fecha | Qué |
@@ -634,4 +677,5 @@ anterior a este despliegue, pero **está incompleta**: no la uses para restaurar
 | 2026-09-04 | Rama `develop` creada desde `main`. `PLAN.md` y `ESTADO.md` escritos. |
 | 2026-09-07 | Ciclo 4 planificado: `PLAN-NOTIFICACIONES.md`. N0 cerrado en el móvil. N1 fusionado. |
 | 2026-09-21 | Ciclo 6, U0 hecho: rama `rebase/v1.3.7` desde upstream v1.3.8, backup y etiqueta de retorno, línea base medida (1584 front / 176 de 193 api), stack de upstream verificado en Docker aislado sin tocar producción. |
+| 2026-09-21 | U1 hecho: vinculación y gestión de dispositivos sobre upstream v1.3.8 (`739d845`). Dos agujeros de seguridad del fork original destapados y cerrados. api 256/239, frontend 1599. |
 | 2026-09-21 | Arreglo del silenciado de Strava (`be89ea8`) rescatado de una rama suelta, fusionado a `develop` y desplegado a `main`. Etiqueta `v1.2.9-fork-strava` creada como el estado completo del fork para U1–U6. |
