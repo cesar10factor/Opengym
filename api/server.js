@@ -20,6 +20,12 @@ import { startWarmup } from './coach/warmup.js';
 import { dayReminderPush, restTimerPush, testPush } from './push-messages.js';
 import { verifyError } from './verify-error.js';
 import { createLink, validateLink, redeemLink, pruneLinks, recordFailure, isThrottled } from './link.js';
+import {
+  createState, signState, validateState, burnState, pruneStates,
+  needsRefresh, tokenFromExchange, tokenFromRefresh, isCompleteToken, hasRequiredScope,
+  classifyUploadStatus, UPLOAD_STATUS_SUCCESS, UPLOAD_STATUS_FAILURE,
+  activityIdFromUpload, nextMuteAttemptAt, muteIsExpired, MUTE_RETRY_BASE_MS, MUTE_MAX_AGE_MS
+} from './strava.js';
 
 const PORT = +(process.env.PORT || 3000);
 const DATA = process.env.DATA_DIR || '/data';
@@ -40,6 +46,73 @@ const ALLOW_GUEST = !/^(0|false|no|off)$/i.test(process.env.ALLOW_GUEST || '');
 // internet don't want the same number. Only affects cookies minted from now on — the expiry is
 // baked into each cookie when it's issued, so lowering this never cuts an existing session short.
 const SESSION_DAYS = Math.max(1, +(process.env.SESSION_DAYS || 90) || 90);
+// Strava OAuth (T11): both are required or the feature is fully OFF — an instance that doesn't
+// use Strava must not advertise it exists, so the five /api/strava/* routes below are only ever
+// added to the route table when STRAVA_ENABLED is true (see near the bottom of this file). A
+// half-configured instance (only one of the two set) is treated the same as neither being set.
+const STRAVA_CLIENT_ID = (process.env.STRAVA_CLIENT_ID || '').trim();
+const STRAVA_CLIENT_SECRET = (process.env.STRAVA_CLIENT_SECRET || '').trim();
+const STRAVA_ENABLED = !!(STRAVA_CLIENT_ID && STRAVA_CLIENT_SECRET);
+// Not a deployment knob — a testing hook. Every real instance leaves this at its default and talks
+// to the genuine Strava API; the integration suite points it at a local stub so the OAuth/token/
+// revoke round trips can be asserted deterministically and offline, without depending on a third
+// party's uptime or posting fabricated tokens to it. Trailing slash stripped so `base + '/oauth/x'`
+// never ends up with a doubled slash regardless of how the value was set.
+const STRAVA_API_BASE = (process.env.STRAVA_API_BASE || 'https://www.strava.com').trim().replace(/\/+$/, '');
+// OAuth (authorize/token/deauthorize) lives at the root of strava.com, but the REST API — uploads
+// and activities — is namespaced under /api/v3 (see https://developers.strava.com/docs/reference/:
+// base https://www.strava.com/api/v3, e.g. https://www.strava.com/api/v3/uploads). Derived from
+// STRAVA_API_BASE rather than a second env var, so pointing STRAVA_API_BASE at a local stub (tests)
+// still sends every call — oauth AND v3 — to that one server, just on different paths.
+const STRAVA_API_V3_BASE = STRAVA_API_BASE + '/api/v3';
+// Strava failing fast is not the dangerous case — every fetch below already has a catch/!r.ok
+// branch for that. Strava HANGING is: Node's fetch has no default timeout, and since the refresh
+// call now lives inside GET /api/strava/status (the route the Settings screen polls), a hung
+// upstream would otherwise hang that screen forever, not just fail it. 8s is long enough to
+// tolerate ordinary internet + API latency without spuriously timing out a slow-but-alive request,
+// short enough that a hung Strava is a bounded, user-visible delay instead of an indefinite one.
+// Configurable only so the test suite can shrink it to keep the "Strava hangs" test fast — a real
+// deployment should leave this at its default.
+const STRAVA_TIMEOUT_MS = +(process.env.STRAVA_TIMEOUT_MS || 8000) || 8000;
+// A 201 from POST /uploads means "accepted for processing", not "activity created" — Strava can
+// still destroy the activity during async processing afterwards (see uploadToStrava below). This
+// is how long to wait before the ONE follow-up poll of GET /uploads/{id} that checks whether that
+// already happened. 2s is "a couple of seconds": long enough that a small JSON manual-entry
+// activity (no GPS/streams to crunch) has usually moved off "still processing", short enough that
+// the added wait is not noticeable on top of the upload itself. Configurable only for the test
+// suite, same convention as STRAVA_TIMEOUT_MS above — a real deployment should leave it alone.
+const STRAVA_UPLOAD_POLL_DELAY_MS = +(process.env.STRAVA_UPLOAD_POLL_DELAY_MS || 2000) || 2000;
+// Mute uploaded activities: PUT /api/v3/activities/{id} { hide_from_home: true }, so a synced
+// workout does not land in followers' feeds.
+//
+// This is NOT privacy, and must not be described as if it were. Strava's API cannot set an
+// activity's visibility at all: POST /uploads has no such parameter (the old `private` flag was
+// removed in 2018) and UpdatableActivity — the body PUT /activities/{id} accepts — exposes only
+// name, description, type/sport_type, gear_id, commute, trainer and hide_from_home. A muted
+// activity is still visible on the athlete's profile to whoever can already see it; it just
+// doesn't get pushed into the feed. Real privacy is an account-level setting (Strava: Settings ->
+// Privacy Controls -> Activities), which no code here can reach.
+//
+// On by default — the whole point is "synced workouts are quiet by default" — and switched off
+// with STRAVA_HIDE_FROM_HOME=0 (also '', 'false', 'no', 'off').
+const STRAVA_HIDE_FROM_HOME = !/^(0|false|no|off)$/i.test(String(process.env.STRAVA_HIDE_FROM_HOME ?? '1').trim());
+// Muting needs the activity_id, which only exists once Strava has FINISHED processing the upload.
+// These are the extra polls taken inside the request (spaced by STRAVA_UPLOAD_POLL_DELAY_MS, same
+// bounded timeout each) to catch an id that had not appeared at the first poll, and they run ONLY
+// when muting is on and that first poll was inconclusive.
+//
+// They are an optimisation, not the mechanism: an upload still processing after them is queued and
+// muted later by the sweeper below. That distinction is the fix for the original bug — these polls
+// WERE the mechanism, so the many uploads Strava takes longer than ~6s to process were never muted
+// at all, silently, while the request reported a clean success.
+const STRAVA_MUTE_EXTRA_POLLS = Math.max(0, +(process.env.STRAVA_MUTE_EXTRA_POLLS ?? 2) || 0);
+// How often the pending-mute sweeper wakes to retry queued mutes, and the two bounds of the
+// per-entry schedule it applies (backoff from 15s; the whole entry abandoned after 30 minutes —
+// see strava.js). All three exist for the test suite, same convention as STRAVA_TIMEOUT_MS and
+// STRAVA_UPLOAD_POLL_DELAY_MS above: a real deployment leaves them alone.
+const STRAVA_MUTE_SWEEP_MS = Math.max(50, +(process.env.STRAVA_MUTE_SWEEP_MS || 15000) || 15000);
+const STRAVA_MUTE_RETRY_BASE_MS = Math.max(10, +(process.env.STRAVA_MUTE_RETRY_BASE_MS || MUTE_RETRY_BASE_MS) || MUTE_RETRY_BASE_MS);
+const STRAVA_MUTE_MAX_AGE_MS = Math.max(100, +(process.env.STRAVA_MUTE_MAX_AGE_MS || MUTE_MAX_AGE_MS) || MUTE_MAX_AGE_MS);
 const MAX_BODY = 5 * 1024 * 1024;
 // Secure cookies require HTTPS; over plain http://localhost the flag would drop the cookie
 const SECURE = /^https:/i.test(ORIGIN) ? ' Secure;' : '';
@@ -94,6 +167,156 @@ const stateFile = uid => path.join(DATA, 'state-' + uid.replace(/[^a-zA-Z0-9_-]/
 function readState(uid) {
   try { return JSON.parse(fs.readFileSync(stateFile(uid), 'utf8')); } catch { return null; }
 }
+
+/* ---------- Strava token storage (T11) ---------- */
+// One file per user, same pattern as stateFile above — NOT part of db.json, so a pre-Strava
+// db.json needs no migration at all: "connected" is simply "does this file exist". Mode 0600
+// because it holds access/refresh tokens — same treatment as secret/db.json above.
+const stravaFile = uid => path.join(DATA, 'strava-' + uid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
+function readStrava(uid) {
+  try { return JSON.parse(fs.readFileSync(stravaFile(uid), 'utf8')); } catch { return null; }
+}
+function writeStrava(uid, tok) { atomicWrite(stravaFile(uid), JSON.stringify(tok), 0o600); }
+function deleteStrava(uid) { try { fs.unlinkSync(stravaFile(uid)); } catch { /* already gone */ } }
+// Dedup store for uploaded workouts (T12): one file per user, same convention as stravaFile
+// above, holding a plain array of workout ids already sent to Strava. This is deliberately
+// server-side, not client state — client sync merges copies by `_rev` (see PUT /api/data), which
+// is exactly the wrong place to decide "have I already uploaded this": a phone can sync the same
+// workout twice (e.g. after a flaky connection retries a request whose response never arrived),
+// and two devices independently finishing the same workout must still upload it only once.
+const stravaUploadsFile = uid => path.join(DATA, 'strava-uploads-' + uid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
+// Returns the recorded ids, [] when the file does not exist yet, or NULL when it exists but
+// cannot be read. That third case must not collapse into [] : an unreadable file would then be
+// rewritten with a single id, silently discarding every previous upload and making the user's
+// whole history re-uploadable. Losing the ability to record one upload beats losing the record.
+function readStravaUploads(uid) {
+  let raw;
+  try { raw = fs.readFileSync(stravaUploadsFile(uid), 'utf8'); }
+  catch (e) { return e.code === 'ENOENT' ? [] : null; }
+  try {
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : null;
+  } catch { return null; }
+}
+function recordStravaUpload(uid, workoutId) {
+  const ids = readStravaUploads(uid);
+  if (ids === null) return false;          // refuse to overwrite what we could not read
+  if (!ids.includes(workoutId)) ids.push(workoutId);
+  // A transient write failure here (e.g. a Windows rename momentarily refused by another process
+  // touching ./data) must read exactly like the unreadable-file case above: false, not a thrown
+  // exception. The upload already reached Strava by this point — an exception here would bubble
+  // to the dispatcher as a 500, the client would retry, and that retry would be a genuine SECOND
+  // upload of the same workout, which is precisely what this store exists to prevent. The
+  // caller's fallback (external_id-based duplicate detection at Strava) is a second-order defence
+  // that depends on Strava's own wording, not something to rely on when the real record failed.
+  try { atomicWrite(stravaUploadsFile(uid), JSON.stringify(ids)); }
+  catch (e) { console.error('strava uploads write failed', uid, e.message); return false; }
+  return true;
+}
+// The recorded ids only land after Strava accepts the upload, so between the duplicate check and
+// that write there are two awaits (the token refresh and the upload itself) during which a second
+// request for the same workout would pass the same check and upload it again — precisely the
+// flaky-connection retry this store exists to stop. Reserving the id in memory for the duration
+// closes that window. Memory-only on purpose: a reservation that outlived a crash would block a
+// workout that never actually uploaded.
+const stravaInFlight = new Set();
+const inFlightKey = (uid, workoutId) => uid + ' ' + workoutId;
+
+/* ---------- pending mutes (T15) ---------- */
+// Muting an upload needs its activity_id, which only exists once Strava has FINISHED processing —
+// and Strava takes as long as it takes. The first version of this feature only ever tried inside
+// the upload request, across a handful of polls spanning a few seconds, and gave up silently when
+// the id had not appeared yet. That is the common case, not the rare one, which is why synced
+// workouts kept landing in the feed while the server reported a clean upload.
+//
+// So the mute outlives the request: anything not settled inline is written here and retried by the
+// sweeper below until it lands or ages out. One file per user, same convention as the stores
+// above, so nothing needs migrating — a user with no pending mutes simply has no file.
+const stravaMutesFile = uid => path.join(DATA, 'strava-mutes-' + uid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
+// Same "null means unreadable" contract as readStravaUploads, for the same reason in reverse: a
+// file we cannot parse must not be silently replaced by a fresh one, which would drop mutes that
+// are still pending. [] is "nothing pending", null is "do not touch this file".
+function readStravaMutes(uid) {
+  let raw;
+  try { raw = fs.readFileSync(stravaMutesFile(uid), 'utf8'); }
+  catch (e) { return e.code === 'ENOENT' ? [] : null; }
+  try {
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : null;
+  } catch { return null; }
+}
+// Writing [] removes the file rather than leaving an empty array behind, so "has pending work" is
+// answerable by a directory listing at boot (see loadPendingMuteUsers) instead of by opening every
+// user's file.
+function writeStravaMutes(uid, list) {
+  if (!list.length) { try { fs.unlinkSync(stravaMutesFile(uid)); } catch { /* already gone */ } return; }
+  atomicWrite(stravaMutesFile(uid), JSON.stringify(list));
+}
+// Queue one upload for a later mute attempt. Keyed by uploadId: a retry of the same workout that
+// produces the same upload must not queue a second entry racing the first.
+function queueStravaMute(uid, entry) {
+  const list = readStravaMutes(uid);
+  if (list === null) return false;
+  if (list.some(p => p.uploadId === entry.uploadId)) return true;
+  list.push(entry);
+  // Called from the upload route AFTER the upload is already recorded as done — muting is
+  // cosmetic (see STRAVA_HIDE_FROM_HOME above: hide_from_home is not privacy) and must never cost
+  // the workout. A transient write failure here (same EPERM-on-Windows class the sweeper's own
+  // write already guards against) must read as "could not queue the mute", not throw — throwing
+  // would 500 a request whose upload already succeeded and is already recorded, and the client's
+  // retry would upload a second copy to fix something that is only ever a feed-visibility detail.
+  try { writeStravaMutes(uid, list); }
+  catch (e) { console.error('strava mutes write failed', uid, e.message); return false; }
+  pendingMuteUsers.add(uid);
+  return true;
+}
+// Which users have pending mutes. Kept in memory so the sweeper's usual tick (nothing pending)
+// costs nothing at all, and seeded from disk at boot so a restart mid-flight resumes rather than
+// abandoning every mute the previous process had queued.
+const pendingMuteUsers = new Set();
+// The one place the configured schedule meets the pure one, so no caller has to remember to pass
+// both overrides.
+const muteAttemptAt = attempts => nextMuteAttemptAt(attempts, Date.now(), STRAVA_MUTE_RETRY_BASE_MS, STRAVA_MUTE_MAX_AGE_MS);
+// Recovering the uid from the filename is exact rather than lossy: user ids are base64url
+// (crypto.randomBytes(12).toString('base64url')), which is precisely the character set the path
+// sanitiser keeps, so the name in the file IS the uid. Cross-checked against the known users
+// anyway — a leftover or hand-dropped file must not conjure a uid the sweeper then chases.
+function loadPendingMuteUsers() {
+  let names;
+  try { names = fs.readdirSync(DATA); } catch { return; }
+  const known = new Set(db.users.map(u => u.id));
+  for (const name of names) {
+    const m = /^strava-mutes-(.+)\.json$/.exec(name);
+    if (m && known.has(m[1])) pendingMuteUsers.add(m[1]);
+  }
+}
+// Refreshes the stored token if it's expired (or close enough — see strava.js's REFRESH_MARGIN_MS)
+// and persists the new one.
+async function ensureFreshStravaToken(uid) {
+  const tok = readStrava(uid);
+  if (!tok) return null;
+  if (!needsRefresh(tok.expiresAt, Date.now())) return tok;
+  let r;
+  try {
+    r = await fetch(STRAVA_API_BASE + '/oauth/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: STRAVA_CLIENT_ID, client_secret: STRAVA_CLIENT_SECRET,
+        refresh_token: tok.refresh, grant_type: 'refresh_token'
+      }),
+      signal: AbortSignal.timeout(STRAVA_TIMEOUT_MS)
+    });
+    // A timeout throws here (AbortError), landing in the catch below exactly like any other
+    // network failure — the caller (GET /api/strava/status) already falls back to the stored
+    // token on any refresh failure, so a hung Strava degrades to "answer from the stale token"
+    // rather than hanging the caller.
+  } catch (e) { console.error('strava refresh failed', e.message); return null; }
+  if (!r.ok) { console.error('strava refresh failed', r.status); return null; }
+  const fresh = tokenFromRefresh(tok, await r.json());
+  writeStrava(uid, fresh);
+  return fresh;
+}
+
 // An entry is an object a reader can dereference, and `records` is every entry of a stored
 // list. PUT /api/data drops the rest on the way in — a null workout, a routine that is a
 // number — and refuses a list that is not an array at all, but a file written before it did
@@ -580,6 +803,17 @@ function takeChallenge(cid) {
 }
 setInterval(() => { for (const [k, v] of challenges) if (v.exp < Date.now()) challenges.delete(k); }, 60000).unref();
 
+/* ---------- Strava OAuth state store (in-memory, single-use — T11) ---------- */
+// Ties GET /api/strava/callback (unauthenticated) back to the user who started the flow at
+// GET /api/strava/connect. Kept in memory rather than in db.json/db.links: an OAuth redirect round
+// trip is seconds to minutes, never needs to survive a restart, and keeping it off disk means the
+// server's HMAC secret is the only thing that would have to leak for a forged state to matter. See
+// api/strava.js for the pure create/sign/validate/burn/prune logic this backs.
+let stravaStates = [];
+if (STRAVA_ENABLED) {
+  setInterval(() => { stravaStates = pruneStates(stravaStates, Date.now()); }, 60000).unref();
+}
+
 // ---------- device pairing (mobile app "connect to my server", no WebAuthn ceremony) ----------
 // A passkey ceremony can't run inside the app's WebView (its origin never matches RP_ID), so the
 // app authenticates by redeeming a short code minted from an already signed-in browser tab —
@@ -693,6 +927,9 @@ let auditCount = 0;
 // one source from another, not enough to point at a person.
 function clientIp(req) {
   if (AUDIT_IP === 'off') return null;
+  // Background work audits with no request at all (the pending-mute sweeper). "No request" means
+  // no IP, not a crash — audit() promises never to throw, and it calls straight into here.
+  if (!req || !req.headers) return null;
   const raw = String(req.headers['cf-connecting-ip'] || '').trim()
     || String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
     || String(req.headers['x-real-ip'] || '').trim()
@@ -1499,6 +1736,512 @@ const routes = {
   // a cycle. Every one of them is inert while the feature is unconfigured.
   ...coachRoutes({ json, readBody, readSession, requireAdmin })
 };
+
+/* ---------- Strava OAuth + upload (T11/T12/T14/T15) ----------
+   Only added to the route table when STRAVA_ENABLED — an unregistered key falls straight through
+   the dispatcher's existing 404 below, so a Strava-less instance never even discloses these paths
+   exist. Tokens (access/refresh) NEVER appear in any response here, and NEVER go into audit(). */
+if (STRAVA_ENABLED) {
+  routes['GET /api/strava/connect'] = async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    const now = Date.now();
+    stravaStates = pruneStates(stravaStates, now);
+    // One active state per user, same as /api/link/code's "only one active code per user" — an
+    // authenticated caller re-hitting /connect repeatedly must not be able to pile up entries for
+    // the whole 10-minute TTL (a quadratic prune cost on top of an unbounded array).
+    stravaStates = stravaStates.filter(s => s.uid !== user.id);
+    const state = createState(user.id, now);
+    stravaStates.push(state);
+    const token = signState(SECRET, state);
+    const authUrl = new URL(STRAVA_API_BASE + '/oauth/authorize');
+    authUrl.searchParams.set('client_id', STRAVA_CLIENT_ID);
+    authUrl.searchParams.set('redirect_uri', ORIGIN + '/api/strava/callback');
+    authUrl.searchParams.set('response_type', 'code');
+    authUrl.searchParams.set('approval_prompt', 'auto');
+    authUrl.searchParams.set('scope', 'activity:write');
+    authUrl.searchParams.set('state', token);
+    res.writeHead(302, { Location: authUrl.toString() });
+    res.end();
+  };
+
+  // No session here on purpose — the user is arriving back from strava.com with no cookie of ours.
+  // The signed, single-use `state` param is what stands in for a session on this one request.
+  routes['GET /api/strava/callback'] = async (req, res) => {
+    const q = new URL(req.url, 'http://x').searchParams;
+    const now = Date.now();
+    const result = validateState(stravaStates, SECRET, q.get('state'), now);
+    if (!result.ok) {
+      // Logged, not audited: this route is reachable with no session at all (see the header
+      // comment above), and a bad `state` is exactly what anyone can produce just by guessing —
+      // same reasoning as csrfOk's refusal above. An audit entry per attempt would let a bare
+      // curl loop against ?state=x expire the audit log's legitimate old entries out from under
+      // AUDIT_MAX, which is a way to erase the trace of an earlier real incident, not a cost worth
+      // eating for a request nobody has proven anything about yet. Once `state` itself validates
+      // (below) the caller has demonstrated they hold a token this server actually signed — not
+      // reachable by guessing — so failures past that point ARE audited.
+      console.warn('strava callback: invalid state', 'reason=' + result.reason);
+      return json(res, 400, { error: 'invalid or expired state' });
+    }
+    // Burn immediately, before the network exchange: a replay attempt arriving while the first
+    // request is still in flight must not find the nonce still usable.
+    stravaStates = burnState(stravaStates, result.nonce);
+    const user = db.users.find(u => u.id === result.uid);
+    if (!user) {
+      audit(req, 'strava.connect.fail', { ok: false, uid: result.uid, msg: 'user-missing' });
+      return json(res, 400, { error: 'user missing' });
+    }
+    // Strava sends `?error=access_denied` (no `code`) when the user declines consent.
+    const code = q.get('code');
+    if (!code) {
+      // Deliberately not logging Strava's `error` query param verbatim: it's caller-supplied text
+      // on an unauthenticated route, and audit() only truncates at 120 chars rather than
+      // whitelisting content — a fixed reason code keeps the log free of arbitrary external input.
+      audit(req, 'strava.connect.fail', { ok: false, user, msg: 'no-code' });
+      return json(res, 400, { error: 'authorization was not completed' });
+    }
+    // Strava's consent screen lets the user untick individual permissions; `scope` reports what
+    // was actually granted. Checked BEFORE the network round trip below, and refused with a
+    // specific, actionable message — this is the one place a specific error is right, because the
+    // caller here is the user's own consent choice, not an attacker probing the endpoint.
+    if (!hasRequiredScope(q.get('scope'))) {
+      audit(req, 'strava.connect.fail', { ok: false, user, msg: 'scope-denied' });
+      return json(res, 400, {
+        error: 'Debes conceder el permiso "Subir tus datos de actividad" (activity:write) en Strava para conectar tu cuenta. Vuelve a intentarlo y no lo desmarques en la pantalla de autorización.'
+      });
+    }
+    let tokenRes;
+    try {
+      tokenRes = await fetch(STRAVA_API_BASE + '/oauth/token', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: STRAVA_CLIENT_ID, client_secret: STRAVA_CLIENT_SECRET,
+          code, grant_type: 'authorization_code'
+        }),
+        signal: AbortSignal.timeout(STRAVA_TIMEOUT_MS)
+      });
+    } catch (e) {
+      // A timeout throws (AbortError) and lands here exactly like any other network failure: a
+      // failed connection, nothing persisted — the same outcome as Strava answering with an error.
+      audit(req, 'strava.connect.fail', { ok: false, user, msg: 'exchange-error' });
+      return json(res, 502, { error: 'strava exchange failed' });
+    }
+    if (!tokenRes.ok) {
+      audit(req, 'strava.connect.fail', { ok: false, user, msg: 'exchange-' + tokenRes.status });
+      return json(res, 502, { error: 'strava exchange failed' });
+    }
+    const data = await tokenRes.json();
+    const tok = tokenFromExchange(data);
+    // A 200 with an unexpected/incomplete body must never be persisted as a real connection — that
+    // would leave /status reporting connected:true with a null athleteId, and a later disconnect
+    // would send a null access_token to Strava.
+    if (!isCompleteToken(tok)) {
+      audit(req, 'strava.connect.fail', { ok: false, user, msg: 'incomplete-token' });
+      return json(res, 502, { error: 'strava exchange failed' });
+    }
+    writeStrava(user.id, tok);
+    audit(req, 'strava.connected', { user });
+    res.writeHead(302, { Location: ORIGIN + '/' });
+    res.end();
+  };
+
+  routes['POST /api/strava/disconnect'] = async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    const tok = readStrava(user.id);
+    if (tok) {
+      // Revoking must never block disconnecting: a broken/expired token, a network hiccup, or a
+      // hung upstream (see STRAVA_TIMEOUT_MS) would otherwise leave the user unable to disconnect
+      // a link that's already useless — or waiting on Strava just to click "disconnect".
+      // Strava's /oauth/deauthorize takes access_token as a request parameter (query string), NOT
+      // a JSON body — see https://developers.strava.com/docs/authentication/#deauthorization. A
+      // JSON body there gets no access_token at all and Strava answers 401.
+      try {
+        const revokeUrl = new URL(STRAVA_API_BASE + '/oauth/deauthorize');
+        revokeUrl.searchParams.set('access_token', tok.access);
+        const r = await fetch(revokeUrl, { method: 'POST', signal: AbortSignal.timeout(STRAVA_TIMEOUT_MS) });
+        if (!r.ok) console.error('strava revoke returned', r.status);
+      } catch (e) { console.error('strava revoke failed', e.message); }
+      deleteStrava(user.id);
+      audit(req, 'strava.disconnected', { user });
+    } else {
+      deleteStrava(user.id); // no-op if nothing was there, but harmless and idempotent
+    }
+    json(res, 200, { ok: true });
+  };
+
+  // Refreshes on read when the stored token is at or past REFRESH_MARGIN_MS out — this is the one
+  // place in T11 that actually exercises ensureFreshStravaToken over HTTP (T12's upload route is
+  // the other). A failed refresh attempt (network hiccup, Strava briefly down) must not read as
+  // "disconnected" for someone who is genuinely still linked, so that case falls back to the token
+  // on disk as-is rather than reporting connected:false.
+  routes['GET /api/strava/status'] = async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    const fresh = await ensureFreshStravaToken(user.id);
+    if (fresh) return json(res, 200, { connected: true, athleteId: fresh.athleteId });
+    const stale = readStrava(user.id);
+    json(res, 200, { connected: !!stale, athleteId: stale ? stale.athleteId : null });
+  };
+
+  // POST /api/strava/upload (T12): the phone builds the JSON body (frontend/src/lib/
+  // strava-payload.js — it owns the exercise data and the exercise_type mapping), and this route
+  // only attaches the token and forwards it. The client secret never reaches the browser, and the
+  // browser never sees an access/refresh token — same split as every other route in this file.
+  //
+  // Dedup is enforced HERE, not trusted from the client: client sync merges copies by `_rev` (see
+  // PUT /api/data above), which is exactly the wrong place to decide "have I already uploaded
+  // this" — a phone can sync the same workout twice (e.g. a retried request after a flaky
+  // connection), and two devices independently finishing the same workout must still upload it
+  // only once. The duplicate check runs BEFORE any token refresh or network call — a repeat upload
+  // of an already-recorded workout never reaches Strava at all.
+  //
+  // A failure at Strava (network, timeout, or a non-2xx response) is surfaced with its reason and
+  // the workout id is NEVER recorded — marking on failure would silently lose that workout for
+  // good, since the client only retries what the server hasn't already claimed as done.
+  routes['POST /api/strava/upload'] = async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    const body = await readBody(req);
+    const workoutId = typeof body.workoutId === 'string' ? body.workoutId.trim() : '';
+    const payload = body.payload;
+    if (!workoutId) return json(res, 400, { error: 'workoutId required' });
+    if (!payload || typeof payload !== 'object' || !Array.isArray(payload.sets) || !payload.sets.length) {
+      return json(res, 400, { error: 'invalid payload' });
+    }
+
+    const already = readStravaUploads(user.id);
+    if (already === null) {
+      // Uploading now would risk a duplicate we could never record. Say so rather than guessing.
+      audit(req, 'strava.upload.fail', { ok: false, user, msg: 'uploads-file-unreadable' });
+      return json(res, 500, { error: 'upload history unreadable — not uploading, to avoid a duplicate' });
+    }
+    if (already.includes(workoutId)) return json(res, 200, { ok: true, duplicate: true });
+
+    // A collision with a request already in flight for this exact workoutId is NOT the same
+    // thing as "already uploaded" — it means "still being decided", and since T14 that window
+    // is no longer ~0s: the request in flight may be 2s (poll delay) + up to STRAVA_TIMEOUT_MS
+    // (the poll itself) away from an answer, during which it can still end in a genuine failure
+    // (a deleted activity) that records nothing. Answering this the same way as the `already`
+    // branch above — 200 { ok: true, duplicate: true } — would have the caller mark the workout
+    // uploaded before that outcome is even known, which is wrong whenever the in-flight request
+    // goes on to fail. A non-2xx response here is deliberately NOT treated as "done" by the one
+    // caller in this codebase (frontend/src/lib/api.js's api() throws on any non-ok response,
+    // and store/useStore.js only calls markStravaUploaded on success) — it lands as a real,
+    // counted attempt with a quiet retry-later toast instead, same as any other failed upload.
+    const key = inFlightKey(user.id, workoutId);
+    if (stravaInFlight.has(key)) {
+      return json(res, 409, { error: 'an upload for this workout is already in progress — try again shortly', inFlight: true });
+    }
+    stravaInFlight.add(key);
+    try {
+      return await uploadToStrava(req, res, user, workoutId, payload);
+    } finally {
+      stravaInFlight.delete(key);
+    }
+  };
+
+  // Split out only so the reservation above can wrap it in try/finally — everything from the token
+  // refresh onward lives here.
+  async function uploadToStrava(req, res, user, workoutId, payload) {
+    const tok = await ensureFreshStravaToken(user.id);
+    if (!tok) return json(res, 409, { error: 'not connected to strava' });
+
+    let r;
+    try {
+      // /uploads is a multipart/form-data POST: the training document travels as the `file` part,
+      // and data_type and sport_type are sibling FORM FIELDS, not keys inside that document.
+      // Sending the document as a JSON body with those two mixed into it — the shape this started
+      // as — is not a request Strava accepts, and it fails in a way no test against our own stub
+      // can see, because a stub written to match our code agrees with our code by construction.
+      //
+      // Rebuild the document from named fields rather than forwarding the client's object: the
+      // browser is authenticated but the server should not be an open proxy into the caller's own
+      // Strava account, where an injected `name`, `description` or `creator` would land.
+      const doc = {
+        version: '1.0',                      // a string, per the upload docs, not the number 1.0
+        start_time: payload.start_time,
+        utc_offset: payload.utc_offset,
+        elapsed_time: payload.elapsed_time,
+        sets: payload.sets.map(s => {
+          const out = { exercise_type: s.exercise_type };
+          if (typeof s.repetitions === 'number') out.repetitions = s.repetitions;
+          if (typeof s.weight === 'number') out.weight = s.weight;
+          if (typeof s.duration === 'number') out.duration = s.duration;
+          return out;
+        })
+      };
+      // The file part's filename becomes this upload's external_id unless overridden — Strava's own
+      // docs: "data filename will be used by default but should be a unique identifier", and it is
+      // this id, not the 201 from POST /uploads, that Strava uses to recognise (or reject) an
+      // activity during its async processing. A constant name here ("workout.json" on every
+      // upload) means every upload shares one external_id: once the first activity under that id is
+      // deleted, Strava associates the identifier itself with "deleted" and immediately kills every
+      // later upload that reuses it — silently, since /uploads still answers 201 either way.
+      //
+      // workoutId is the stable, per-activity identifier this route already has (assigned once,
+      // client-side, when the workout is created). Deriving the filename from it means a RETRY of
+      // the same failed workout keeps the same external_id (so Strava can recognise a retried
+      // upload rather than filing a duplicate), while two different workouts always get two
+      // different ones.
+      //
+      // Sanitised because workoutId rides in from the client as a free-form string (only checked
+      // for non-empty), and it is about to become both a filename and a multipart header value.
+      const safeWorkoutId = workoutId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 200) || 'workout';
+      const form = new FormData();
+      form.set('file', new Blob([JSON.stringify(doc)], { type: 'application/json' }), `opengym-${safeWorkoutId}.json`);
+      form.set('data_type', 'json');
+      // Which of Strava's four JSON-eligible activity types this is. Every session this app logs
+      // is weight training, so it is a constant rather than something the client gets to choose.
+      // Left unset, Strava guesses from the data, and a strength session filed as something else
+      // defeats the point of uploading it.
+      form.set('sport_type', 'WeightTraining');
+      r = await fetch(STRAVA_API_V3_BASE + '/uploads', {
+        method: 'POST',
+        // No Content-Type here on purpose: fetch derives it from the FormData, including the
+        // multipart boundary. Setting it by hand produces a header with no boundary and a body
+        // Strava cannot parse.
+        headers: { Authorization: 'Bearer ' + tok.access },
+        body: form,
+        signal: AbortSignal.timeout(STRAVA_TIMEOUT_MS)
+      });
+    } catch (e) {
+      audit(req, 'strava.upload.fail', { ok: false, user, msg: 'network-error' });
+      return json(res, 502, { error: 'strava upload failed: ' + e.message });
+    }
+
+    let data = null;
+    try { data = await r.json(); } catch { /* not every response body is JSON */ }
+
+    if (!r.ok) {
+      audit(req, 'strava.upload.fail', { ok: false, user, msg: 'upload-' + r.status });
+      const reason = (data && (data.message || data.error)) || ('strava responded ' + r.status);
+      return json(res, 502, { error: 'strava upload failed: ' + reason });
+    }
+
+    // The 201 above only means "Strava accepted this for processing" — NOT "the activity exists".
+    // Processing is async and can still destroy the activity afterwards (observed live: a 201'd
+    // upload was deleted moments later). GET /uploads/{id} carries the real outcome, so poll it
+    // ONCE — after a short delay, inside its own bounded timeout, no retry loop — and use the
+    // result ONLY to decide whether to record. Anything short of a clear answer (still processing,
+    // or the poll itself failing) records exactly as before: that's no worse than today's
+    // behaviour, and refusing to record something Strava may still accept would risk uploading the
+    // same workout twice on the client's next retry.
+    let finalData = data;
+    let pollBody = null;
+    let verdict = null; // null covers "no id to poll" and "poll inconclusive" alike
+    const uploadId = data && data.id != null ? data.id : null;
+
+    // One GET /uploads/{id}. Returns the parsed body, or null for every flavour of "no answer"
+    // (network error, the poll's own timeout, a non-2xx, a body that isn't JSON) — all of which
+    // are inconclusive in exactly the same way and fall through to "record as today".
+    const pollUpload = async () => {
+      try {
+        const pollRes = await fetch(STRAVA_API_V3_BASE + '/uploads/' + encodeURIComponent(uploadId), {
+          headers: { Authorization: 'Bearer ' + tok.access },
+          signal: AbortSignal.timeout(STRAVA_TIMEOUT_MS)
+        });
+        if (!pollRes.ok) return null;
+        try { return await pollRes.json(); } catch { return null; } // not every response body is JSON
+      } catch (e) {
+        audit(req, 'strava.upload.poll-failed', { ok: false, user, msg: e.message });
+        return null;
+      }
+    };
+    const applyPoll = body => {
+      if (!body) return;
+      pollBody = body;
+      verdict = classifyUploadStatus(body);
+      // Only replace the response's `upload` body on a confirmed success — that's the one case
+      // where the poll body is strictly more informative (it carries the real activity_id).
+      // Anything else (still processing, or a failure handled separately below) keeps
+      // reporting the original 201 body, unchanged from before this poll existed.
+      if (verdict === UPLOAD_STATUS_SUCCESS) finalData = body;
+    };
+
+    if (uploadId != null) {
+      await new Promise(resolve => setTimeout(resolve, STRAVA_UPLOAD_POLL_DELAY_MS));
+      applyPoll(await pollUpload());
+      // Extra polls exist for MUTING, not for the record decision: hide_from_home needs the
+      // activity_id, and an upload still being processed at the first poll has none yet. They run
+      // only while muting is on and nothing is decided — a verdict of success (we have the id) or
+      // failure (there is nothing to mute) stops immediately, and with muting off none run at all,
+      // leaving the single-poll behaviour exactly as it was.
+      //
+      // One knock-on, deliberate: a later poll that turns FAILURE is honoured like the first one
+      // (502, not recorded, so the client retries). That is the same judgement the first poll
+      // already made — an activity Strava deleted during processing must never be recorded as
+      // uploaded — applied to a verdict that simply arrived a few seconds later.
+      for (let i = 0; STRAVA_HIDE_FROM_HOME && i < STRAVA_MUTE_EXTRA_POLLS
+        && verdict !== UPLOAD_STATUS_SUCCESS && verdict !== UPLOAD_STATUS_FAILURE; i++) {
+        await new Promise(resolve => setTimeout(resolve, STRAVA_UPLOAD_POLL_DELAY_MS));
+        applyPoll(await pollUpload());
+      }
+    }
+
+    if (verdict === UPLOAD_STATUS_FAILURE) {
+      // Strava accepted the 201 and then killed the activity during processing. Do NOT record —
+      // the client must retry this workout later — and surface why, same error shape as a
+      // rejected 201 above. The reason comes from the POLL body (the real outcome), never from
+      // the original 201 body, which only ever said "accepted" or "still processing".
+      audit(req, 'strava.upload.fail', { ok: false, user, msg: 'poll-failure' });
+      const reason = (pollBody && (pollBody.error || pollBody.status)) || 'strava deleted the created activity during processing';
+      return json(res, 502, { error: 'strava upload failed: ' + reason });
+    }
+
+    // Terminal success (activity_id confirmed), still processing, or an inconclusive/failed poll
+    // all land here — every one of those records exactly as before this change. If the record
+    // cannot be written now (the file went unreadable between the check above and here), say so
+    // rather than reporting a clean success: the upload happened and a later retry WOULD duplicate
+    // it, which is the one thing the caller needs to know.
+    const recorded = recordStravaUpload(user.id, workoutId);
+    audit(req, 'strava.uploaded', { user, msg: recorded ? null : 'not-recorded' });
+
+    // Muting is the LAST thing that happens, and it is best-effort by construction: the upload has
+    // already succeeded and been recorded by this point, so a mute that fails (Strava down, the
+    // activity_id never showed up, a rejected PUT) must never turn a landed workout into an error
+    // the client would retry — that retry would upload a second copy to fix a cosmetic problem.
+    //
+    // What "best-effort" must NOT mean is "attempted once and forgotten", which is what it meant
+    // before and why muting didn't work: an upload Strava was still processing had no activity_id
+    // to mute, so the mute was skipped and never revisited. Now anything unsettled here is queued
+    // for the sweeper, and `muted` reports which of the three actually happened.
+    const body200 = { ok: true, upload: finalData, recorded };
+    if (STRAVA_HIDE_FROM_HOME) {
+      const id = activityIdFromUpload(finalData);
+      if (id !== null && await muteStravaActivity(user, tok, id)) {
+        body200.muted = true;
+      } else if (uploadId != null) {
+        // Not settled inline. Queue it rather than reporting a clean "no": the activity exists (or
+        // is about to), and the sweeper will keep at it for the next half hour.
+        const queued = queueStravaMute(user.id, {
+          uploadId, activityId: id, attempts: 1,
+          firstAt: Date.now(), nextAt: muteAttemptAt(0)
+        });
+        audit(req, 'strava.mute.pending', { ok: queued, user, msg: id === null ? 'no-activity-id' : 'mute-failed' });
+        body200.muted = false;
+        body200.mutePending = queued;
+      } else {
+        // No upload id at all, so there is nothing to poll for later either. Genuinely done.
+        audit(req, 'strava.mute.skipped', { ok: false, user, msg: 'no-upload-id' });
+        body200.muted = false;
+      }
+    }
+    json(res, 200, body200);
+  }
+
+  // PUT /api/v3/activities/{id} { hide_from_home: true } — keeps a synced workout out of
+  // followers' feeds. See STRAVA_HIDE_FROM_HOME at the top of this file for what this does and,
+  // more importantly, what it does NOT do (it is not privacy; the API cannot set visibility).
+  //
+  // Returns true only when Strava confirmed the change, false on any refusal or network failure,
+  // and never throws — every caller treats a failure as "try again later", not as an error to
+  // propagate. `user` is used only for the audit line; this is deliberately NOT request-scoped,
+  // because the sweeper calls it with no request at all.
+  async function muteStravaActivity(user, tok, id) {
+    try {
+      const r = await fetch(STRAVA_API_V3_BASE + '/activities/' + encodeURIComponent(id), {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer ' + tok.access, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hide_from_home: true }),
+        signal: AbortSignal.timeout(STRAVA_TIMEOUT_MS)
+      });
+      if (!r.ok) {
+        audit(null, 'strava.mute.fail', { ok: false, user, msg: 'mute-' + r.status });
+        return false;
+      }
+      return true;
+    } catch (e) {
+      audit(null, 'strava.mute.fail', { ok: false, user, msg: e.message });
+      return false;
+    }
+  }
+
+  // One GET /uploads/{id}, outside any request. Same "null means inconclusive" contract as the
+  // in-request poll; separate because that one closes over the request's token and upload id.
+  async function pollUploadOnce(tok, uploadId) {
+    try {
+      const r = await fetch(STRAVA_API_V3_BASE + '/uploads/' + encodeURIComponent(uploadId), {
+        headers: { Authorization: 'Bearer ' + tok.access },
+        signal: AbortSignal.timeout(STRAVA_TIMEOUT_MS)
+      });
+      if (!r.ok) return null;
+      try { return await r.json(); } catch { return null; }
+    } catch { return null; }
+  }
+
+  // One attempt at one pending mute. Returns true when the entry is finished with — muted, or
+  // abandoned because there is nothing left to mute — and false when it should be retried.
+  async function attemptPendingMute(uid, pending) {
+    const user = { id: uid };
+    const tok = await ensureFreshStravaToken(uid);
+    // No token means the user disconnected Strava since uploading. Their activity is no longer
+    // ours to edit, and no amount of retrying will get it back — drop the entry.
+    if (!tok) { audit(null, 'strava.mute.gaveup', { ok: false, user, msg: 'not-connected' }); return true; }
+
+    let id = pending.activityId;
+    if (id === null || id === undefined) {
+      const body = await pollUploadOnce(tok, pending.uploadId);
+      // A poll that says the activity was deleted during processing is terminal: there is nothing
+      // left to hide. Anything else inconclusive just means "still processing" — retry.
+      if (body && classifyUploadStatus(body) === UPLOAD_STATUS_FAILURE) {
+        audit(null, 'strava.mute.gaveup', { ok: false, user, msg: 'upload-failed' });
+        return true;
+      }
+      id = activityIdFromUpload(body);
+      if (id === null) return false;
+      pending.activityId = id;                 // remembered so a failed PUT doesn't re-poll
+    }
+    if (!await muteStravaActivity(user, tok, id)) return false;
+    audit(null, 'strava.muted', { user, msg: 'attempt-' + (pending.attempts || 1) });
+    return true;
+  }
+
+  // The sweeper. Walks the users with queued mutes, retries the entries that are due, and drops
+  // the ones that are done or too old. unref'd so it never holds the process open, and re-entrancy
+  // guarded so a slow Strava can't stack overlapping sweeps on top of each other.
+  let sweeping = false;
+  async function sweepPendingMutes() {
+    if (sweeping || !pendingMuteUsers.size) return;
+    sweeping = true;
+    try {
+      for (const uid of [...pendingMuteUsers]) {
+        const list = readStravaMutes(uid);
+        if (list === null) continue;           // unreadable — leave it alone, try again next tick
+        if (!list.length) { pendingMuteUsers.delete(uid); continue; }
+        const now = Date.now();
+        const keep = [];
+        for (const pending of list) {
+          if (muteIsExpired(pending, now, STRAVA_MUTE_MAX_AGE_MS)) {
+            audit(null, 'strava.mute.gaveup', { ok: false, user: { id: uid }, msg: 'expired' });
+            continue;
+          }
+          if (pending.nextAt > now) { keep.push(pending); continue; }
+          pending.attempts = (pending.attempts || 0) + 1;
+          let done = false;
+          try { done = await attemptPendingMute(uid, pending); }
+          catch { done = false; }              // never let one entry take the sweeper down
+          if (done) continue;
+          pending.nextAt = muteAttemptAt(pending.attempts);
+          keep.push(pending);
+        }
+        // A transient disk error here (e.g. a rename momentarily refused by another process
+        // touching ./data) must not take the whole sweeper — and with it every pending mute for
+        // every other user — down with it. Same "never let one entry cost more than itself"
+        // discipline as the attemptPendingMute try/catch above: the in-memory queue is left
+        // exactly as it was, so the next tick reads the (still accurate, on-disk) list and simply
+        // retries the write.
+        try { writeStravaMutes(uid, keep); if (!keep.length) pendingMuteUsers.delete(uid); }
+        catch (e) { console.error('strava mutes write failed', uid, e.message); }
+      }
+    } finally { sweeping = false; }
+  }
+
+  if (STRAVA_HIDE_FROM_HOME) {
+    loadPendingMuteUsers();
+    setInterval(() => { sweepPendingMutes(); }, STRAVA_MUTE_SWEEP_MS).unref();
+  }
+}
 
 /* ---------- Coach: boot recovery, notifications, scheduled reviews ---------- */
 // A job that was running when the process died is not coming back; say so rather than leaving
