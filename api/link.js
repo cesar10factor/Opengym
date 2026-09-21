@@ -13,17 +13,11 @@ const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const CODE_LEN = 8;
 const LINK_TTL_MS = 15 * 60 * 1000;
 
-// A per-code attempt counter (the original design here) only ever punishes the legitimate owner
-// re-submitting their own correct code — an attacker guessing codes that don't exist finds no
-// matching link to increment, so the counter never rises for them. The throttle below is keyed
-// to nothing but the clock instead: every failure, real code or not, counts against one
-// instance-wide budget. It is deliberately global, not per-code and not per-IP, so it can't be
-// evaded by rotating addresses or by trying a different guessed code.
-//
-// Accepted trade-off, not a free one: anyone, unauthenticated, can send MAX_FAILS bad requests
-// and hold linking off the whole instance for FAIL_WINDOW, repeatably and at no cost to them —
-// a real denial-of-service surface. Kept anyway because linking is rare and per-code/per-IP
-// limits are each worse (see above), but this is a cost paid, not a cost avoided.
+// Per-code attempts only punish legitimate users (attackers guessing codes that don't exist
+// never increment any counter). The throttle is instance-wide instead: one global budget,
+// rejected only on clock time, to prevent DoS via rotating IPs or guessed codes. Trade-off:
+// anyone can spam bad requests and briefly block the instance, but linking is rare enough it
+// is not the primary DoS surface, and per-code/per-IP limits are worse. See the original logic.
 export const MAX_FAILS = 10;
 export const FAIL_WINDOW = 15 * 60 * 1000;
 
@@ -89,18 +83,10 @@ export function burnLink(links, code) {
   return links.filter(l => !codesMatch(normalize(l.code), norm));
 }
 
-// Combines the revalidate-then-burn step into one call so a caller cannot accidentally split it
-// across an `await` (security review, 2026-09-21): /api/link/verify's WebAuthn ceremony has to
-// `await verifyRegistrationResponse()` between checking whether the code is still redeemable and
-// planting the credential it authorizes. If that check ran on its own, two concurrent verify
-// calls for the same code (each with its own /api/link/options-minted cid, e.g. an accidental
-// double-tap or a race against a stale browser tab) could both see the code still alive before
-// either had burned it, and both would go on to add a credential — one code, two permanent
-// passkeys. redeemLink() is synchronous and returns the post-burn array in the same call as the
-// check, so a caller that invokes it right after its own await, with nothing else async in
-// between, gets an atomic "was this still good, and now it's spent" — the second concurrent
-// caller's own post-await call always sees the first one's burn already applied, because Node
-// never preempts a synchronous run to interleave the two.
+// Combines validate-then-burn into one synchronous call to prevent race conditions (security
+// review, 2026-09-21). Between validation and burn, a second concurrent WebAuthn flow for the
+// same code could see it still valid and add a second credential. redeemLink() atomically
+// validates and burns, so the second caller always sees the burn already applied.
 export function redeemLink(links, code, uid, now) {
   const result = validateLink(links, code, now);
   if (!result.ok || result.uid !== uid) return { ok: false, reason: result.ok ? 'uid-mismatch' : result.reason, links };

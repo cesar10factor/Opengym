@@ -1,25 +1,7 @@
 #!/usr/bin/env node
-/* Migrates one account's state file from the fork's routine-rest field to the upstream v1.3.8
- * shape.
- *
- * The fork stored a routine exercise's own rest time in `rest` (seconds, on the exercise object
- * itself, e.g. `routine.ex[i].rest`). Upstream calls that field `restSec` (see
- * frontend/src/lib/plan-share.js and frontend/src/lib/supersetFlow.js). Left unmigrated, every
- * routine silently loses its per-exercise rest override and falls back to the global `restSec`.
- *
- * Semantics of `rest: 0`: the fork used it to mean "no rest, don't start a timer". Upstream's
- * `restSecFor` (frontend/src/lib/supersetFlow.js) treats `restSec > 0` as "set", anything else
- * as "not set, use the global default" — there is no way to express "explicitly zero" in the
- * upstream shape, and the owner's decision (2026-09-21) is to accept that: an exercise with
- * `rest: 0` simply loses the field and inherits the profile's global rest. The same applies to
- * any `rest` that isn't a finite positive number (missing, null, '', boolean, negative, NaN,
- * text): the field is dropped rather than carried over.
- *
- * This script never writes over its input. It reads one JSON file and writes a different one;
- * if the destination already exists, it refuses to overwrite it silently.
- *
- * Usage:
- *   node scripts/migrate-to-v137.mjs <input-state.json> <output-state.json>
+/* Migrates fork's routine `rest` (per-exercise seconds) to upstream v1.3.8's `restSec`.
+ * Only finite positive numbers migrate; zero/invalid rest is dropped (inherits global restSec).
+ * Usage: node scripts/migrate-to-v137.mjs <input-state.json> <output-state.json>
  */
 
 import fs from 'node:fs';
