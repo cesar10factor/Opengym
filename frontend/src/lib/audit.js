@@ -32,7 +32,13 @@ const LABELS = {
   'admin.invite.create': 'Created an invite code',
   'admin.invite.revoke': 'Revoked an invite code',
   'admin.audit.clear': 'Cleared the activity log',
-  'admin.denied': 'Blocked from the admin dashboard'
+  'admin.denied': 'Blocked from the admin dashboard',
+  // Device linking (Settings → "Link another device"): the code is minted on the existing
+  // profile's device and redeemed, unauthenticated, on the new one — see api/link.js.
+  'link.code.created': 'Created a device-linking code',
+  'link.ok': 'Linked a device',
+  'link.fail': 'Device linking failed',
+  'device.removed': 'Removed a passkey'
 }
 // An unknown event is shown raw rather than dropped or rendered as "undefined": a dashboard
 // that is one version behind the server should still say *something* truthful.
@@ -49,7 +55,9 @@ const REASONS = {
   'invite-invalid': 'the invite code was used or revoked in the meantime',
   'invite-rejected': 'wrong or already-used invite code',
   'code-invalid': 'wrong or expired pairing code',
-  'user-unavailable': 'the profile behind the pairing code is disabled or gone'
+  'user-unavailable': 'the profile behind the pairing code is disabled or gone',
+  'throttled': 'too many recent failed attempts — linking is temporarily locked',
+  'code-revoked': 'the linking code was replaced or expired before the passkey was confirmed'
 }
 export const auditReason = msg => REASONS[msg] || (msg ? String(msg) : '')
 

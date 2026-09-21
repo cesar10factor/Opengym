@@ -45,6 +45,12 @@ vi.mock('../store/useUI.js', () => {
 vi.mock('react-router-dom', () => ({ useNavigate: () => () => {} }))
 vi.mock('../lib/api.js', () => ({
   api: (...a) => mocks.api(...a), webauthnOK: () => false, passkeyLogin: vi.fn(), passkeyRegister: vi.fn(), IS_ANDROID: false,
+  // Settings now mounts a Devices card whenever signed in (T3's DevicesCard), which fetches this
+  // on mount independent of anything this suite cares about ("Reset everything") — resolved with
+  // nothing so that effect doesn't blow up with an unmocked export.
+  linkCode: vi.fn(() => Promise.resolve({ code: 'AAAA-AAAA', exp: Date.now() + 900000 })),
+  listDevices: vi.fn(() => Promise.resolve({ devices: [] })),
+  removeDevice: vi.fn(() => Promise.resolve({ ok: true })),
 }))
 vi.mock('../lib/push.js', () => ({ pushSupported: () => false, enablePush: vi.fn(), disablePush: vi.fn(), sendTestPush: vi.fn() }))
 vi.mock('../lib/wakelock.js', () => ({ wakeLockSupported: () => false }))

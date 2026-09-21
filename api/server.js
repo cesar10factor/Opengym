@@ -19,6 +19,7 @@ import { startCadence } from './coach/cadence.js';
 import { startWarmup } from './coach/warmup.js';
 import { dayReminderPush, restTimerPush, testPush } from './push-messages.js';
 import { verifyError } from './verify-error.js';
+import { createLink, validateLink, redeemLink, pruneLinks, recordFailure, isThrottled } from './link.js';
 
 const PORT = +(process.env.PORT || 3000);
 const DATA = process.env.DATA_DIR || '/data';
@@ -68,6 +69,10 @@ let db = { users: [], creds: [], subs: [], invites: [] };
 try { db = JSON.parse(fs.readFileSync(dbFile, 'utf8')); } catch {}
 db.subs = db.subs || [];
 db.invites = db.invites || [];
+// Device-linking codes and their failure clock — additive, so an older db.json without them just
+// starts empty rather than throwing. See api/link.js for the pure logic these back.
+db.links = db.links || [];
+db.linkFails = db.linkFails || [];
 const isAdmin = user => !!user && (user.admin === true || ADMIN_UIDS.includes(user.id));
 // 0600: db.json holds passkey credential material. It used to be covered by a blanket 0700 on
 // the whole directory; now that the directory stays traversable, the file carries its own mode.
@@ -76,6 +81,14 @@ function atomicWrite(file, content, mode) {
   const tmp = file + '.tmp';
   fs.writeFileSync(tmp, content, mode ? { mode } : undefined);
   fs.renameSync(tmp, file);
+}
+// Drop any link codes that expired while the server was down, and persist that immediately —
+// but only if something was actually pruned, so an old db.json with no `links` key at all (see
+// api/link.integration.test.js) is not force-rewritten on a boot that had nothing to clean up.
+{
+  const prunedAtBoot = pruneLinks(db.links, Date.now());
+  if (prunedAtBoot.length !== db.links.length) { db.links = prunedAtBoot; saveDb(); }
+  else db.links = prunedAtBoot;
 }
 const stateFile = uid => path.join(DATA, 'state-' + uid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
 function readState(uid) {
@@ -463,7 +476,11 @@ const clearCookie = COOKIE === LEGACY_COOKIE
 const CSRF_EXEMPT = new Set([
   'POST /api/register/options', 'POST /api/register/verify',
   'POST /api/login/options', 'POST /api/login/verify',
-  'POST /api/pair/redeem'
+  'POST /api/pair/redeem',
+  // Same shape as register/login options+verify: unauthenticated, no ambient cookie session to
+  // forge with, and the code/challenge carried in the body IS the credential — a device that has
+  // never signed in yet is exactly what these two exist for.
+  'POST /api/link/options', 'POST /api/link/verify'
 ]);
 const originsMatch = (a, b) => a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
 function csrfOk(req, key) {
@@ -724,7 +741,14 @@ const routes = {
   'POST /api/register/verify': async (req, res) => {
     const body = await readBody(req);
     const c = takeChallenge(body.cid);
-    if (!c || !c.uid) {
+    // A challenge minted by /api/link/options also carries a `uid` (the existing user being
+    // linked to), so `!c.uid` alone does not tell the two kinds apart. Without the `c.link` check
+    // a link challenge could be redeemed here instead: no redeemLink ever runs (that only happens
+    // on the link route), so the code stays reusable for its whole TTL, AND db.users gets a
+    // second row reusing that uid (with name undefined, since register challenges carry `name`
+    // and link challenges don't) — corrupting every id-keyed lookup (readSession, /api/me, admin
+    // listing). Each route must only ever accept a challenge minted by its own *-options route.
+    if (!c || !c.uid || c.link) {
       audit(req, 'auth.register.fail', { ok: false, msg: 'challenge-expired' });
       return json(res, 400, { error: 'challenge expired — try again' });
     }
@@ -853,6 +877,10 @@ const routes = {
     user.sv = sessionVersion(user) + 1;
     // An unredeemed pairing code is a session-in-waiting for this account; it goes too.
     for (const [k, v] of pairings) if (v.uid === user.id) pairings.delete(k);
+    // A live link code is stronger than a pairing code — redeeming it plants a permanent passkey,
+    // not just a session — so "sign out everywhere" (pressed exactly when a code may have been
+    // seen or a device stolen) has to revoke it too.
+    db.links = db.links.filter(l => l.uid !== user.id);
     saveDb();
     audit(req, 'auth.logout.all', { user });
     json(res, 200, { ok: true }, { 'Set-Cookie': clearCookie });
@@ -887,6 +915,220 @@ const routes = {
     }
     audit(req, 'auth.pair.ok', { user });
     json(res, 200, { token: makeSession(user), user: { id: user.id, name: user.name, admin: isAdmin(user) } });
+  },
+
+  /* ---------- device linking ---------- */
+  // Adds a second (or third...) passkey to an EXISTING account, so a new device can reach the
+  // same profile without creating a fresh one. See api/link.js for the pure code/throttle logic —
+  // single-use is enforced here, not there: the success path below must call redeemLink().
+  // INVITE_ONLY deliberately does not apply here — linking never creates a profile, it only adds
+  // a credential to one that already exists. Not the same thing as /api/pair/* above: pairing
+  // hands the Capacitor app a Bearer token for an account it can already reach, and never touches
+  // WebAuthn; this attaches a brand-new passkey to a profile from a device that has never signed
+  // in before.
+
+  'POST /api/link/code': async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    const now = Date.now();
+    db.links = pruneLinks(db.links, now);
+    db.links = db.links.filter(l => l.uid !== user.id);   // only one active code per user
+    let link;
+    do { link = createLink(user.id, now); } while (db.links.some(l => l.code === link.code));
+    db.links.push(link);
+    saveDb();
+    audit(req, 'link.code.created', { user });
+    json(res, 200, { code: link.code, exp: link.exp });
+  },
+
+  'POST /api/link/options': async (req, res) => {
+    const now = Date.now();
+    // Checked before the code is even looked at: an attacker who has exhausted the budget gets
+    // the exact same response whether their guess was close or nonsense.
+    if (isThrottled(db.linkFails, now)) {
+      // Audited but NOT counted against the budget (no recordFailure here): counting it would let
+      // an attacker hold the lockout open forever just by keeping requests coming, permanently
+      // denying the legitimate owner any chance to link a device. The budget only grows from
+      // genuine attempts to guess a code; once it's blown, further hammering is free to observe
+      // (for the operator, via this audit line) but costs the attacker nothing further and gains
+      // them nothing either.
+      audit(req, 'link.fail', { ok: false, msg: 'throttled' });
+      return json(res, 400, { error: 'invalid or expired code' });
+    }
+    // fail() is defined before the body is even parsed so a malformed JSON body (readBody rejects)
+    // can be routed through it too — otherwise it would fall through to the generic dispatcher
+    // catch and come back as a differently-shaped error, and (worse) not count as a failure at all.
+    const fail = reason => {
+      db.linkFails = recordFailure(db.linkFails, now);
+      saveDb();
+      audit(req, 'link.fail', { ok: false, msg: reason });
+      return json(res, 400, { error: 'invalid or expired code' });
+    };
+    let body;
+    try { body = await readBody(req); } catch { return fail('bad-json'); }
+    // Deliberately not pruning db.links here: pruning first would turn an expired code into
+    // 'not-found' before validateLink ever sees it, blurring the audit reason. The HTTP response
+    // is identical either way (see fail() above) — expired links are cleaned up by /api/link/code
+    // and at server start-up instead.
+    const result = validateLink(db.links, body.code, now);
+    if (!result.ok) return fail(result.reason);
+    const user = db.users.find(u => u.id === result.uid);
+    if (!user) return fail('user-missing'); // orphaned link (owner deleted) — same generic error
+    // Same generic error as any other dead code — same shape as /api/pair/redeem's `!user ||
+    // user.disabled` check — so a caller can't tell "disabled" apart from "wrong/expired code".
+    // Without this, disabling an account with a live link code (up to 15 min old) would leave
+    // that code redeemable: the session it mints would be inert while disabled stays set, but
+    // the passkey it plants in db.creds is permanent and would work again the moment the account
+    // is re-enabled.
+    if (user.disabled) return fail('account-disabled');
+    const excludeCredentials = db.creds
+      .filter(c => c.userId === user.id)
+      .map(c => ({ id: c.id, transports: c.transports || [] }));
+    const options = await generateRegistrationOptions({
+      rpName: RP_NAME, rpID: RP_ID,
+      userID: Buffer.from(user.id), userName: user.name, userDisplayName: user.name,
+      attestationType: 'none',
+      authenticatorSelection: { residentKey: 'required', userVerification: 'preferred' },
+      excludeCredentials
+    });
+    // The code itself rides along on the challenge so /api/link/verify can burn it on success —
+    // the challenge is the only thing tying this WebAuthn ceremony back to that one-time code.
+    const cid = putChallenge({ challenge: options.challenge, uid: user.id, link: true, code: body.code });
+    json(res, 200, { cid, options });
+  },
+
+  'POST /api/link/verify': async (req, res) => {
+    const body = await readBody(req);
+    const c = takeChallenge(body.cid);
+    if (!c || !c.uid || !c.link) {
+      audit(req, 'link.fail', { ok: false, msg: 'challenge-expired' });
+      return json(res, 400, { error: 'challenge expired — try again' });
+    }
+    // A cheap early exit, NOT the enforcement point (that's the redeemLink() call below, after
+    // the crypto verification): the challenge's own 5-minute TTL is independent of the code's, so
+    // a code the owner has since replaced (POST /api/link/code drops the old one) or that simply
+    // expired can still have a live, unexpired challenge sitting on it. Catching that here, before
+    // spending a WebAuthn verification on a credential that can never be attached to anything,
+    // also keeps the response the same generic "invalid or expired code" instead of whatever
+    // verifyRegistrationResponse would have said about a credential that was never going anywhere.
+    const preCheck = validateLink(db.links, c.code, Date.now());
+    if (!preCheck.ok || preCheck.uid !== c.uid) {
+      audit(req, 'link.fail', { ok: false, uid: c.uid, msg: 'code-revoked' });
+      return json(res, 400, { error: 'invalid or expired code' });
+    }
+    let verification;
+    try {
+      verification = await verifyRegistrationResponse({
+        response: body.credential,
+        expectedChallenge: c.challenge,
+        expectedOrigin: ORIGIN,
+        expectedRPID: RP_ID,
+        requireUserVerification: false
+      });
+    } catch (e) {
+      audit(req, 'link.fail', { ok: false, uid: c.uid, msg: 'verify-error' });
+      return json(res, 400, { error: verifyError(e, { rpId: RP_ID, origin: ORIGIN }) });
+    }
+    if (!verification.verified) {
+      audit(req, 'link.fail', { ok: false, uid: c.uid, msg: 'not-verified' });
+      return json(res, 400, { error: 'not verified' });
+    }
+    // Everything from here to the redeemLink() call below is synchronous — no `await` in between
+    // — and that is load-bearing, not incidental. /api/link/options never burns a code (only a
+    // SUCCESSFUL verify does), so two concurrent /api/link/verify calls for the same code, each
+    // with its own cid from its own /api/link/options round trip, both reach this point having
+    // each awaited their own verifyRegistrationResponse. If the liveness check ran before that
+    // await (as an earlier version of this route did) both would see the code still alive and
+    // both would succeed, planting two credentials off one "single-use" code. redeemLink() folds
+    // the recheck and the burn into one call so this route can't split them across an await by
+    // accident again — see its comment in api/link.js.
+    const { credential } = verification.registrationInfo;
+    if (db.creds.find(x => x.id === credential.id)) {
+      // Code is deliberately NOT burned here: the device didn't get linked, so the owner should
+      // still be able to use their code again (e.g. after fixing whatever went wrong).
+      audit(req, 'link.fail', { ok: false, uid: c.uid, msg: 'credential-exists' });
+      return json(res, 409, { error: 'credential already registered' });
+    }
+    const user = db.users.find(u => u.id === c.uid);
+    if (!user) {
+      audit(req, 'link.fail', { ok: false, uid: c.uid, msg: 'user-missing' });
+      return json(res, 400, { error: 'user missing' });
+    }
+    // Same generic error as any other dead code (see /api/link/options) — an account disabled
+    // after the code was minted must not still be linkable, and the response gives no more away
+    // than "invalid or expired code" does anywhere else on this route. Not burned either: this is
+    // a dead end for the caller, same as credential-exists above, not a spent attempt.
+    if (user.disabled) {
+      audit(req, 'link.fail', { ok: false, uid: c.uid, msg: 'account-disabled' });
+      return json(res, 400, { error: 'invalid or expired code' });
+    }
+    // The atomic recheck-and-burn (see the comment above and api/link.js's redeemLink): a second,
+    // concurrent /api/link/verify for this same code that gets here after this one has already
+    // returned false — its own redeemLink() call sees the code gone and bails out here, before
+    // ever reaching db.creds.push below.
+    const redeemed = redeemLink(db.links, c.code, c.uid, Date.now());
+    if (!redeemed.ok) {
+      audit(req, 'link.fail', { ok: false, uid: c.uid, msg: 'code-revoked' });
+      return json(res, 400, { error: 'invalid or expired code' });
+    }
+    db.links = redeemed.links;
+    // No db.users.push here — this is the whole point of linking: attach a credential to the
+    // EXISTING profile instead of minting a new one.
+    db.creds.push({
+      id: credential.id, userId: user.id,
+      publicKey: Buffer.from(credential.publicKey).toString('base64url'),
+      counter: credential.counter || 0,
+      transports: body.credential?.response?.transports || [],
+      created: new Date().toISOString()
+    });
+    saveDb();
+    audit(req, 'link.ok', { user });
+    json(res, 200, { user: { id: user.id, name: user.name, admin: isAdmin(user) } }, { 'Set-Cookie': sessionCookie(user) });
+  },
+
+  /* ---------- device management ---------- */
+  // "current" (which credential the active session was established with) is deliberately NOT
+  // included: the session cookie payload is `<uid>:<exp>:<sv>` (see makeSession) and carries no
+  // credential id, and neither /api/login/verify nor /api/link/verify record anywhere which
+  // credential minted a given cookie. Wiring that up would mean changing the cookie payload
+  // shape, which touches the behaviour of the login/link routes — out of scope here. So every
+  // device is returned without a `current` field rather than a guessed one.
+  'GET /api/devices': async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    const devices = db.creds
+      .filter(c => c.userId === user.id)
+      .map(c => ({ id: c.id, created: c.created || null, transports: c.transports || [] }));
+    json(res, 200, { devices });
+  },
+
+  // Revokes one of the caller's own passkeys, e.g. after selling/losing the device it lives on.
+  // Path parameters aren't a thing this dispatcher supports (routes are matched by exact
+  // "METHOD pathname" string, since url.pathname excludes the query string — see the bottom of
+  // this file), so the credential id travels as a query string param instead.
+  'DELETE /api/devices': async (req, res) => {
+    const user = readSession(req);
+    if (!user) return json(res, 401, { error: 'not signed in' });
+    const id = new URL(req.url, 'http://x').searchParams.get('id');
+    const cred = db.creds.find(c => c.id === id && c.userId === user.id);
+    // Doesn't exist, or belongs to someone else — identical response either way so a caller can
+    // never use this to probe whether a credential id exists on another account.
+    if (!cred) return json(res, 404, { error: 'no such device' });
+    const mine = db.creds.filter(c => c.userId === user.id);
+    // A profile with zero credentials can never be signed into again — that must be impossible
+    // to do by accident, so the last one is refused outright rather than left to the client.
+    if (mine.length <= 1) return json(res, 409, { error: 'cannot remove your only device' });
+    // Both fields, not just id: credential ids are unique in practice today (both
+    // creation paths reject an id that already exists globally, see /api/register/verify and
+    // /api/link/verify), but that uniqueness is an invariant maintained elsewhere in this file,
+    // not something this route should lean on. Filtering by id alone would delete a same-id row
+    // under ANY user if that invariant were ever broken (hand-edited db.json, a future importer,
+    // a restored/merged backup) — including another user's, silently, straight past the
+    // ownership check above.
+    db.creds = db.creds.filter(c => !(c.id === cred.id && c.userId === user.id));
+    saveDb();
+    audit(req, 'device.removed', { user });
+    json(res, 200, { ok: true });
   },
 
   // `rev` is the server's own count of writes to this profile (also stored inside the document as

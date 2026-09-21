@@ -102,3 +102,27 @@ export async function passkeyLogin() {
   const res = await api('/api/login/verify', { method: 'POST', body: JSON.stringify({ cid, credential: credToJSON(cred) }) })
   return res.user
 }
+// Generates a one-time code for the signed-in user (old device). Requires a session — the
+// server reads the uid from the cookie, not from the body.
+export async function linkCode() {
+  return api('/api/link/code', { method: 'POST', body: '{}' })
+}
+// Redeems a code on a new device: fetches WebAuthn registration options for the existing
+// profile behind the code, creates a passkey, and verifies it — attaching the credential to
+// that profile instead of creating a new one.
+export async function linkDevice(code) {
+  const { cid, options } = await api('/api/link/options', { method: 'POST', body: JSON.stringify({ code }) })
+  const cred = await navigator.credentials.create({ publicKey: toCreationOptions(options) })
+  const res = await api('/api/link/verify', { method: 'POST', body: JSON.stringify({ cid, credential: credToJSON(cred) }) })
+  return res.user
+}
+// Lists the signed-in profile's passkeys ({ id, created, transports } each — no `current`
+// flag: the session cookie never records which credential signed it in).
+export async function listDevices() {
+  return api('/api/devices')
+}
+// Revokes one passkey by credential id. 404 if it isn't yours (or doesn't exist), 409 if it's
+// the profile's last one — both surface as a rejected promise with a readable e.message.
+export async function removeDevice(id) {
+  return api('/api/devices?id=' + encodeURIComponent(id), { method: 'DELETE' })
+}
