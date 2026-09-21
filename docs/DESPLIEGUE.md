@@ -162,8 +162,20 @@ el teléfono todavía en la mano.
 2. Copia `Client ID` y `Client Secret` a `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET` en `.env`
    (ver `.env.production.example` para el bloque completo comentado).
 3. Reinicia: `docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d`.
-4. Desde el perfil, en Ajustes, conecta la cuenta de Strava (autoriza el ámbito `activity:write`
-   cuando Strava lo pida) — la subida en sí de un entrenamiento es una tarea aparte del plan.
+4. Desde el perfil, en Ajustes, conecta la cuenta de Strava. Strava pedirá **dos** permisos y hay
+   que conceder **los dos**: subir actividades (`activity:write`) y ver todas tus actividades
+   (`activity:read_all`). **No desmarques ninguno.**
+
+   > **Por qué hacen falta los dos, que no es evidente.** Strava concede editar una actividad
+   > «según el nivel de acceso de lectura»: con solo `activity:write` la app sube perfectamente y
+   > **no ve ninguna actividad**, así que ocultarla del feed responde `404` siempre. El síntoma es
+   > engañoso —las subidas salen bien— y solo se ve en Ajustes → Admin, como `strava.mute.fail`
+   > con `mute-404`. Es `read_all` y no `read` porque una actividad puesta en «Sólo tú» es
+   > invisible para `activity:read`, y quien ajusta esa opción es justo quien quiere ocultarlas.
+   >
+   > **Si ya tenías Strava conectado de antes, desconecta y vuelve a conectar.** Un token ya
+   > emitido conserva los permisos que se concedieron entonces; ampliar el ámbito en el código no
+   > cambia los tokens viejos.
 
 **Por qué es opcional y va al final:** no depende de nada de lo anterior salvo tener ya `ORIGIN`
 fijado (paso 2) y el stack respondiendo (paso 3) — el callback de Strava tiene que apuntar a una

@@ -282,22 +282,37 @@ describe('isCompleteToken', () => {
 });
 
 describe('hasRequiredScope', () => {
-  it('the exact required scope alone is sufficient', () => {
+  it('the exact required scopes alone are sufficient', () => {
     assert.equal(hasRequiredScope(REQUIRED_SCOPE), true);
   });
 
-  it('the required scope among others (either order) is sufficient', () => {
-    assert.equal(hasRequiredScope('read,activity:write'), true);
-    assert.equal(hasRequiredScope('activity:write,read'), true);
+  it('the required scopes among others, in any order, are sufficient', () => {
+    assert.equal(hasRequiredScope('read,activity:write,activity:read_all'), true);
+    assert.equal(hasRequiredScope('activity:read_all,read,activity:write'), true);
   });
 
   it('whitespace around comma-separated scopes is tolerated', () => {
-    assert.equal(hasRequiredScope('read, activity:write'), true);
+    assert.equal(hasRequiredScope('read, activity:write, activity:read_all'), true);
   });
 
-  it('missing the required scope is refused', () => {
+  it('missing either required scope is refused', () => {
     assert.equal(hasRequiredScope('read'), false);
     assert.equal(hasRequiredScope('read,activity:read_all'), false);
+  });
+
+  // The bug this pair of assertions exists to prevent from coming back. Write alone uploads
+  // perfectly well and then cannot hide anything: Strava scopes editing an activity by the READ
+  // access level, so with no read scope the app sees no activities and every hide_from_home PUT
+  // answers 404 — silently, for as long as nobody checks. Plain activity:read is refused too,
+  // because it cannot see an activity set to "Only You", which is precisely the person most
+  // likely to want their workouts kept out of the feed.
+  it('write alone is refused — it uploads but can never edit', () => {
+    assert.equal(hasRequiredScope('activity:write'), false);
+    assert.equal(hasRequiredScope('read,activity:write'), false);
+  });
+
+  it('plain activity:read is not accepted in place of activity:read_all', () => {
+    assert.equal(hasRequiredScope('activity:write,activity:read'), false);
   });
 
   it('empty, null or undefined scope is refused, not treated as granted', () => {

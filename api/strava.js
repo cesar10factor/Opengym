@@ -214,8 +214,19 @@ export function muteIsExpired(pending, now, maxAgeMs = MUTE_MAX_AGE_MS) {
 // Strava's consent screen lets the user untick individual permissions; the callback's `scope`
 // query param reports what was actually granted (comma-separated), which can be narrower than
 // what /connect asked for. Checked here, purely, so the HTTP route can refuse BEFORE spending a
-// network round trip on the token exchange for a grant that can never upload anything anyway.
-export const REQUIRED_SCOPE = 'activity:write';
+// network round trip on the token exchange for a grant that can never do the job anyway.
+//
+// BOTH are required, and the read one is not optional decoration. Strava's own wording for
+// activity:write is "access to create manual activities and uploads, and access to edit any
+// activities that are visible to the app, BASED ON ACTIVITY READ ACCESS LEVEL" — so with write
+// alone the app sees no activity at all and can edit none of them. Uploading still works, which
+// is what makes the failure so quiet: every hide_from_home PUT came back 404, for a month, while
+// the uploads themselves looked perfectly healthy. read_all rather than read because an activity
+// set to "Only You" is invisible to plain activity:read, and hiding workouts from the feed is
+// exactly what someone tightening that setting is trying to do.
+export const REQUIRED_SCOPES = ['activity:write', 'activity:read_all'];
+export const REQUIRED_SCOPE = REQUIRED_SCOPES.join(',');
 export function hasRequiredScope(scopeParam) {
-  return String(scopeParam || '').split(',').map(s => s.trim()).includes(REQUIRED_SCOPE);
+  const granted = String(scopeParam || '').split(',').map(s => s.trim());
+  return REQUIRED_SCOPES.every(s => granted.includes(s));
 }

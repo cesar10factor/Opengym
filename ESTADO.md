@@ -69,7 +69,7 @@ Decisiones del ciclo 2 (no reabrir):
 **Cómo se hace (verificado en developers.strava.com):**
 - `POST /uploads` con `data_type=json`. **No** `POST /activities`, que sigue siendo la vía pobre
   (solo nombre, tipo, duración, distancia y descripción).
-- Ámbito OAuth: `activity:write`.
+- Ámbito OAuth: `activity:write` **y `activity:read_all`** — los dos. Ver el hallazgo del 2026-09-21 abajo: con solo escritura se sube bien y no se puede ocultar nada.
 - Cuerpo: `{ version, start_time, utc_offset, elapsed_time, sets: [...] }`, y cada serie es
   `{ exercise_type, repetitions, weight, duration, start_time }`. El peso va en kilos.
 - Tipos válidos: `WeightTraining`, `HighIntensityIntervalTraining`, `Workout`, `Crossfit`.
@@ -793,6 +793,49 @@ frontend a solas. No hay timeout configurado en el proyecto, así que rige el de
 - **Vuelta atrás:** `git checkout v1.2.9-fork-final`, restaurar `data/` del backup del 2026-09-21 y
   relanzar `scripts/auto-deploy.ps1`.
 
+### El silenciado en el feed nunca funcionó: faltaba el permiso de LECTURA (2026-09-21)
+
+Detectado por el dueño usando la app: entrenó, el entrenamiento salió en el feed y tuvo que
+ocultarlo a mano. En Ajustes → Admin, **todos** los intentos de silenciar salían como fallo.
+
+**Causa raíz, verificada contra la API real y contra la documentación de Strava:** la app pedía
+únicamente `scope=activity:write`. La documentación de Strava dice de ese ámbito, literalmente:
+*"access to create manual activities and uploads, and access to edit any activities that are
+**visible to the app, based on activity read access level**"*. Sin ningún ámbito de lectura, la app
+**no ve ninguna actividad**, así que no puede editar ninguna: cada `PUT /activities/{id}` con
+`hide_from_home` respondía **404**.
+
+Comprobado en vivo contra el token real del perfil:
+```
+GET /api/v3/athlete/activities -> 401
+{"message":"Authorization Error",
+ "errors":[{"resource":"AccessToken","field":"activity:read_permission","code":"missing"}]}
+```
+
+**Lo que hace este fallo especialmente traicionero:**
+- **Subir sigue funcionando.** Crear una actividad solo necesita escritura, así que `strava.uploaded`
+  salía `ok: true` cada vez. La función parecía sana por el sitio por donde se mira.
+- **Toda la fontanería que se construyó encima era correcta** y funcionaba: el barrido reintentaba
+  con espera creciente y se rendía a la media hora, tal y como se diseñó. El arreglo de anoche
+  (`be89ea8`, que hizo que el silenciado sobreviviera a la petición) **no estaba mal**: estaba
+  llamando a una puerta que nunca se iba a abrir. Un reintento impecable contra un permiso que falta
+  no es más que un fallo más caro.
+- **El único sitio donde se veía era el log de auditoría**, como `strava.mute.fail` / `mute-404`.
+
+**Arreglo:** se piden **los dos** ámbitos, `activity:write` **y `activity:read_all`**.
+`read_all` y no `read` porque una actividad puesta en «Sólo tú» es invisible para `activity:read`, y
+quien ajusta esa opción es precisamente quien quiere sus entrenos fuera del feed — con `read` el
+fallo volvería, idéntico y en silencio, en cuanto el dueño endureciera la privacidad de su cuenta.
+`hasRequiredScope` exige ahora los dos, y el mensaje de error del callback nombra los dos.
+
+**Un token ya emitido conserva los permisos de cuando se concedió.** Ampliar el ámbito en el código
+no toca los tokens viejos: **hay que desconectar y volver a conectar Strava** una vez. Está anotado
+en `docs/DESPLIEGUE.md`.
+
+**Lección, que es la de siempre en este proyecto:** el `200 OK` de la subida no decía nada sobre si
+el resto de la función podía funcionar. Y la comprobación que lo resolvió en cinco minutos —pedirle
+algo a la API real con el token real— no la había hecho nadie en un mes de tests en verde.
+
 ## Registro
 
 | Fecha | Qué |
@@ -800,6 +843,7 @@ frontend a solas. No hay timeout configurado en el proyecto, así que rige el de
 | 2026-09-04 | Rama `develop` creada desde `main`. `PLAN.md` y `ESTADO.md` escritos. |
 | 2026-09-07 | Ciclo 4 planificado: `PLAN-NOTIFICACIONES.md`. N0 cerrado en el móvil. N1 fusionado. |
 | 2026-09-21 | Ciclo 6, U0 hecho: rama `rebase/v1.3.7` desde upstream v1.3.8, backup y etiqueta de retorno, línea base medida (1584 front / 176 de 193 api), stack de upstream verificado en Docker aislado sin tocar producción. |
+| 2026-09-21 | Arreglado el silenciado en el feed de Strava: faltaba el ámbito `activity:read_all`, sin el cual toda edición de actividad daba 404. Requiere reconectar Strava una vez. |
 | 2026-09-21 | Ciclo 6 **desplegado** (`ecc726c`): upstream v1.3.8 de base con las funciones propias encima y los datos reales migrados (278 entrenamientos). U7 (aceptación manual) pendiente. |
 | 2026-09-21 | U2–U6 hechos: notificaciones, Strava, despliegue, migración de datos y limpieza de comentarios. Ciclo 6 con todo el código dentro (`3c87d3a`). api 414/397, frontend 1734. Pila levantada con el perfil real migrado, sin tocar producción. Queda U7 (aceptación manual del dueño). |
 | 2026-09-21 | U1 hecho: vinculación y gestión de dispositivos sobre upstream v1.3.8 (`739d845`). Dos agujeros de seguridad del fork original destapados y cerrados. api 256/239, frontend 1599. |
