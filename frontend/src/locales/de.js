@@ -1270,4 +1270,7 @@ export default {
   'already added': 'schon drin',
   'no exercises': 'keine Übungen',
   'Pick equipment': 'Gerät wählen',
+  'This workout only': 'Nur dieses Training',
+  'This workout and routine “{0}”': 'Dieses Training und Routine „{0}“',
+  'Default ({0})': 'Standard ({0})',
 }

@@ -1250,4 +1250,7 @@ export default {
   'already added': 'già aggiunto',
   'no exercises': 'nessun esercizio',
   'Pick equipment': 'Scegli l’attrezzatura',
+  'This workout only': 'Solo questo allenamento',
+  'This workout and routine “{0}”': 'Questo allenamento e la routine «{0}»',
+  'Default ({0})': 'Predefinito ({0})',
 }

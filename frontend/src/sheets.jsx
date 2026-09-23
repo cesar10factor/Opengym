@@ -37,6 +37,7 @@ import { isFav, toggleFav, sortFavouritesFirst } from './lib/favourites.js'
 import { buildSessionEntries } from './lib/session-start.js'
 import { buildCombinedEntries, deriveSessionName } from './lib/session-merge.js'
 import { workoutsOn, backfillStart, backfillEnd, completeBackfill } from './lib/backfill.js'
+import { routineExFor, setRestSec } from './lib/rest-edit.js'
 
 const S = () => useStore.getState().S
 const update = (...a) => useStore.getState().update(...a)
@@ -2069,6 +2070,57 @@ function ExerciseNote({ entryIdx, close }) {
   </>
 }
 export const exerciseNoteSheet = entryIdx => ui().openSheet(close => <ExerciseNote entryIdx={entryIdx} close={close} />)
+
+/* One exercise's rest, changed mid-workout from its ⋯ menu. The rest applies to every set of the
+   exercise (restSecFor reads it off the entry's target), and the two buttons are the question
+   "just today, or from now on?": the second also writes it into the routine the exercise came
+   from, the same field the routine editor's "Rest (s)" sets. An exercise with no routine behind
+   it (freestyle, added mid-session) only has today to change. */
+function ExerciseRest({ entryIdx, close }) {
+  const st = useStore(s => s.S)
+  const A = st.active
+  const entry = A ? A.entries[entryIdx] : null
+  // Captured on open: an index is only trusted at save time if the same workout still has the
+  // same exercise there — the list can be reordered or trimmed while the sheet is up.
+  const [openedOn] = useState(() => ({ activeId: A?.id, entryId: entry?.id }))
+  const [sec, setSec] = useState(entry?.target?.restSec || 0)
+  useEffect(() => { if (!entry) close() }, [!entry])
+  if (!entry) return null
+  const link = routineExFor(A, st.routines, entryIdx)
+  const routine = link ? st.routines.find(r => r.id === link.routineId) : null
+
+  const save = toRoutine => {
+    update(s => {
+      const e = s.active?.id === openedOn.activeId ? s.active.entries?.[entryIdx] : null
+      if (!e || e.id !== openedOn.entryId) return
+      e.target = e.target || {}
+      setRestSec(e.target, sec)
+      if (!toRoutine) return
+      const at = routineExFor(s.active, s.routines, entryIdx)
+      const r = at && s.routines.find(x => x.id === at.routineId)
+      if (r) setRestSec(r.ex[at.exIdx], sec)
+    })
+    close()
+    toast(t('Saved'))
+  }
+
+  return <>
+    <h3 className="capitalize" style={{ marginBottom: 2 }}>{exerciseNameFor(exOr(entry.id))}</h3>
+    <div className="muted small" style={{ marginBottom: 14 }}>{t('Rest timer')}</div>
+    <div className="row cfgrow" style={{ marginBottom: 6 }}>
+      <Stepper label={t('Rest (s)')} value={sec} step={15} decimal={false} onChange={setSec} />
+    </div>
+    <div className="small dim" style={{ marginBottom: 18 }}>
+      {t('Rest after each set of this exercise. Leave at 0 to use your default rest timer.')}
+    </div>
+    {routine ? <>
+      <Button variant="primary" onClick={() => save(false)}>{t('This workout only')}</Button>
+      <div style={{ height: 8 }} />
+      <Button onClick={() => save(true)}>{t('This workout and routine “{0}”', routine.name)}</Button>
+    </> : <Button variant="primary" onClick={() => save(false)}>{t('Save')}</Button>}
+  </>
+}
+export const exerciseRestSheet = entryIdx => ui().openSheet(close => <ExerciseRest entryIdx={entryIdx} close={close} />)
 
 /* The session note: how the whole workout went, as opposed to how one exercise went. It lives
    on the active session, so buildCompletedWorkout carries it onto the finished workout and it

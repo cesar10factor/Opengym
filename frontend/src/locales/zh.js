@@ -1250,4 +1250,7 @@ export default {
   'already added': '已添加',
   'no exercises': '没有动作',
   'Pick equipment': '选择器械',
+  'This workout only': '仅本次训练',
+  'This workout and routine “{0}”': '本次训练及计划“{0}”',
+  'Default ({0})': '默认（{0}）',
 }

@@ -1250,4 +1250,7 @@ export default {
   'already added': 'zaten ekli',
   'no exercises': 'egzersiz yok',
   'Pick equipment': 'Ekipman seç',
+  'This workout only': 'Yalnızca bu antrenman',
+  'This workout and routine “{0}”': 'Bu antrenman ve “{0}” rutini',
+  'Default ({0})': 'Varsayılan ({0})',
 }
