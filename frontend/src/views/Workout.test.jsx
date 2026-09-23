@@ -1182,7 +1182,7 @@ describe('workout compact view', () => {
     expect(units()[0].textContent).toContain('Current')
   })
 
-  it('strips the progression line, tags and last-time recap that list mode shows', async () => {
+  it('drops the tag chips but keeps the progression line and the last-time recap', async () => {
     const state = {
       workoutView: 'compact',
       exWeights: { 'plain-bench': { w: 80 } },
@@ -1190,15 +1190,16 @@ describe('workout compact view', () => {
     }
     await mount([withExtras([false])], 0, state)
 
-    expect(container.querySelector('.progline')).toBeNull()
     expect(container.textContent).not.toContain('Best:')
-    expect(container.textContent).not.toContain('Last time')
-    // The sets card and the ⋯ menu button survive — nothing is truly unreachable.
+    // What you read before a set stays — only smaller (the .dense rules in index.css).
+    expect(container.querySelector('.progline')).toBeTruthy()
+    expect(container.textContent).toContain('Last time')
+    expect(container.querySelector('.workout-list.dense')).toBeTruthy()
     expect(container.querySelector('.setrow')).toBeTruthy()
     expect(container.querySelector('button[aria-label="More"]')).toBeTruthy()
   })
 
-  it('keeps those same elements in list mode (the strip is compact-only)', async () => {
+  it('keeps the tag chips in list mode (the strip is compact-only)', async () => {
     const state = {
       workoutView: 'list',
       exWeights: { 'plain-bench': { w: 80 } },

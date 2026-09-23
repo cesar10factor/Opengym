@@ -297,7 +297,7 @@ export default function Settings() {
         <Switch checked={S.weighIn !== false} onChange={v => update(s => { s.weighIn = v })} />
       </Row>
       {/* One exercise at a time (cards with Prev/Next), the whole session stacked as a
-          scrollable list, or that list stripped to just names and set rows (compact).
+          scrollable list, or that list without media and in tighter, smaller type (compact).
           Legacy/unknown values read as cards. The running session can override this from
           the workout header's ⋮ menu without changing this default. */}
       <Row icon="list" iconTint="var(--blue)" title={t('Workout view')}>
