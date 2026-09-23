@@ -94,7 +94,13 @@ function tokenize(raw) {
   let s = String(raw).toLowerCase();
   s = s.replace(/\([^)]*\)/g, ' '); // "(kneeling)", "(on stability ball)", ...
   s = s.replace(/\bv\.?\s*\d+\b/g, ' '); // "v. 2", "v2", "v 3"
-  s = s.replace(/_/g, ' ').replace(/[^a-z0-9]+/g, ' ');
+  s = s.replace(/_/g, ' ');
+  // A pulldown is always a lat pulldown, but EXDB mostly spells it "lateral pulldown", "pull-down"
+  // or plain "pulldown" — none of which cover LAT_PULLDOWN's literal "lat", so "cable pulldown"
+  // used to fall through to PULL_UP_GENERIC and show up on Strava as a pull-up. Applied to both
+  // sides, so STRAIGHT_ARM_PULLDOWN simply gains a "lat" too and still needs "straight arm".
+  s = s.replace(/\b(?:lat(?:eral)?\s+)?pull[\s-]?downs?\b/g, ' lat pulldown ');
+  s = s.replace(/[^a-z0-9]+/g, ' ');
 
   return s
     .trim()
