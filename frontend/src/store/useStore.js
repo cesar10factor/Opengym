@@ -28,8 +28,8 @@ export const DEF = {
   bodyweight: [], routines: [], week: {}, dayPlan: {},
   exWeights: {}, workouts: [], active: null, customEx: [], gifSize: 'full',
   // How the active workout is laid out — 'cards' (one exercise at a time with Prev/Next),
-  // 'list' (every exercise stacked and scrollable) or 'compact' (that stack stripped to just
-  // names and set rows — no media, tags, notes, last-time or progression line). Purely
+  // 'list' (every exercise stacked and scrollable) or 'compact' (that stack with no media or
+  // tag chips, in smaller type and tighter spacing). Purely
   // presentational: profiles written before this setting existed overlay onto DEF and keep the
   // 'cards' behaviour. beginWorkout copies the value onto s.active, so the header ⋮ menu can
   // override it for the running session without touching this saved default.

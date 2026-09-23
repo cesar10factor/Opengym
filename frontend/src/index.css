@@ -1368,6 +1368,35 @@ body.chips-dragging *{cursor:inherit}
   .wl-unit{padding:10px 8px 2px}
 }
 
+/* --- compact workout view: the list view's information in less room --- */
+/* Same content as the list minus media and tag chips (Workout.jsx `dense`), in smaller type
+   with the space between things taken in — more of the session fits on one screen. */
+.workout-list.dense{gap:8px}
+.workout-list.dense .wl-unit{padding:8px 10px 2px}
+.workout-list.dense .wl-hd{margin-bottom:4px}
+.workout-list.dense .wl-hd .chip{padding:3px 10px;font-size:12px}
+.workout-list.dense .wl-hd .tag{font-size:11px}
+.workout-list.dense .exnote{padding:6px 10px;font-size:13px;line-height:1.35;margin-bottom:5px}
+.workout-list.dense .exnote .icn{font-size:12px}
+.workout-list.dense .lasttime,.workout-list.dense .barinfo{font-size:12px;margin-bottom:3px !important}
+.workout-list.dense .progline{font-size:12px;line-height:1.32;margin:3px 0 0;gap:5px}
+.workout-list.dense .card{padding:8px 10px}
+.workout-list.dense .sethead{padding-bottom:2px;font-size:10px}
+.workout-list.dense .setrow{padding:3px 0}
+.workout-list.dense .setrow-side,.workout-list.dense .setrow-side .setrow.side{padding:2px 0}
+.workout-list.dense .setph{margin:4px 0 0;font-size:10px}
+.workout-list.dense .setsep{margin:5px 0}
+.workout-list.dense .stp .num{font-size:15px;min-height:32px}
+.workout-list.dense .setrow .stp button{height:32px}
+.workout-list.dense .effcell-stp>button[aria-label="Decrease"],
+.workout-list.dense .effcell-stp>button[aria-label="Increase"]{height:32px}
+.workout-list.dense .setrow .n,.workout-list.dense .setrow-side>.n{width:22px;height:22px;font-size:11px}
+.workout-list.dense .chk{width:26px;height:26px}
+.workout-list.dense .setextra{margin:0 0 4px 30px}
+.workout-list.dense .subrow{padding-top:1px;padding-bottom:1px}
+.workout-list.dense .ss-hd{margin-bottom:6px}
+.workout-list.dense .ss-amp{margin:6px 0 4px}
+
 /* --- home: today's session row --- */
 .today-row{
   display:flex;align-items:center;justify-content:space-between;gap:10px;
