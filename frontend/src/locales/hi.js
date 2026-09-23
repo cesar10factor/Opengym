@@ -1250,4 +1250,7 @@ export default {
   'already added': 'पहले से जोड़ा हुआ',
   'no exercises': 'कोई व्यायाम नहीं',
   'Pick equipment': 'उपकरण चुनें',
+  'This workout only': 'सिर्फ़ यह वर्कआउट',
+  'This workout and routine “{0}”': 'यह वर्कआउट और रूटीन “{0}”',
+  'Default ({0})': 'डिफ़ॉल्ट ({0})',
 }

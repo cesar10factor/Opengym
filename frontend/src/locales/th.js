@@ -1261,4 +1261,7 @@ export default {
   'already added': 'เพิ่มแล้ว',
   'no exercises': 'ไม่มีท่าออกกำลังกาย',
   'Pick equipment': 'เลือกอุปกรณ์',
+  'This workout only': 'เฉพาะการฝึกครั้งนี้',
+  'This workout and routine “{0}”': 'การฝึกครั้งนี้และรูทีน “{0}”',
+  'Default ({0})': 'ค่าเริ่มต้น ({0})',
 }

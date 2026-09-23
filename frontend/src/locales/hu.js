@@ -1253,4 +1253,7 @@ export default {
   'already added': 'már hozzáadva',
   'no exercises': 'nincs gyakorlat',
   'Pick equipment': 'Eszköz kiválasztása',
+  'This workout only': 'Csak ez az edzés',
+  'This workout and routine “{0}”': 'Ez az edzés és a(z) „{0}” rutin',
+  'Default ({0})': 'Alapértelmezett ({0})',
 }

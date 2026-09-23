@@ -672,6 +672,9 @@ export const PT_BR_OVERRIDES = {
   'Download & Install': 'Baixar e instalar',
   'Starting download…': 'Iniciando download…',
   'Downloading update…': 'Baixando atualização…',
+  'This workout only': 'Só este treino',
+  'This workout and routine “{0}”': 'Este treino e a rotina “{0}”',
+  'Default ({0})': 'Padrão ({0})',
 }
 
 export default { ...pt, ...PT_BR_OVERRIDES }

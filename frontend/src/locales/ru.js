@@ -1250,4 +1250,7 @@ export default {
   'already added': 'уже добавлено',
   'no exercises': 'нет упражнений',
   'Pick equipment': 'Выбрать оборудование',
+  'This workout only': 'Только эта тренировка',
+  'This workout and routine “{0}”': 'Эта тренировка и программа «{0}»',
+  'Default ({0})': 'По умолчанию ({0})',
 }

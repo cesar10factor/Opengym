@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => {
     menuSheet: vi.fn(),
     effortPickerSheet: vi.fn(),
     exerciseHistorySheet: vi.fn(),
+    exerciseRestSheet: vi.fn(),
     renameWorkoutSheet: vi.fn(),
   }
   state.stopRest = vi.fn(() => { state.timer = null })
@@ -77,6 +78,7 @@ vi.mock('../sheets.jsx', () => ({
   // Both note sheets belong here even though the tests never open one: Workout.jsx reads
   // sessionNoteSheet during render, so a missing export is a render crash, not a no-op.
   exerciseNoteSheet: vi.fn(),
+  exerciseRestSheet: mocks.exerciseRestSheet,
   sessionNoteSheet: vi.fn(),
   renameWorkoutSheet: mocks.renameWorkoutSheet,
   effortPickerSheet: mocks.effortPickerSheet,
@@ -1309,6 +1311,20 @@ describe('workout controls: the more menu and the set menu', () => {
     expect(history.icon).toBe('history')
     history.onClick()
     expect(mocks.exerciseHistorySheet).toHaveBeenCalledWith('plain-row')
+  })
+
+  it('opens the rest sheet from the More menu, showing the rest the exercise uses now', async () => {
+    await mount([exercise('plain-bench', [false]), exercise('plain-row', [false], { target: { mode: 'reps', reps: 5, weight: 60, restSec: 150 } })], 1)
+    await act(async () => { container.querySelector('button[aria-label="More"]').dispatchEvent(new dom.Event('click', { bubbles: true })) })
+    expect(item('Rest timer').sub).toBe('150s')
+    item('Rest timer').onClick()
+    expect(mocks.exerciseRestSheet).toHaveBeenCalledWith(1)
+  })
+
+  it('labels an exercise without its own rest with the default timer', async () => {
+    await mount([exercise('plain-bench', [false])])
+    await act(async () => { container.querySelector('button[aria-label="More"]').dispatchEvent(new dom.Event('click', { bubbles: true })) })
+    expect(item('Rest timer').sub).toBe('Default (90s)')
   })
 
   it('opens a per-set menu from the set number with drop, burst and remove', async () => {

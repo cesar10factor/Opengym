@@ -1250,4 +1250,7 @@ export default {
   'already added': '이미 추가됨',
   'no exercises': '운동 없음',
   'Pick equipment': '기구 선택',
+  'This workout only': '이번 운동만',
+  'This workout and routine “{0}”': '이번 운동과 루틴 “{0}”',
+  'Default ({0})': '기본값 ({0})',
 }
