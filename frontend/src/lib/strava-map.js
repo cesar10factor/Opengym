@@ -543,7 +543,7 @@ const KEYWORD_GENERIC_RULES = [
 
 // Fallback keyed by openGym's own `bp` + `tg` pair, used only when no keyword rule above fired.
 // Built from the real (bp, tg) combinations found in exercises-data.js (there are exactly ten
-// `bp` values and nineteen `tg` values in the 1324-entry EXDB; see .agent/T10-plan.md for the
+// `bp` values and nineteen `tg` values in the 1326-entry EXDB; see .agent/T10-plan.md for the
 // full cross-tab this table is derived from).
 const BP_TG_GENERIC = {
   'back|lats': 'ROW_GENERIC',
@@ -658,5 +658,5 @@ export function stravaResolutionTier(ex) {
 // Exposed for the test suite's muscle-domain guard sweep — it needs to look up which category a
 // resolved identifier belongs to, what domain that category (and a given `tg`) are anchored to,
 // and the identifier-level override (domainsFor) that takes priority over the category default,
-// to independently re-verify the guard actually held across all 1324 EXDB entries.
+// to independently re-verify the guard actually held across all 1326 EXDB entries.
 export { CATEGORY_OF_ID, CATEGORY_DOMAINS, TG_DOMAIN, domainsFor };
