@@ -5,9 +5,9 @@ import { EXDB } from './exercises-data.js'
 const idOf = eq => EXDB.find(e => e.eq === eq).id
 
 describe('bar equipment', () => {
-  test('covers the five bar types and the 228 catalogue exercises they carry', () => {
+  test('covers the five bar types and the 229 catalogue exercises they carry', () => {
     expect([...BAR_EQ].sort()).toEqual(['barbell', 'ez barbell', 'olympic barbell', 'smith machine', 'trap bar'])
-    expect(EXDB.filter(e => BAR_EQ.has(e.eq)).length).toBe(228)
+    expect(EXDB.filter(e => BAR_EQ.has(e.eq)).length).toBe(229)
   })
 
   test('usesBar answers for ids and exercise objects alike', () => {

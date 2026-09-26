@@ -836,6 +836,29 @@ en `docs/DESPLIEGUE.md`.
 el resto de la función podía funcionar. Y la comprobación que lo resolvió en cinco minutos —pedirle
 algo a la API real con el token real— no la había hecho nadie en un mes de tests en verde.
 
+### Ejercicios añadidos a mano salían como «Ejercicio desconocido» (2026-09-26)
+
+Detectado por el dueño: tras el despliegue del ciclo 6, los ejercicios que se habían añadido al
+catálogo a mano aparecían como «Ejercicio desconocido».
+
+**Causa raíz:** el rebase tomó `frontend/src/lib/exercises-data.js` tal cual venía de upstream, y ese
+fichero es donde el fork había metido sus cambios al catálogo. Se perdieron cuatro:
+**`9001`** (gemelo de pie a una pierna en máquina, `906d764`), **`9002`** (press de banca con pausa,
+`adfd4f8`) y los renombrados de **`0233`** («cable face pull», `72834eb`) y **`0410`** («dumbbell
+bulgarian split squat», `906d764`). Los datos del dueño **no se perdieron**: el historial y el plan
+(`plans/ppl-banca-100kg.json`) siguen apuntando a `9001`/`9002`; lo que faltaba era la entrada del
+catálogo que les pone nombre, y `exOr` rellena el hueco con el marcador.
+
+**Por qué no lo cazó ningún test:** `strava-map.test.js` fija el tamaño del catálogo, pero al pasar
+de 1326 a 1324 se bajó el número y se atribuyó la diferencia a upstream. Era justo esta pérdida.
+
+**Arreglo:** el catálogo vuelve a ser idéntico byte a byte al de `v1.2.9-fork-final` (upstream no
+había tocado ninguna otra entrada). Regenerados el catálogo del coach
+(`build-coach-assets.mjs`) y los paquetes pt-BR/hu con traducción para las dos entradas nuevas, que
+sus tests exigen completos. Los tests de tamaño vuelven a 1326 y dicen por qué.
+**Si se repite la maniobra del rebase, reaplicar estos cambios a `exercises-data.js` después**, igual
+que los documentos de planificación.
+
 ## Registro
 
 | Fecha | Qué |
@@ -848,3 +871,4 @@ algo a la API real con el token real— no la había hecho nadie en un mes de te
 | 2026-09-21 | U2–U6 hechos: notificaciones, Strava, despliegue, migración de datos y limpieza de comentarios. Ciclo 6 con todo el código dentro (`3c87d3a`). api 414/397, frontend 1734. Pila levantada con el perfil real migrado, sin tocar producción. Queda U7 (aceptación manual del dueño). |
 | 2026-09-21 | U1 hecho: vinculación y gestión de dispositivos sobre upstream v1.3.8 (`739d845`). Dos agujeros de seguridad del fork original destapados y cerrados. api 256/239, frontend 1599. |
 | 2026-09-21 | Arreglo del silenciado de Strava (`be89ea8`) rescatado de una rama suelta, fusionado a `develop` y desplegado a `main`. Etiqueta `v1.2.9-fork-strava` creada como el estado completo del fork para U1–U6. |
+| 2026-09-26 | Restaurados en el catálogo los ejercicios propios que el rebase del ciclo 6 había borrado (`9001`, `9002`) y los renombrados de `0233`/`0410`. Frontend 1746. |
