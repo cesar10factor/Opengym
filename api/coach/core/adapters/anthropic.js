@@ -4,6 +4,10 @@ import { SYSTEM_PROMPT } from '../system-prompt.js';
 
 export const ANTHROPIC_VERSION = '2023-06-01';
 
+// Models from Opus 4.5 / Sonnet 4.6 on take `output_config.effort`; Haiku 4.5, Sonnet 4.5 and
+// older reject it, and the picker offers every model the account can call.
+export const acceptsEffort = model => /^claude-(opus-(4-[5-9]|[5-9])|sonnet-(4-6|[5-9])|fable|mythos)/.test(model || '');
+
 export const anthropicSpec = {
   id: 'anthropic',
   path: () => '/v1/messages',
@@ -17,9 +21,12 @@ export const anthropicSpec = {
   }),
   // The rules block is marked cacheable: identical for every job of a task, so subsequent
   // jobs read it from Anthropic's prompt cache at a tenth of the input price.
+  // Opus 5 thinks unless told otherwise, and max_tokens caps thinking and answer together;
+  // medium effort keeps a full plan well inside the cap.
   body: ({ model, prompt, system, maxTokens }) => ({
     model,
     max_tokens: maxTokens,
+    ...(acceptsEffort(model) ? { output_config: { effort: 'medium' } } : {}),
     system: system
       ? [{ type: 'text', text: SYSTEM_PROMPT + '\n\n' + system, cache_control: { type: 'ephemeral' } }]
       : SYSTEM_PROMPT,

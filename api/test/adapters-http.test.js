@@ -59,7 +59,14 @@ test('Anthropic: /v1/messages with the key in a header, the shared system prompt
   assert.equal(c.body.system, SYSTEM_PROMPT);
   assert.deepEqual(c.body.messages, [{ role: 'user', content: 'P' }]);
   assert.ok(c.body.max_tokens >= 8000);
+  assert.deepEqual(c.body.output_config, { effort: 'medium' });
   assert.ok(!c.url.includes('sk-ant'), 'the key is never in the URL');
+});
+
+test('Anthropic: no effort field for models that reject it', async () => {
+  const f = fakeFetch([ok({ content: [{ type: 'text', text: '{}' }], stop_reason: 'end_turn' })]);
+  await anthropic.invoke({ cfg: {}, prompt: 'P', env, model: 'claude-haiku-4-5', fetch: f });
+  assert.equal(f.calls[0].body.output_config, undefined);
 });
 
 test('OpenAI: chat completions in JSON mode, bearer auth, max_completion_tokens', async () => {

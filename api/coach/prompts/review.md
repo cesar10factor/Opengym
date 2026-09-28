@@ -22,7 +22,7 @@ Change something when the data says so:
 { "coach_contract": 1, "nochange": true, "reading": "<a short honest paragraph on how the block went>" }
 ```
 
-Prefer few, high-conviction changes over many small ones. Never propose more than about six.
+Prefer few, high-conviction changes over many small ones: each is something the lifter has to read and accept, and past about six they stop reviewing carefully.
 
 ## Output
 
