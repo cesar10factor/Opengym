@@ -165,6 +165,23 @@ describe('spot checks on the basics — these must land on a SPECIFIC identifier
     expect(stravaExerciseFor(byExactName('archer pull up'))).toBe('ARCHER_PULL_UP');
   });
 
+  it('pulldowns spelled "lateral pulldown" or plain "pulldown" -> LAT_PULLDOWN, not a pull-up', () => {
+    // EXDB rarely writes "lat": these used to miss LAT_PULLDOWN's literal {lat, pulldown} and fall
+    // through to PULL_UP_GENERIC, which Strava displays as a pull-up.
+    expect(stravaExerciseFor(byExactName('cable pulldown'))).toBe('LAT_PULLDOWN');
+    expect(stravaExerciseFor(byExactName('cable bar lateral pulldown'))).toBe('LAT_PULLDOWN');
+    expect(stravaExerciseFor(byExactName('lever front pulldown'))).toBe('LAT_PULLDOWN');
+    expect(stravaExerciseFor(byExactName('band close-grip pulldown'))).toBe('LAT_PULLDOWN');
+    expect(stravaExerciseFor({ n: 'Lat pull-down', bp: 'back' })).toBe('LAT_PULLDOWN');
+    // Siblings that must keep their more specific identifier.
+    expect(stravaExerciseFor(byExactName('cable straight arm pulldown'))).toBe('STRAIGHT_ARM_PULLDOWN');
+    expect(stravaExerciseFor(byExactName('cable underhand pulldown'))).toBe('UNDERHAND_LAT_PULLDOWN');
+    expect(stravaExerciseFor(byExactName('cable one arm pulldown'))).toBe('SINGLE_ARM_LAT_PULLDOWN');
+    // Names that only mention a pulldown (explicit overrides).
+    expect(stravaExerciseFor(byExactName('cable pulldown bicep curl'))).toBe('CABLE_BICEPS_CURL');
+    expect(stravaExerciseFor(byExactName('rocky pull-up pulldown'))).toBe('PULL_UP_GENERIC');
+  });
+
   it('plank equivalent: front plank with twist -> PLANK_TWIST', () => {
     expect(stravaExerciseFor(byExactName('front plank with twist'))).toBe('PLANK_TWIST');
   });
@@ -413,7 +430,7 @@ describe('FIX 2 — the generic-tier domain guard: fixed cases, by EXDB id', () 
     // arms-triceps.
     expect(stravaExerciseFor(byId('0139'))).toBe('PULL_UP_GENERIC'); // biceps narrow pull-ups
     expect(stravaExerciseFor(byId('0140'))).toBe('PULL_UP_GENERIC'); // biceps pull-up
-    expect(stravaExerciseFor(byId('0232'))).toBe('PULL_UP_GENERIC'); // cable standing pulldown (with rope)
+    expect(stravaExerciseFor(byId('0232'))).toBe('LAT_PULLDOWN'); // cable standing pulldown (with rope)
   });
 
   it('"modified push up to lower arms" (1421, tg=forearms) resolves to a push-up identifier, not CURL_GENERIC', () => {

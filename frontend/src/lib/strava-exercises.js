@@ -322,6 +322,14 @@ export const STRAVA_OVERRIDES = {
   '0386': 'DUMBBELL_REAR_DELT_FLY',
   '0359': 'DUMBBELL_REAR_DELT_FLY',
 
+  // Two names that merely mention a pulldown without being one. Once strava-map.js started
+  // reading every "pulldown" as "lat pulldown" (so plain "cable pulldown" stops landing on
+  // PULL_UP_GENERIC), the rare {lat, pulldown} pair outscored the common words these carry:
+  // "cable pulldown bicep curl" (1638) is a curl done at the pulldown station, and "rocky pull-up
+  // pulldown" (0678, eq=body weight) is a bar pull-up, not a cable/machine pulldown.
+  '1638': 'CABLE_BICEPS_CURL',
+  '0678': 'PULL_UP_GENERIC',
+
   // NOTE: "pike-to-cobra push-up" (3662, tg=glutes) needed an override in an earlier revision of
   // this file (PUSH_UP's domain didn't include glutes yet, so the guard blocked PIKE_PUSH_UP and
   // fell back to the single-token literal candidate COBRA). Once PUSH_UP's category domain was
