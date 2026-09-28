@@ -10,7 +10,7 @@ import { fmtNum, capWords, fmtDate, todayISO, exCount, DAYN } from '../lib/forma
 import { beep, vibrate, unlock } from '../lib/sound.js'
 import { t, exerciseNameFor } from '../lib/i18n.js'
 import { api, appBase } from '../lib/api.js'
-import { insertionIndexAfterCurrentUnit, nextUnfinishedUnit, setProgressHighWater, supersetFlowStep, restAfterSet, restOnRecheck, restSecFor, warmupRestSecFor } from '../lib/supersetFlow.js'
+import { insertionIndexAfterCurrentUnit, nextUnfinishedUnit, setProgressHighWater, supersetFlowStep, restAfterSet, restOnRecheck, restSecFor, warmupRestSecFor, ownRestSec } from '../lib/supersetFlow.js'
 import Media from '../components/Media.jsx'
 import { startFlow, exercisePicker, exConfigSheet, exerciseDetailSheet, finishWorkout, workoutCompleteSheet, confirmSheet, exerciseNoteSheet, exerciseRestSheet, sessionNoteSheet, renameWorkoutSheet, swapActiveWorkoutExercise, barWeightSheet, menuSheet, effortPickerSheet, exerciseHistorySheet, addRoutineToSessionSheet } from '../sheets.jsx'
 import { effortColor } from '../lib/effort.js'
@@ -223,7 +223,7 @@ function ExerciseBlock({ entryIdx, compact, dense, onToggle, onToggleSide, onFie
       onProgressionSettings && { icon: 'chartLine', label: t('Progression settings'), sub: guidance ? t(guidance.policyLabel) : undefined, onClick: onProgressionSettings },
       // Every set of this exercise rests this long; the sheet asks whether the routine keeps it too.
       { icon: 'timer', label: t('Rest timer'), onClick: () => exerciseRestSheet(entryIdx),
-        sub: cfg.restSec > 0 ? cfg.restSec + 's' : t('Default ({0})', S.restSec > 0 ? S.restSec + 's' : t('Off')) },
+        sub: ownRestSec(cfg) != null ? (ownRestSec(cfg) > 0 ? ownRestSec(cfg) + 's' : t('Off')) : t('Default ({0})', S.restSec > 0 ? S.restSec + 's' : t('Off')) },
       barInfo && { icon: 'barbell', label: t('Bar weight'), sub: barInfo.text, onClick: () => barWeightSheet(entry.id) },
       { icon: 'flame', label: t('Add warm-up set'), onClick: onAddWarmup },
       onPairPrev && { icon: 'link', label: t('Make superset with previous'), onClick: onPairPrev },

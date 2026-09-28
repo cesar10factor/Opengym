@@ -30,7 +30,7 @@ import { normalizeRepRange } from './lib/rep-range.js'
 import { MOBILE, shareExport, printHtml } from './lib/mobile.js'
 import { buildCompletedWorkout } from './lib/finish-workout.js'
 import { isWarmupRow, hasCompletedWork } from './lib/workout-model.js'
-import { nextUnfinishedUnit } from './lib/supersetFlow.js'
+import { nextUnfinishedUnit, ownRestSec } from './lib/supersetFlow.js'
 import { swapActiveExercise } from './lib/active-exercise-swap.js'
 import { useSheetKeyboard, useRevealActiveChip, tappable } from './lib/use-sheet-keyboard.js'
 import { isFav, toggleFav, sortFavouritesFirst } from './lib/favourites.js'
@@ -1231,11 +1231,12 @@ function ExConfig({ ex, existing, onSave, onDelete, close, routine, initial }) {
     // shape it had — and reads back as 0 either way (buildSets).
     const warmupSets = Math.max(0, Math.min(MAX_PLANNED_WARMUPS, Math.round(c.warmupSets) || 0))
     const withWarmups = warmupSets ? { warmupSets } : {}
-    // Per-exercise rest (issue #10): written only when a positive value was set, so 0 keeps
-    // inheriting the global rest timer and a config that never touched it stays the shape it
-    // was. Mode-independent — a heavy triple, a plank and a cardio interval all rest.
-    const restSec = Math.max(0, Math.round(c.restSec) || 0)
-    const withRest = restSec ? { restSec } : {}
+    // Per-exercise rest (issue #10): written only when the exercise has its own, so one left on
+    // the default keeps inheriting the global rest timer and stays the shape it was. 0 is a real
+    // value — no rest after this exercise. Mode-independent — a heavy triple, a plank and a
+    // cardio interval all rest.
+    const restSec = ownRestSec(c)
+    const withRest = restSec != null ? { restSec } : {}
     if (cardio) onSave({ sets, min: Math.max(1, Math.round(c.min) || 20), speed: Math.max(0, c.speed || 8), ...withNote, ...withRest })
     else if (mode === 'time') onSave({ sets, mode: 'time', sec: Math.max(1, Math.round(c.sec) || 45), weight: Math.max(0, c.weight || 0), ...flags, ...prog, ...withNote, ...withWarmups, ...withRest })
     else {
@@ -1321,13 +1322,7 @@ function ExConfig({ ex, existing, onSave, onDelete, close, routine, initial }) {
     {/* Per-exercise rest (issue #10). Its own full-width row, like the other steppers with an
         explanation under them, and outside every mode branch because a heavy triple, a plank
         and a cardio interval all rest — they just do not all want the same break. */}
-    <div className="row cfgrow" style={{ marginBottom: 6 }}>
-      <Stepper label={t('Rest (s)')} value={c.restSec || 0} step={15} decimal={false}
-        onChange={v => setC(x => ({ ...x, restSec: v }))} />
-    </div>
-    <div className="small dim" style={{ marginBottom: 18 }}>
-      {t('Rest after each set of this exercise. Leave at 0 to use your default rest timer.')}
-    </div>
+    <RestField value={ownRestSec(c)} defaultSec={st.restSec} onChange={v => setC(x => ({ ...x, restSec: v }))} />
     {/* ---------- bodyweight + per side (issues #31/#32/#33) ---------- */}
     {!cardio && <div className="sect-b" style={{ marginBottom: 8 }}>
       <Row icon="figureStrength" iconTint="var(--acc)" title={t('Bodyweight')}
@@ -2071,6 +2066,32 @@ function ExerciseNote({ entryIdx, close }) {
 }
 export const exerciseNoteSheet = entryIdx => ui().openSheet(close => <ExerciseNote entryIdx={entryIdx} close={close} />)
 
+/* An exercise's own rest, as the routine editor and the mid-workout sheet both edit it. `value`
+   null is "use the default rest timer" — the switch — and any number, 0 included, is this
+   exercise's own: 0 means no rest after it, not the default. Turning the switch off starts the
+   stepper from the default so there is something sensible to step from. */
+function RestField({ value, defaultSec, onChange }) {
+  const usesDefault = value == null
+  const dflt = defaultSec > 0 ? defaultSec + 's' : t('Off')
+  return <>
+    <div className="sect-b" style={{ marginBottom: 8 }}>
+      <Row icon="timer" iconTint="var(--acc)" title={t('Default rest timer')}
+        subtitle={usesDefault ? t('Default ({0})', dflt) : t('This exercise has its own rest.')}>
+        <Switch checked={usesDefault} onChange={on => onChange(on ? null : Math.max(0, defaultSec || 0))} />
+      </Row>
+    </div>
+    {!usesDefault && <>
+      <div className="row cfgrow" style={{ marginBottom: 6 }}>
+        <Stepper label={t('Rest (s)')} value={value} step={15} decimal={false} onChange={onChange} />
+      </div>
+      <div className="small dim" style={{ marginBottom: 18 }}>
+        {value > 0 ? t('Rest after each set of this exercise.') : t('No rest timer after this exercise.')}
+      </div>
+    </>}
+    {usesDefault && <div style={{ height: 10 }} />}
+  </>
+}
+
 /* One exercise's rest, changed mid-workout from its ⋯ menu. The rest applies to every set of the
    exercise (restSecFor reads it off the entry's target), and the two buttons are the question
    "just today, or from now on?": the second also writes it into the routine the exercise came
@@ -2083,7 +2104,7 @@ function ExerciseRest({ entryIdx, close }) {
   // Captured on open: an index is only trusted at save time if the same workout still has the
   // same exercise there — the list can be reordered or trimmed while the sheet is up.
   const [openedOn] = useState(() => ({ activeId: A?.id, entryId: entry?.id }))
-  const [sec, setSec] = useState(entry?.target?.restSec || 0)
+  const [sec, setSec] = useState(() => ownRestSec(entry?.target))
   useEffect(() => { if (!entry) close() }, [!entry])
   if (!entry) return null
   const link = routineExFor(A, st.routines, entryIdx)
@@ -2107,12 +2128,7 @@ function ExerciseRest({ entryIdx, close }) {
   return <>
     <h3 className="capitalize" style={{ marginBottom: 2 }}>{exerciseNameFor(exOr(entry.id))}</h3>
     <div className="muted small" style={{ marginBottom: 14 }}>{t('Rest timer')}</div>
-    <div className="row cfgrow" style={{ marginBottom: 6 }}>
-      <Stepper label={t('Rest (s)')} value={sec} step={15} decimal={false} onChange={setSec} />
-    </div>
-    <div className="small dim" style={{ marginBottom: 18 }}>
-      {t('Rest after each set of this exercise. Leave at 0 to use your default rest timer.')}
-    </div>
+    <RestField value={sec} defaultSec={st.restSec} onChange={setSec} />
     {routine ? <>
       <Button variant="primary" onClick={() => save(false)}>{t('This workout only')}</Button>
       <div style={{ height: 8 }} />

@@ -3,8 +3,8 @@
 //
 // The rest itself is the same field the routine editor writes (issue #10): `restSec` on the
 // exercise config, copied onto the session entry's `target` when the workout starts, and read
-// by restSecFor. 0 (or absent) means "use the global rest timer", so a cleared value drops the
-// key rather than storing a 0 — the shape a config that never set it already has.
+// by restSecFor. An absent key means "use the global rest timer"; a stored 0 means no rest at
+// all for this exercise. `null` clears the key, back to the shape a config that never set it has.
 
 /**
  * Where in the routines an active entry came from: `{ routineId, exIdx }`, or null for an entry
@@ -32,10 +32,11 @@ export function routineExFor(active, routines, idx) {
   return null
 }
 
-/** Write `sec` as the rest on an exercise config (a session target or a routine entry), in place. */
+/** Write `sec` as the rest on an exercise config (a session target or a routine entry), in place.
+ *  `null` (or anything not a number) drops it, so the exercise inherits the global timer again. */
 export function setRestSec(cfg, sec) {
   if (!cfg) return
-  const n = Math.max(0, Math.round(Number(sec)) || 0)
-  if (n > 0) cfg.restSec = n
+  const n = sec == null || sec === '' ? NaN : Math.round(Number(sec))
+  if (Number.isFinite(n)) cfg.restSec = Math.max(0, n)
   else delete cfg.restSec
 }

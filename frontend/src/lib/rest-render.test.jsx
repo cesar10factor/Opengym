@@ -23,6 +23,10 @@ function renderSheet(idx = 0) {
 const button = (host, re) => [...host.querySelectorAll('button')].find(b => re.test(b.textContent))
 // The Stepper's + adds one step (15 s).
 const plus = host => host.querySelector('button[aria-label="Increase"]')
+const minus = host => host.querySelector('button[aria-label="Decrease"]')
+// An exercise on the default rest shows the switch, not the stepper; turning it off starts the
+// stepper from the global rest (90 s in the store's defaults).
+const ownRest = host => host.querySelector('button[role="switch"]')
 
 const routine = { id: 'r1', name: 'Push', ex: [{ id: 'bench', sets: 3, reps: 5, restSec: 90 }, { id: 'row', sets: 3, reps: 8 }] }
 const entry = (id, extra = {}) => ({ id, rid: 'r1', target: { sets: 3, reps: 5 }, sets: [{ w: 60, r: 5, done: false }], ...extra })
@@ -58,11 +62,13 @@ describe('exercise rest sheet', () => {
 
   it('writes the routine too when asked to', () => {
     const host = renderSheet(1)
+    expect(plus(host)).toBeNull()
+    act(() => { ownRest(host).click() })
     act(() => { plus(host).click() })
     act(() => { button(host, /routine “Push”/).click() })
     const S = useStore.getState().S
-    expect(S.active.entries[1].target.restSec).toBe(15)
-    expect(S.routines[0].ex[1].restSec).toBe(15)
+    expect(S.active.entries[1].target.restSec).toBe(105)
+    expect(S.routines[0].ex[1].restSec).toBe(105)
     // The other exercise of the routine is left alone.
     expect(S.routines[0].ex[0].restSec).toBe(90)
   })
@@ -71,8 +77,21 @@ describe('exercise rest sheet', () => {
     useStore.setState(s => ({ S: { ...s.S, active: { ...s.S.active, entries: [entry('curl', { rid: undefined })] } } }))
     const host = renderSheet(0)
     expect(button(host, /routine/)).toBeUndefined()
+    act(() => { ownRest(host).click() })
     act(() => { plus(host).click() })
     act(() => { button(host, /^Save$/).click() })
-    expect(useStore.getState().S.active.entries[0].target.restSec).toBe(15)
+    expect(useStore.getState().S.active.entries[0].target.restSec).toBe(105)
+  })
+
+  it('saves 0 as no rest, and the switch puts the exercise back on the default', () => {
+    const host = renderSheet(0)
+    for (let i = 0; i < 6; i++) act(() => { minus(host).click() })
+    act(() => { button(host, /This workout only/).click() })
+    expect(useStore.getState().S.active.entries[0].target.restSec).toBe(0)
+
+    const again = renderSheet(0)
+    act(() => { ownRest(again).click() })
+    act(() => { button(again, /This workout only/).click() })
+    expect('restSec' in useStore.getState().S.active.entries[0].target).toBe(false)
   })
 })

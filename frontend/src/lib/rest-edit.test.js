@@ -44,11 +44,20 @@ describe('setRestSec', () => {
     expect(cfg).toEqual({ id: 'bench', restSec: 120 })
   })
 
-  it('drops the key at 0 so the global rest timer applies again', () => {
+  it('keeps an explicit 0 — no rest — rather than falling back to the global timer', () => {
     const cfg = { id: 'bench', restSec: 120 }
     setRestSec(cfg, 0)
-    expect(cfg).toEqual({ id: 'bench' })
+    expect(cfg).toEqual({ id: 'bench', restSec: 0 })
     setRestSec(cfg, -5)
+    expect(cfg).toEqual({ id: 'bench', restSec: 0 })
+  })
+
+  it('drops the key on null so the global rest timer applies again', () => {
+    const cfg = { id: 'bench', restSec: 120 }
+    setRestSec(cfg, null)
     expect(cfg).toEqual({ id: 'bench' })
+    const other = { restSec: 0 }
+    setRestSec(other, 'abc')
+    expect(other).toEqual({})
   })
 })

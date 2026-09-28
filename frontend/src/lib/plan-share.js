@@ -93,7 +93,7 @@ function cleanEx(e) {
   // The exercise's own rest (issue #10) is part of how it is prescribed, so it travels too —
   // only when set, so a plan that never asked for one leaves the recipient's own default
   // timer in charge. parsePlan and mergePlan carry it through by spread.
-  if (e.restSec > 0) o.restSec = e.restSec
+  if (cleanOwnRestSec(e.restSec) != null) o.restSec = cleanOwnRestSec(e.restSec)
   if (e.warmupRestSec > 0) o.warmupRestSec = e.warmupRestSec   // the ramp's own rest travels with the work rest
   if (e.sg) o.sg = e.sg
   if (e.note) o.note = e.note
@@ -119,6 +119,14 @@ function cleanWarmupSets(v) {
 function cleanRestSec(v) {
   const n = Math.round(Number(v)) || 0
   return n > 0 ? n : 0
+}
+
+/** The work rest keeps an explicit 0 ("no rest after this exercise"): a whole number of seconds
+ *  0 or above, or null when the plan leaves it to the recipient's default timer. */
+function cleanOwnRestSec(v) {
+  if (v == null || v === '') return null
+  const n = Math.round(Number(v))
+  return Number.isFinite(n) && n >= 0 ? n : null
 }
 
 /** Keep the floors the config sheet and applyIntensifierPlan already enforce, and nothing else:
@@ -212,10 +220,10 @@ export function parsePlan(raw, destinationUnit = 'kg') {
       // planner get the same clamps on the way in that they get on the way out.
       const warm = cleanWarmupSets(e.warmupSets)
       const intens = cleanIntensifier(e.intensifier)
-      const rest = cleanRestSec(e.restSec)
+      const rest = cleanOwnRestSec(e.restSec)
       const warmRest = cleanRestSec(e.warmupRestSec)
       const { warmupSets, intensifier, restSec, warmupRestSec, ...passthrough } = e
-      return convertedExercise({ ...passthrough, ...(warm ? { warmupSets: warm } : {}), ...(intens ? { intensifier: intens } : {}), ...(rest ? { restSec: rest } : {}), ...(warmRest ? { warmupRestSec: warmRest } : {}) }, sourceUnit || destination, destination)
+      return convertedExercise({ ...passthrough, ...(warm ? { warmupSets: warm } : {}), ...(intens ? { intensifier: intens } : {}), ...(rest != null ? { restSec: rest } : {}), ...(warmRest ? { warmupRestSec: warmRest } : {}) }, sourceUnit || destination, destination)
     })
   }))
   return {

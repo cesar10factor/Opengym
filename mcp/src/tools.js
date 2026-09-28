@@ -141,8 +141,8 @@ export const getRoutine = {
           increment: cfg.inc != null ? cfg.inc : undefined,
           deload_factor: cfg.deloadFactor != null ? cfg.deloadFactor : undefined,
           // The exercise's own rest (issue #10). Absent means it inherits the global rest
-          // timer; a superset rests once, taking the longest its members ask for.
-          rest_sec: cfg.restSec > 0 ? cfg.restSec : undefined,
+          // timer; 0 is no rest at all. A superset rests once, taking the longest its members ask for.
+          rest_sec: cfg.restSec >= 0 ? cfg.restSec : undefined,
           policy: policyFor(cfg, r, mode),
           policy_override: cfg.prog || null,
           superset_group: cfg.sg || null,

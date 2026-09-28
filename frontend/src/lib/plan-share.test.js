@@ -109,7 +109,11 @@ describe('what survives a shared plan', () => {
   // instead of letting the exercise keep inheriting whatever their own default is.
   it('leaves an exercise that set no rest free of the field', () => {
     expect('restSec' in roundTrip({})).toBe(false)
-    expect('restSec' in roundTrip({ restSec: 0 })).toBe(false)
+    expect('restSec' in roundTrip({ restSec: -5 })).toBe(false)
+  })
+
+  it('carries an explicit 0 — no rest — rather than handing it to the default timer', () => {
+    expect(roundTrip({ restSec: 0 }).restSec).toBe(0)
   })
 
   it('carries the rest onto the routine mergePlan adds', () => {
