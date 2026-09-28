@@ -80,15 +80,28 @@ export function restOnRecheck({ timerRunning, unitDone, lastUnit }) {
  * `defaultRestSec` of 0 is the rest timer turned off (v1.2.11). That silences the members that
  * have no rest of their own, but an exercise that explicitly asks for one still gets it — the
  * setting is a default, and this field overrides the default.
+ *
+ * An exercise's own `restSec: 0` is "no rest after this one", not "use the default": only an
+ * absent field inherits. So a superset member at 0 rests nothing of its own, and the group still
+ * takes whatever its other members ask for.
  */
 export function restSecFor(entries, unit, defaultRestSec) {
   const fallback = defaultRestSec > 0 ? defaultRestSec : 0
   const idxs = Array.isArray(unit) && unit.length ? unit : []
   if (!idxs.length) return fallback
   return idxs.reduce((longest, idx) => {
-    const own = entries?.[idx]?.target?.restSec
-    return Math.max(longest, own > 0 ? own : fallback)
+    const own = ownRestSec(entries?.[idx]?.target)
+    return Math.max(longest, own ?? fallback)
   }, 0)
+}
+
+/** The rest an exercise config asks for itself, in whole seconds (0 included), or null when it
+ *  asks for none and inherits the global rest timer. */
+export function ownRestSec(cfg) {
+  const v = cfg?.restSec
+  if (v == null || v === '') return null
+  const n = Math.round(Number(v))
+  return Number.isFinite(n) && n >= 0 ? n : null
 }
 
 /**
