@@ -11,7 +11,7 @@ import { Thumb } from './Media.jsx'
 import Icon from './Icon.jsx'
 import { Button } from './ui.jsx'
 import { tappable } from '../lib/use-sheet-keyboard.js'
-import { isFav, sortFavouritesFirst } from '../lib/favourites.js'
+import { isFav, sortRecommendedFirst } from '../lib/favourites.js'
 
 // One explorer for the Library and every catalogue picker. Supplying `onPick` turns
 // a result into a selection; without it the explorer behaves like the normal Library.
@@ -38,8 +38,9 @@ export default function MuscleExplorer({ onPick, onDetail, onPlan }) {
   const base = searchExercises(targeted.filter(e => !bp || e.bp === bp), q)
   const eqOpts = equipmentOf(base)
   const eqOn = eqOpts.includes(eq) ? eq : ''
-  // Favourites float to the top of whatever the filters left (issue #6), the rest keeps its order.
-  const exercises = sortFavouritesFirst(eqOn ? base.filter(e => e.eq === eqOn) : base, S)
+  // Favourites (issue #6), then the exercises you already use, float to the top of whatever the
+  // filters left; the rest keeps its order.
+  const exercises = sortRecommendedFirst(eqOn ? base.filter(e => e.eq === eqOn) : base, S)
   const choose = ex => onPick ? onPick(ex) : onDetail(ex)
 
   return <>

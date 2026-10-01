@@ -12,7 +12,7 @@ import { exerciseDetailSheet, addToRoutineSheet, customExSheet } from '../sheets
 import Icon from '../components/Icon.jsx'
 import { Button } from '../components/ui.jsx'
 import { tappable, useRevealActiveChip } from '../lib/use-sheet-keyboard.js'
-import { isFav, sortFavouritesFirst } from '../lib/favourites.js'
+import { isFav, sortRecommendedFirst } from '../lib/favourites.js'
 
 export default function Library() {
   const nav = useNavigate()
@@ -29,8 +29,9 @@ export default function Library() {
   const eqOpts = equipmentOf(eqFiltered)
   // Drop the equipment filter if the search narrowed it away, so you never hit a dead end.
   const eqOn = eqOpts.includes(eq) ? eq : ''
-  // Favourites float to the top of whatever the filters left (issue #6), the rest keeps its order.
-  const f = sortFavouritesFirst(eqOn ? eqFiltered.filter(e => e.eq === eqOn) : eqFiltered, S)
+  // Favourites (issue #6), then the exercises you already use, float to the top of whatever the
+  // filters left; the rest keeps its order.
+  const f = sortRecommendedFirst(eqOn ? eqFiltered.filter(e => e.eq === eqOn) : eqFiltered, S)
   useRevealActiveChip(bpStrip, bp)
   useRevealActiveChip(eqStrip, eqOn)
 
