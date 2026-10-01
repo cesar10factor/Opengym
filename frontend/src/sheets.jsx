@@ -33,7 +33,7 @@ import { isWarmupRow, hasCompletedWork } from './lib/workout-model.js'
 import { nextUnfinishedUnit, ownRestSec } from './lib/supersetFlow.js'
 import { swapActiveExercise } from './lib/active-exercise-swap.js'
 import { useSheetKeyboard, useRevealActiveChip, tappable } from './lib/use-sheet-keyboard.js'
-import { isFav, toggleFav, sortFavouritesFirst } from './lib/favourites.js'
+import { isFav, toggleFav, sortRecommendedFirst, usageCounts } from './lib/favourites.js'
 import { buildSessionEntries } from './lib/session-start.js'
 import { buildCombinedEntries, deriveSessionName } from './lib/session-merge.js'
 import { workoutsOn, backfillStart, backfillEnd, completeBackfill } from './lib/backfill.js'
@@ -906,16 +906,10 @@ export function deleteCustomEx(ex, afterDelete) {
 }
 
 /* ============================ exercise picker ============================ */
-// Exercises already used in your routines or past workouts (for the "Chosen" filter + a marker).
-function usageMap(st) {
-  const u = {}
-  st.routines.forEach(r => r.ex.forEach(e => { u[e.id] = (u[e.id] || 0) + 1 }))
-  st.workouts.forEach(w => w.entries.forEach(e => { u[e.id] = (u[e.id] || 0) + 1 }))
-  return u
-}
 function ExercisePicker({ onPick, close }) {
   const st = useStore(s => s.S)
-  const usage = usageMap(st)
+  // Exercises already used in your routines or past workouts (for the "Chosen" filter + a marker).
+  const usage = usageCounts(st)
   const [q, setQ] = useState('')
   const [bp, setBp] = useState('')          // '' = all, '★' = chosen, '☆' = favourites, else a body part
   const [eq, setEq] = useState('')          // '' = any equipment
@@ -934,8 +928,9 @@ function ExercisePicker({ onPick, close }) {
   const eqOpts = equipmentOf(eqFiltered)
   // Drop the equipment filter if the search narrowed it away, so you never hit a dead end.
   const eqOn = eqOpts.includes(eq) ? eq : ''
-  // Favourites float to the top of whatever the filters left (issue #6), the rest keeps its order.
-  const f = sortFavouritesFirst(eqOn ? eqFiltered.filter(e => e.eq === eqOn) : eqFiltered, st)
+  // Favourites (issue #6), then the exercises you already use, float to the top of whatever the
+  // filters left; the rest keeps its order.
+  const f = sortRecommendedFirst(eqOn ? eqFiltered.filter(e => e.eq === eqOn) : eqFiltered, st, usage)
   const chosenCount = Object.keys(usage).length
   const favCount = (st.favEx || []).length
   const special = bp === '★' || bp === '☆'

@@ -80,6 +80,20 @@ describe('exercise picker', () => {
     expect(rows[2].querySelector('.tt .fav-star')).toBeNull()
   })
 
+  it('lists exercises you already use right after favourites, most-used first', () => {
+    const plain = names((exercisePicker(vi.fn()), renderTop())).slice(1)
+    useUI.setState({ sheets: [] })
+    const id = n => EXDB.find(e => e.n === n).id
+    const [fav, once, twice] = [plain[9], plain[4], plain[6]]
+    useStore.setState(s => ({ S: { ...s.S, favEx: [id(fav)],
+      routines: [{ id: 'r1', name: 'A', ex: [{ id: id(once) }, { id: id(twice) }] }],
+      workouts: [{ id: 'w1', entries: [{ id: id(twice) }] }] } }))
+    exercisePicker(vi.fn())
+    const shown = names(renderTop()).slice(1)
+    expect(shown.slice(0, 3)).toEqual([fav, twice, once])
+    expect(shown.slice(3)).toEqual(plain.filter(n => ![fav, once, twice].includes(n)))
+  })
+
   it('offers a Favourites chip only when there are favourites, and it filters to them', () => {
     exercisePicker(vi.fn())
     let host = renderTop()
