@@ -126,25 +126,23 @@ máquina nueva sin que nadie tenga que volver a registrarse.
 
 ## 9. Día del iPhone
 
-> **Esto depende de la vinculación de dispositivos (tareas T1–T5 del plan del fork), que a
-> fecha de este documento aún no está desplegada.** No lo des por hecho hasta que esas tareas
-> estén en `done` y hayan pasado la aceptación manual de la Fase A. Cuando lo estén, el flujo
-> previsto es:
+Desde v1.3.9 la vinculación es la de upstream (#95), que sustituyó a la propia del fork
+(`api/link.js`, retirada en el merge de v1.3.9):
 
-1. En el Android (ya con la PWA y el historial dentro): Ajustes → "Link another device" → se
-   genera un código de un solo uso con cuenta atrás.
-2. En el iPhone, en Safari, abre la PWA → "Link this device" → introduce el código.
-3. Face ID confirma y vincula el iPhone al mismo perfil (no crea uno nuevo).
+1. En el Android (ya con la PWA y el historial dentro): Ajustes → "Añadir otro dispositivo" →
+   muestra un código de un solo uso (y un QR) válido 10 minutos.
+2. En el iPhone, en Safari, abre la PWA → "Usar un código de tu otro dispositivo" → escanea el
+   QR o escribe el código.
+3. Face ID crea una passkey propia del iPhone en el mismo perfil (no crea uno nuevo).
 4. Añade la PWA a la pantalla de inicio del iPhone.
 
-**Por qué no antes:** sin vinculación de dispositivos, registrar una passkey desde el iPhone
-hoy crearía un perfil nuevo y vacío — el historial se quedaría atrapado en el perfil del
-Android, inaccesible desde el iPhone.
+**Por qué con código:** sin él, "Crear nuevo perfil" desde el iPhone crearía un perfil nuevo y
+vacío — el historial se quedaría atrapado en el perfil del Android, inaccesible desde el iPhone.
 
 ## 10. Antes de vender el Android
 
 1. Exporta el JSON desde la PWA (por si acaso, aunque el servidor ya sea la fuente de verdad).
-2. En Ajustes → Devices (una vez desplegada T3/T5), revoca la credencial de ese Android.
+2. En Ajustes → Passkeys, toca la del Android y quítala (se pueden renombrar para distinguirlas).
 
 **Por qué va antes de deshacerte del teléfono y no después:** una vez vendido, ya no tienes
 manera físicamente cómoda de comprobar cuál era su credencial exacta entre varias — hazlo con

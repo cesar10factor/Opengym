@@ -13,6 +13,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 const mocks = vi.hoisted(() => {
   const state = { S: null, user: null, coachLocal: null }
   state.replaceState = vi.fn()
+  state.resetEverything = vi.fn()
   state.confirmSheet = vi.fn()
   state.forgetCoach = vi.fn(() => Promise.resolve({ ok: true }))
   state.api = vi.fn(() => Promise.resolve({ ok: true }))
@@ -26,7 +27,7 @@ const mocks = vi.hoisted(() => {
       mut(next)
       state.S = next
     },
-    replaceState: state.replaceState, setUser: vi.fn(), pullState: vi.fn(), pushState: vi.fn(),
+    replaceState: state.replaceState, resetEverything: state.resetEverything, setUser: vi.fn(), pullState: vi.fn(), pushState: vi.fn(),
     signOut: vi.fn(), signOutAll: vi.fn(), resetDemo: vi.fn(), disconnectServer: vi.fn(),
   })
   return state
@@ -45,15 +46,8 @@ vi.mock('../store/useUI.js', () => {
 vi.mock('react-router-dom', () => ({ useNavigate: () => () => {} }))
 vi.mock('../lib/api.js', () => ({
   api: (...a) => mocks.api(...a), appBase: () => '/', webauthnOK: () => false, passkeyLogin: vi.fn(), passkeyRegister: vi.fn(), IS_ANDROID: false,
-  // Settings now mounts a Devices card whenever signed in (T3's DevicesCard), which fetches this
-  // on mount independent of anything this suite cares about ("Reset everything") — resolved with
-  // nothing so that effect doesn't blow up with an unmocked export.
-  linkCode: vi.fn(() => Promise.resolve({ code: 'AAAA-AAAA', exp: Date.now() + 900000 })),
-  listDevices: vi.fn(() => Promise.resolve({ devices: [] })),
-  removeDevice: vi.fn(() => Promise.resolve({ ok: true })),
-  // Same reason, for the Strava card (T11): it probes GET /api/strava/status on mount whenever
-  // signed in, independent of anything this suite cares about. Rejected (not resolved), so
-  // isUnconfiguredStrava's status check reads it as "not configured" and the card renders
+  // The Strava card (T11) probes GET /api/strava/status on mount whenever signed in, independent
+  // of anything this suite cares about. Rejected (not resolved), so isUnconfiguredStrava's status check reads it as "not configured" and the card renders
   // nothing at all — nearest thing to the real behaviour of an instance with no Strava env vars.
   stravaStatus: vi.fn(() => Promise.reject(Object.assign(new Error('not found'), { status: 404 }))),
   stravaDisconnect: vi.fn(() => Promise.resolve({ ok: true })),
@@ -79,6 +73,7 @@ beforeEach(() => {
   mocks.user = null
   mocks.coachLocal = null
   mocks.replaceState.mockClear()
+  mocks.resetEverything.mockClear()
   mocks.confirmSheet.mockClear()
   mocks.forgetCoach.mockClear()
   mocks.api.mockClear()
@@ -106,10 +101,10 @@ describe('Settings — reset everything', () => {
     mount()
     const dialog = openDialog()
     expect(dialog.title).toBe('Reset everything?')
-    expect(dialog.message).toBe('Deletes your plan, workouts and body weight on this device. This cannot be undone.')
+    expect(dialog.message).toBe('Deletes your plan, workouts, body weight, photos and videos on this device. This cannot be undone.')
     act(() => { dialog.onConfirm() })
-    expect(mocks.replaceState).toHaveBeenCalledTimes(1)
-    expect(mocks.replaceState.mock.calls[0]).toEqual([{ reminder: { time: '17:30' }, workouts: [] }, true])
+    // the store's reset: the empty copy, stamped (useStore resetEverything)
+    expect(mocks.resetEverything).toHaveBeenCalledTimes(1)
     expect(serverForgetCalls()).toHaveLength(0)
     expect(mocks.forgetCoach).not.toHaveBeenCalled()
     expect(mocks.toast).toHaveBeenCalledWith('All data reset')
@@ -119,13 +114,12 @@ describe('Settings — reset everything', () => {
     mocks.user = { uid: 'u1', name: 'Ana' }
     mount()
     const dialog = openDialog()
-    expect(dialog.message).toBe('Deletes your plan, workouts and body weight from your profile on this server and on every signed-in device. This cannot be undone.')
+    expect(dialog.message).toBe('Deletes your plan, workouts, body weight, photos and videos from your profile on this server and on every signed-in device. This cannot be undone.')
     act(() => { dialog.onConfirm() })
     expect(serverForgetCalls()).toHaveLength(1)
     expect(serverForgetCalls()[0][1]).toEqual({ method: 'POST', body: '{}' })
     expect(mocks.forgetCoach).not.toHaveBeenCalled()   // no device Coach here
-    expect(mocks.replaceState).toHaveBeenCalledTimes(1)
-    expect(mocks.replaceState.mock.calls[0][1]).toBe(true)
+    expect(mocks.resetEverything).toHaveBeenCalledTimes(1)
     expect(mocks.toast).toHaveBeenCalledWith('All data reset')
   })
 
@@ -136,7 +130,7 @@ describe('Settings — reset everything', () => {
     const dialog = openDialog()
     await act(async () => { dialog.onConfirm(); await Promise.resolve() })
     expect(serverForgetCalls()).toHaveLength(1)
-    expect(mocks.replaceState).toHaveBeenCalledTimes(1)
+    expect(mocks.resetEverything).toHaveBeenCalledTimes(1)
     expect(mocks.toast).toHaveBeenCalledWith('All data reset')
   })
 
@@ -149,7 +143,7 @@ describe('Settings — reset everything', () => {
     act(() => { dialog.onConfirm() })
     expect(serverForgetCalls()).toHaveLength(1)
     expect(mocks.forgetCoach).toHaveBeenCalledTimes(1)
-    expect(mocks.replaceState).toHaveBeenCalledTimes(1)
+    expect(mocks.resetEverything).toHaveBeenCalledTimes(1)
     expect(mocks.toast).toHaveBeenCalledWith('All data reset')
   })
 
@@ -160,6 +154,14 @@ describe('Settings — reset everything', () => {
     act(() => { dialog.onConfirm() })
     expect(serverForgetCalls()).toHaveLength(0)
     expect(mocks.forgetCoach).toHaveBeenCalledTimes(1)
-    expect(mocks.replaceState).toHaveBeenCalledTimes(1)
+    expect(mocks.resetEverything).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('Settings — footer', () => {
+  it('links the source code to its home on GitHub', () => {
+    mount()
+    const link = [...host.querySelectorAll('a')].find(a => a.textContent === 'source code')
+    expect(link.getAttribute('href')).toBe('https://github.com/DuarteSantos8/openGym')
   })
 })

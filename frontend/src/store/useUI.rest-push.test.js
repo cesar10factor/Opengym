@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({ api: vi.fn(() => Promise.resolve({})) }))
 vi.mock('../lib/api.js', () => ({ api: mocks.api }))
-vi.mock('../lib/sound.js', () => ({ beep: vi.fn(), vibrate: vi.fn() }))
+vi.mock('../lib/sound.js', () => ({ beep: vi.fn(), chime: vi.fn(), vibrate: vi.fn() }))
 
 const { useUI } = await import('./useUI.js')
 const { useStore } = await import('./useStore.js')
@@ -37,8 +37,12 @@ describe('rest timer vs. the scheduled push', () => {
 
     vi.advanceTimersByTime(3000)
 
-    expect(useUI.getState().timer).toBe(null)   // the rest really did end
-    expect(calls(CANCEL)).toBe(0)               // …and the alert was left to fire
+    expect(useUI.getState().timer).toMatchObject({ left: 0, ready: true })   // the rest really did end
+    expect(calls(CANCEL)).toBe(0)                                           // …and the alert was left to fire
+    // Dismissing the Ready bar is not ending the rest early: the push may still be on its way.
+    useUI.getState().stopRest()
+    expect(useUI.getState().timer).toBe(null)
+    expect(calls(CANCEL)).toBe(0)
   })
 
   it('cancels the push when the rest is skipped', () => {

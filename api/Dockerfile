@@ -51,8 +51,10 @@ COPY package.json package-lock.json* ./
 # build host happened to be.
 RUN npm ci --omit=dev --omit=optional && npm cache clean --force
 
-COPY *.js ./
-RUN rm -f *.test.js
+# Every module server.js imports from the api root has to be named here: the image carries nothing
+# else, and one that is missing only shows at boot, as ERR_MODULE_NOT_FOUND
+# (test/dockerfile-copy.test.js checks it). strava.js is the fork's.
+COPY server.js push-messages.js verify-error.js password.js rate-limit.js passkeys-store.js device-link.js media.js strava.js ./
 COPY coach ./coach
 ENV NODE_ENV=production
 ENV PORT=3000
