@@ -26,15 +26,43 @@ const LABELS = {
   'auth.pair.create': 'Created a pairing code',
   'auth.pair.ok': 'Paired a phone',
   'auth.pair.fail': 'Pairing failed',
+  // Password sign-in (#118), where the instance offers it.
+  'auth.password.ok': 'Signed in with a password',
+  'auth.password.fail': 'Password sign-in failed',
+  'auth.password.locked': 'Password sign-in paused after repeated failures',
+  'auth.password.set': 'Set a password',
+  'auth.password.change': 'Changed their password',
+  'auth.password.remove': 'Removed their password',
+  'auth.password.reset': 'Used a reset code',
+  // The e-mail a profile may sign in with instead of its name. `msg` is the proof it was set with
+  // and the address masked to two characters ("password · a…@e…") — never the address itself.
+  'auth.email.set': 'Added a sign-in e-mail',
+  'auth.email.change': 'Changed their sign-in e-mail',
+  'auth.email.remove': 'Removed their sign-in e-mail',
+  'auth.email.fail': 'Changing the sign-in e-mail failed',
+  // More than one passkey, and one-time codes for another device (#95). `msg` on an addition or a
+  // code is the proof it was made with (passkey, password); on a removal or a redemption, the
+  // passkey's name.
+  'auth.passkey.add': 'Added a passkey',
+  'auth.passkey.fail': 'Adding a passkey failed',
+  'auth.passkey.remove': 'Removed a passkey',
+  'auth.link.create': 'Made a one-time code for another device',
+  'auth.link.ok': 'Added a device with a one-time code',
+  'auth.link.fail': 'Adding a device with a code failed',
+  // The owner's proof (current password or a passkey) for one of the changes below was refused.
+  'auth.proof.fail': 'Confirming a change failed',
+  // The password throttle paused an address; `msg` says for what (password, signup).
+  'auth.throttled': 'Too many failed attempts from one address',
   'admin.user.disable': 'Disabled an account',
   'admin.user.enable': 'Re-enabled an account',
   'admin.user.delete': 'Deleted an account',
+  'admin.password.reset': 'Issued a password reset code',
   'admin.invite.create': 'Created an invite code',
   'admin.invite.revoke': 'Revoked an invite code',
   'admin.audit.clear': 'Cleared the activity log',
   'admin.denied': 'Blocked from the admin dashboard',
-  // Device linking (Settings → "Link another device"): the code is minted on the existing
-  // profile's device and redeemed, unauthenticated, on the new one — see api/link.js.
+  // The fork's own device linking, before upstream's (auth.link.*) replaced it in v1.3.9. No
+  // longer emitted; kept so older audit.log lines still read as sentences.
   'link.code.created': 'Created a device-linking code',
   'link.ok': 'Linked a device',
   'link.fail': 'Device linking failed',
@@ -55,7 +83,11 @@ const LABELS = {
   'strava.mute.skipped': 'Could not queue hiding a Strava activity',
   'strava.mute.fail': 'Failed to hide a Strava activity from the feed',
   'strava.mute.gaveup': 'Gave up hiding a Strava activity from the feed',
-  'strava.muted': 'Hid a Strava activity from the feed'
+  'strava.muted': 'Hid a Strava activity from the feed',
+  // Photos and videos of custom exercises: "Reset everything" clearing a profile's files, and the
+  // upload or clean-up throttle pausing a profile (`msg` says which).
+  'media.sweep': 'Cleared unused photos and videos',
+  'media.throttled': 'Too many photo or video requests'
 }
 // An unknown event is shown raw rather than dropped or rendered as "undefined": a dashboard
 // that is one version behind the server should still say *something* truthful.
@@ -72,7 +104,7 @@ const REASONS = {
   'invite-invalid': 'the invite code was used or revoked in the meantime',
   'invite-rejected': 'wrong or already-used invite code',
   'code-invalid': 'wrong or expired pairing code',
-  'user-unavailable': 'the profile behind the pairing code is disabled or gone',
+  // From the fork's old device linking, as above.
   'throttled': 'too many recent failed attempts — linking is temporarily locked',
   'code-revoked': 'the linking code was replaced or expired before the passkey was confirmed',
   // Strava reason codes. A few of these (the ones ending in '-') are the audit.test.js source
@@ -97,9 +129,39 @@ const REASONS = {
   'not-connected': 'Strava was disconnected before the activity could be hidden',
   'upload-failed': 'the upload itself failed, so there is nothing left to hide',
   'attempt-': 'a retry attempt to hide the activity from the feed',
-  'expired': 'gave up after the retry window closed'
+  'expired': 'gave up after the retry window closed',
+  'user-unavailable': 'the profile behind the code is disabled or gone',
+  'bad-password': 'wrong password',
+  'bad-current': 'wrong current password',
+  'unknown-name': 'no profile with a password has that name',
+  'unknown-email': 'no profile with a password has that e-mail',
+  'email-taken': 'another profile already uses that e-mail',
+  'step-up-failed': 'the passkey confirming the change was rejected',
+  'reset-invalid': 'wrong or expired reset code',
+  'link-invalid': 'wrong, used or expired device code',
+  'passkey-limit': 'the profile already has as many passkeys as it can hold',
+  // What an `auth.throttled` pause was for.
+  'password': 'wrong passwords or reset codes',
+  'signup': 'wrong invite codes on password signup',
+  'link': 'wrong one-time device codes',
+  'email': 'e-mail addresses already in use',
+  // What a `media.throttled` pause was for.
+  'upload': 'photo and video uploads',
+  'sweep': 'clearing unused photos and videos'
 }
 export const auditReason = msg => REASONS[msg] || (msg ? String(msg) : '')
+
+// What an `auth.proof.fail` was confirming (the server's `act`).
+const ACTS = {
+  'email': 'changing the sign-in e-mail',
+  'email-remove': 'removing the sign-in e-mail',
+  'password': 'setting or changing the password',
+  'password-remove': 'removing the password',
+  'passkey-add': 'adding a passkey',
+  'passkey-remove': 'removing a passkey',
+  'device-link': 'making a one-time code for another device'
+}
+export const auditAct = act => ACTS[act] || (act ? String(act) : '')
 
 // → { title, sub }. `sub` is the house "a · b · c" metadata line used by every list row.
 export function auditLine(e) {
@@ -109,6 +171,7 @@ export function auditLine(e) {
   else if (e.uid) parts.push(e.uid)
   else if (!e.ok) parts.push('unknown caller')
   if (e.tname) parts.push('→ ' + e.tname)
+  if (e.act) parts.push(auditAct(e.act))
   // The reason codes and the invite codes share the msg field; only failures read as a reason.
   if (e.msg) parts.push(e.ok ? e.msg : auditReason(e.msg))
   if (e.ip) parts.push(e.ip)
