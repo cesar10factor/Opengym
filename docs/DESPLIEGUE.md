@@ -248,19 +248,21 @@ Por eso el paso de verificación no es opcional.
 
 ```powershell
 Get-Content .git\auto-deploy\deploy.log -Tail 3       # ¿"deploy OK" o "skipping"?
-(Invoke-RestMethod http://localhost:8080/api/health).version
+git rev-parse --short origin/main
+foreach ($c in 'opengym-api-1','opengym-web-1') { "$c " + (docker inspect $c | ConvertFrom-Json).Config.Labels.'org.opencontainers.image.revision' }
 ```
 
-`version` devuelve `{ref, date}` con el commit que está sirviendo el servidor. Si `ref` no coincide
-con `git rev-parse --short origin/main`, no se desplegó.
+Las dos imágenes llevan como etiqueta el commit con el que se construyeron (los build args
+`VCS_REF`/`BUILD_DATE` que pone el script). Si no coinciden con `origin/main`, no se desplegó.
+Una etiqueta vacía significa que la imagen se construyó sin esos args (un `docker compose up
+--build` a pelo, en vez del script).
 
-**Desde el móvil**, sin tocar el PC: al final del todo de Ajustes aparece el hash y la fecha.
+`/api/health` ya **no** sirve para esto: devolvía `version`, pero ese marcador (y la línea con el
+hash al pie de Ajustes) se perdió en el rebase a upstream v1.3.8. Hoy responde solo `ok` y `users`.
 
-- **Una línea** → bundle y servidor coinciden, estás al día.
-- **Dos líneas** (`App` / `Servidor`) → el service worker te está sirviendo un bundle viejo contra
-  un servidor ya actualizado. Cierra la app y vuelve a abrirla; no hace falta reinstalar la PWA.
-- **Ninguna línea** → la imagen se construyó sin los build args de versión (un `docker compose up
-  --build` a pelo, en vez del script). Se muestra nada antes que un valor inventado.
+**Desde el móvil**, sin tocar el PC: al pie de Ajustes aparece la versión (`openGym v1.3.9`), no el
+commit. Si tras desplegar ves la anterior, el service worker te está sirviendo un bundle viejo:
+cierra la app y vuelve a abrirla; no hace falta reinstalar la PWA.
 
 ### Si hay que desplegar con el árbol sucio
 

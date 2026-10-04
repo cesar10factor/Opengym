@@ -1016,6 +1016,21 @@ export const PT_BR_OVERRIDES = {
   'This exercise has its own rest.': 'Este exercício tem seu próprio descanso.',
   'Rest after each set of this exercise.': 'Descanso após cada série deste exercício.',
   'No rest timer after this exercise.': 'Sem timer de descanso após este exercício.',
+  // --- Strava, and the rest-over line saying what is next (the fork) ---
+  '{0} reps': '{0} reps',
+  'warm-up {0}/{1}': 'aquecimento {0}/{1}',
+  'set {0}/{1}': 'série {0}/{1}',
+  'Strava': 'Strava',
+  'Connect Strava': 'Conectar Strava',
+  'Upload finished workouts automatically.': 'Envia automaticamente os treinos concluídos.',
+  'Connected to Strava': 'Conectado ao Strava',
+  'Finished workouts upload automatically.': 'Os treinos concluídos são enviados automaticamente.',
+  'Disconnect Strava?': 'Desconectar o Strava?',
+  'openGym will stop uploading finished workouts to your Strava account. Anything already there stays.': 'O openGym vai parar de enviar os treinos concluídos para sua conta do Strava. O que já está lá continua.',
+  'Disconnected from Strava': 'Desconectado do Strava',
+  'Could not disconnect from Strava': 'Não foi possível desconectar do Strava',
+  'Could not upload to Strava — will retry later.': 'Não foi possível enviar ao Strava — vamos tentar de novo mais tarde.',
+  'Could not upload that workout to Strava. It will not be tried again.': 'Não foi possível enviar esse treino ao Strava. Não haverá nova tentativa.',
 }
 
 export default { ...pt, ...PT_BR_OVERRIDES }
