@@ -29,6 +29,7 @@ export const ID_MAP = {
   mvdpkzjslecml: '7229',        // Plank pull-through          -> kettlebell plank pass through
   mvdpkzjsp6zkv: '4580',        // Gato-camello                -> cat cow stretch
   mtrnngbe8vm32: '7385',        // Dominadas excéntricas       -> pull up (negative)
+  immt73hns6y77tn: '7385',      // negative pull up, a custom row long gone; only the entries remain
 };
 
 const mapped = id => (Object.hasOwn(ID_MAP, id) ? ID_MAP[id] : id);
