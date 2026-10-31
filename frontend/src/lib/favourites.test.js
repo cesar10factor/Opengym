@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { favIds, isFav, toggleFav, sortFavouritesFirst, sortRecommendedFirst, usageCounts } from './favourites.js'
+import { favIds, isFav, toggleFav, sortFavouritesFirst, sortRecommendedFirst, sortYoursFirst, usageOf } from './favourites.js'
 
 const ex = id => ({ id, n: id })
 
@@ -40,9 +40,9 @@ describe('recommended first', () => {
   }
 
   it('counts each exercise across routines and workouts', () => {
-    expect(usageCounts(S)).toEqual({ c: 3, f: 1, b: 1 })
-    expect(usageCounts({})).toEqual({})
-    expect(usageCounts({ routines: [{}], workouts: [{}] })).toEqual({})
+    expect(usageOf(S)).toEqual({ c: 3, f: 1, b: 1 })
+    expect(usageOf({})).toEqual({})
+    expect(usageOf({ routines: [{}], workouts: [{}] })).toEqual({})
   })
 
   it('puts favourites, then used exercises by how often, then the rest in incoming order', () => {
@@ -59,5 +59,18 @@ describe('recommended first', () => {
   it('returns the very same list when nothing is starred or used', () => {
     const list = ['a', 'b'].map(ex)
     expect(sortRecommendedFirst(list, {})).toBe(list)
+  })
+})
+
+describe('sortYoursFirst', () => {
+  const list = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }]
+  it('puts favourites, then exercises you use, then the rest, each in search order', () => {
+    expect(sortYoursFirst(list, { favEx: ['d'] }, { c: 3, b: 1 }).map(e => e.id)).toEqual(['d', 'b', 'c', 'a'])
+  })
+  it('leaves the search order alone when nothing is yours', () => {
+    expect(sortYoursFirst(list, {}, {})).toBe(list)
+  })
+  it('counts routines and logged workouts as use', () => {
+    expect(usageOf({ routines: [{ ex: [{ id: 'a' }] }], workouts: [{ entries: [{ id: 'a' }, { id: 'b' }] }] })).toEqual({ a: 2, b: 1 })
   })
 })

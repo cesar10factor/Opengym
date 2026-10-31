@@ -1,7 +1,7 @@
-import { useDeferredValue, useRef, useState } from 'react'
+import { useDeferredValue, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '../store/useStore.js'
-import { EXDB, BODYPARTS, allExercises, equipmentOf, categoriesOf, searchExercises, similarExercises } from '../lib/exercises.js'
+import { EXDB, BODYPARTS, allExercises, equipmentOf, byCategory, searchExercises, similarExercises } from '../lib/exercises.js'
 import { MUSCLE_NAME } from '../lib/muscles.js'
 import { activeProfile, exAvailable } from '../lib/equipment.js'
 import { bestWeightFor } from '../lib/history.js'
@@ -14,7 +14,7 @@ import ExerciseViewToggle from '../components/ExerciseViewToggle.jsx'
 import { Button } from '../components/ui.jsx'
 import { tappable, useRevealActiveChip } from '../lib/use-sheet-keyboard.js'
 import { useAutoMore } from '../lib/use-auto-more.js'
-import { isFav, sortRecommendedFirst } from '../lib/favourites.js'
+import { isFav, sortRecommendedFirst, usageOf } from '../lib/favourites.js'
 
 export default function Library() {
   const nav = useNavigate()
@@ -34,16 +34,16 @@ export default function Library() {
   const inPart = searchExercises(allExercises(S).filter(e => !bp || e.bp === bp), q)
   // Kind of exercise (strength, stretching, cardio...), the same fallback as equipment below: a
   // choice the search or body part has narrowed away is ignored for now, never a dead end.
-  const catOpts = categoriesOf(inPart)
-  const catOn = catOpts.includes(cat) ? cat : ''
-  const base = catOn ? inPart.filter(e => e.cat === catOn) : inPart
+  const { opts: catOpts, on: catOn, list: base } = byCategory(inPart, cat)
   const eqFiltered = (profile && !showAll) ? base.filter(e => exAvailable(S, e)) : base
   const eqOpts = equipmentOf(eqFiltered)
   // Drop the equipment filter if the search narrowed it away, so you never hit a dead end.
   const eqOn = eqOpts.includes(eq) ? eq : ''
-  // Favourites (issue #6), then the exercises you already use, float to the top of whatever the
-  // filters left; the rest keeps its order.
-  const f = sortRecommendedFirst(eqOn ? eqFiltered.filter(e => e.eq === eqOn) : eqFiltered, S)
+  // Favourites (issue #6), then the exercises you already use, most-used first, float to the top
+  // of whatever the filters left; the rest keeps its order.
+  const narrowedList = eqOn ? eqFiltered.filter(e => e.eq === eqOn) : eqFiltered
+  const usage = useMemo(() => usageOf(S), [S.routines, S.workouts])
+  const f = sortRecommendedFirst(narrowedList, S, usage)
   useRevealActiveChip(bpStrip, bp)
   useRevealActiveChip(eqStrip, eqOn)
   useRevealActiveChip(catStrip, catOn)

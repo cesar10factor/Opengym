@@ -77,7 +77,8 @@ answers on instead, and a key only if it wants one.
   jobs went. Paste the base the way the provider documents it: a bare host
   (`http://ollama.lan:11434`) gets `/v1` added, and a base that already carries its version
   (`https://openrouter.ai/api/v1`, Zhipu's `…/paas/v4`, Gemini's `…/v1beta/openai`) is used
-  as it is.
+  as it is. A base whose API has no version at all (Open WebUI's `…/openai` mount) works too:
+  when `{base}/v1/…` answers 404, the app tries `{base}/…` and remembers which one answered.
 - A gateway that demands extra headers gets them under **Extra headers**: one `Name: value`
   per line (e.g. opencode Go's `x-opencode-session`), sent with the list, test and job
   calls. `Authorization` and `Content-Type` are refused there — auth framing always wins.
@@ -258,6 +259,21 @@ renders from, so the screen cannot drift from the payload — are:
 | `profile` | the intake answers you gave the Coach, including any limitations |
 | `cohort` (optional) | only with comparison on and your own opt-in: anonymous medians from the other people sharing — never their data, and never yours to them beyond the same medians |
 | `prefs` | unit, language, effort scale |
+
+### Asking before it goes
+
+Before the first request that would send anything to an AI provider, the app asks once: a sheet
+that names the provider (OpenAI, Anthropic, Google Gemini, or the host of a compatible endpoint),
+lists what goes there (the categories above plus whatever you type to the Coach) and says whether
+it goes straight from the phone with your key or through your openGym server to the provider its
+admin picked. "Not now" sends nothing. The intake's own consent screen names the same provider
+and list, so agreeing there counts as this yes and a first-timer is asked once. The answer is kept on that device, per provider and host
+(`frontend/src/lib/coach-consent.js`), so pointing the Coach somewhere else asks again; the Coach
+menu's **AI data sharing** (and Settings → AI Coach on the phone) lists what was allowed and takes
+it back. Switching on automatic reviews asks too, and withdrawing the server's provider switches
+them off. The demo, and a model on your own machine or network (localhost, private and Tailscale
+addresses, `*.local`/`*.lan`), never ask: nothing goes to a third party. `GET /api/coach/disclosure`
+names the host for this, never the rest of the URL.
 
 A review reads a training block, not a training career: the window is capped at **12 weeks or 60
 sessions**. Your profile is identified by a stable pseudonym that is never the user id and never

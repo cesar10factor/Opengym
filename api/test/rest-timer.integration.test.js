@@ -98,7 +98,7 @@ async function withServer(fn) {
   const schedule = seconds => fetch(origin + '/api/push/rest-timer', {
     method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ seconds })
   });
-  const cancel = () => fetch(origin + '/api/push/rest-timer/cancel', { method: 'POST', headers: { Cookie: cookie }, body: '{}' });
+  const cancel = () => fetch(origin + '/api/push/rest-timer/cancel', { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: '{}' });
   const ctx = { uid, origin, cookie, sent, schedule, cancel };
   try {
     await waitReady(origin);

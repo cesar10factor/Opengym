@@ -1,9 +1,11 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { imgSrc, gifSrc, isVideoSrc, isCustomEx, figureOf } from '../lib/exercises.js'
+import { MOBILE } from '../lib/mobile.js'
 import { useStore } from '../store/useStore.js'
 import { t, exerciseNameFor } from '../lib/i18n.js'
 import Icon from './Icon.jsx'
 import CustomMedia, { CustomThumb } from './CustomMedia.jsx'
+import { useAnimSources } from './Animations.jsx'
 
 // An exercise's picture, wherever one shows. A custom exercise goes to CustomMedia.jsx — its own
 // photo, GIF, video or link, from the local media store — and never through imgSrc/gifSrc, which
@@ -30,36 +32,100 @@ function BuiltinMedia({ ex, id, compact, minimizable }) {
   const gifSize = useStore(s => s.S.gifSize)
   const body = useStore(s => figureOf(s.S))
   const update = useStore(s => s.update)
+  // In the store apps the animation may come from a downloaded pack at the chosen quality
+  // (Settings → Animation quality, components/Animations.jsx): the sources are the best file
+  // first and the built-in one last, and one that will not load hands over to the next before the
+  // still is shown. 'Still only' asks for no animation at all. Elsewhere: the built-in file.
+  const anim = useAnimSources(ex, body)
+  const sourcesKey = anim.sources.join('|')
+  const [tried, setTried] = useState({ key: sourcesKey, i: 0 })
+  const at = tried.key === sourcesKey ? tried.i : 0
+  const gif = anim.sources[Math.min(at, Math.max(0, anim.sources.length - 1))] || gifSrc(ex, body)
+  const clip = ex.gif && isVideoSrc(gif) ? gif : null
+  const clipSrc = useClipInMemory(clip)
   if (!ex.gif) return null
   if (minimizable && gifSize === 'off') return null
   const mini = minimizable && gifSize === 'mini'
   const toggleSize = e => { e.stopPropagation(); update(s => { s.gifSize = mini ? 'full' : 'mini' }) }
-  const showGif = playing && failed == null
-  const onError = () => setFailed(showGif ? 'gif' : 'all')
+  const showGif = playing && failed == null && !anim.still
+  const onError = () => {
+    if (showGif && at < anim.sources.length - 1) { setTried({ key: sourcesKey, i: at + 1 }); return }
+    setFailed(showGif ? 'gif' : 'all')
+  }
   const onTap = () => {
-    if (failed) { setFailed(null); setPlaying(true); return }
+    if (failed) { setFailed(null); setPlaying(true); setTried({ key: sourcesKey, i: 0 }); return }
+    if (anim.still) return
     setPlaying(p => !p)
   }
   return (
     <div className={'exmedia' + (compact ? ' compact' : '') + (mini ? ' mini' : '') + (failed === 'all' ? ' broken' : '')} id={id} onClick={onTap}>
       {failed === 'all'
         ? <div className="exmedia-x"><Icon name="dumbbell" /></div>
-        : showGif && isVideoSrc(gifSrc(ex, body))
-          ? <video ref={autoplayMuted} className="catvid" src={gifSrc(ex, body)} poster={imgSrc(ex, body)} autoPlay muted loop playsInline disablePictureInPicture
+        : showGif && clip && clipSrc
+          // No poster: Android's WebView went back to it at every loop and stalled there (the
+          // still above stands in while the clip loads, so nothing is lost without it).
+          ? <video ref={autoplayMuted} className="catvid" src={clipSrc} autoPlay muted loop playsInline disablePictureInPicture
               aria-label={exerciseNameFor(ex)} onError={onError} />
-          : <img decoding="async" draggable={false} src={showGif ? gifSrc(ex, body) : imgSrc(ex, body)} alt={exerciseNameFor(ex)} onError={onError} />}
+          : showGif && clip
+            // the phone app is still reading the clip into memory: the still holds its place
+            ? <img decoding="async" draggable={false} src={imgSrc(ex, body)} alt={exerciseNameFor(ex)} />
+          : <img decoding="async" draggable={false} src={showGif ? gif : imgSrc(ex, body)} alt={exerciseNameFor(ex)} onError={onError} />}
       {minimizable && (
         <button className="giftoggle" onClick={toggleSize}>
           <Icon name={mini ? 'expand' : 'minimize'} />{mini ? t('Expand') : t('Minimize')}
         </button>
       )}
-      {!mini && !failed && (
+      {!mini && !failed && !anim.still && (
         <span className="gifhint">
           <Icon name={playing ? 'pause' : 'play'} />{playing ? t('tap to pause') : t('tap to play')}
         </span>
       )}
     </div>
   )
+}
+
+// In the phone app the clips come out of the app package through Capacitor's local server, which
+// answers every seek with a fresh, slow read: each loop jumped back to 0 and sat there for one to
+// five seconds, and users saw "slow and buggy" animations (the web, with its HTTP cache, never
+// did). So the app reads a clip into memory once (20-40 KB) and plays it from there; the last few
+// stay, so reopening an exercise is instant. The web keeps its URL and the browser's cache.
+const MEMORY_CLIPS = 30
+const clipCache = new Map()          // src -> object URL, oldest first
+const clipLoads = new Map()          // src -> pending promise
+function loadClip(src) {
+  if (clipCache.has(src)) {
+    const url = clipCache.get(src)
+    clipCache.delete(src); clipCache.set(src, url)   // most recently used last
+    return Promise.resolve(url)
+  }
+  if (!clipLoads.has(src)) {
+    clipLoads.set(src, fetch(src)
+      .then(r => (r.ok ? r.blob() : Promise.reject(new Error('HTTP ' + r.status))))
+      .then(blob => {
+        const url = URL.createObjectURL(blob)
+        clipCache.set(src, url)
+        while (clipCache.size > MEMORY_CLIPS) {
+          const [old, oldUrl] = clipCache.entries().next().value
+          clipCache.delete(old); URL.revokeObjectURL(oldUrl)
+        }
+        return url
+      })
+      .finally(() => clipLoads.delete(src)))
+  }
+  return clipLoads.get(src)
+}
+
+export function useClipInMemory(src, inApp = MOBILE) {
+  const [url, setUrl] = useState(() => (src && inApp ? clipCache.get(src) || null : src))
+  useEffect(() => {
+    if (!src || !inApp) { setUrl(src); return }
+    let alive = true
+    setUrl(clipCache.get(src) || null)
+    // A read that fails falls back to the URL itself: playing slowly beats not playing.
+    loadClip(src).then(u => { if (alive) setUrl(u) }, () => { if (alive) setUrl(src) })
+    return () => { alive = false }
+  }, [src, inApp])
+  return url
 }
 
 // React sets `muted` as a property only, never as the attribute, and Android's WebView (the phone

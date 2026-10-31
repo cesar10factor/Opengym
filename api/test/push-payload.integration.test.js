@@ -155,7 +155,7 @@ const WEBPUSH_DEFAULT_TTL_S = 2419200;
 describe('push payload is flat — no Declarative Web Push envelope', () => {
   it('1. the test notification', async () => {
     await withServer(async ctx => {
-      const r = await fetch(ctx.origin + '/api/push/test', { method: 'POST', headers: { Cookie: ctx.cookie } });
+      const r = await fetch(ctx.origin + '/api/push/test', { method: 'POST', headers: { Cookie: ctx.cookie, 'Content-Type': 'application/json' } });
       assert.equal(r.status, 200);
       const { payload, options } = await ctx.waitForSend();
       assert.equal(payload.web_push, undefined, 'the declarative magic number must be gone');
@@ -223,7 +223,7 @@ describe('push payload is flat — no Declarative Web Push envelope', () => {
     // A guard for whatever gets added next: web-push throws on a non-integer or negative TTL, and
     // a throw inside sendNotification costs the notification outright.
     await withServer(async ctx => {
-      await fetch(ctx.origin + '/api/push/test', { method: 'POST', headers: { Cookie: ctx.cookie } });
+      await fetch(ctx.origin + '/api/push/test', { method: 'POST', headers: { Cookie: ctx.cookie, 'Content-Type': 'application/json' } });
       await fetch(ctx.origin + '/api/push/rest-timer', {
         method: 'POST', headers: { Cookie: ctx.cookie, 'Content-Type': 'application/json' },
         body: JSON.stringify({ seconds: 1 })

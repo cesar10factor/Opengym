@@ -21,6 +21,8 @@ const LABELS = {
   'auth.register.denied': 'Signup refused',
   'auth.logout': 'Signed out',
   'auth.logout.all': 'Signed out everywhere',
+  // Settings → "Delete my account": the profile removed itself and everything of theirs.
+  'auth.account.delete': 'Deleted their own account',
   // Device pairing (Settings → "Pair the mobile app"): the code is minted in a signed-in browser
   // tab and redeemed by the app, so "ok" is the phone coming online, not a sign-in.
   'auth.pair.create': 'Created a pairing code',
@@ -57,12 +59,15 @@ const LABELS = {
   'admin.user.enable': 'Re-enabled an account',
   'admin.user.delete': 'Deleted an account',
   'admin.password.reset': 'Issued a password reset code',
+  'admin.role.grant': 'Made someone an admin',
+  'admin.role.revoke': 'Removed someone as admin',
+  'admin.owner.transfer': 'Handed the owner role on',
   'admin.invite.create': 'Created an invite code',
   'admin.invite.revoke': 'Revoked an invite code',
   'admin.audit.clear': 'Cleared the activity log',
   // FIRST_USER_ADMIN=1: the first profile on a fresh instance is made admin as it signs up.
   'admin.first-user': 'Became admin as the first profile',
-  'admin.denied': 'Blocked from the admin dashboard',
+  'admin.denied': 'Blocked from an admin action',
   // The fork's own device linking, before upstream's (auth.link.*) replaced it in v1.3.9. No
   // longer emitted; kept so older audit.log lines still read as sentences.
   'link.code.created': 'Created a device-linking code',
@@ -161,7 +166,8 @@ const ACTS = {
   'password-remove': 'removing the password',
   'passkey-add': 'adding a passkey',
   'passkey-remove': 'removing a passkey',
-  'device-link': 'making a one-time code for another device'
+  'device-link': 'making a one-time code for another device',
+  'account-delete': 'deleting their account'
 }
 export const auditAct = act => ACTS[act] || (act ? String(act) : '')
 

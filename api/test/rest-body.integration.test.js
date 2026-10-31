@@ -208,7 +208,7 @@ describe('the rest-over alert says what is next', () => {
       const r1 = await ctx.schedule({ seconds: 600, body: NEXT });
       assert.equal(r1.status, 200);
       const r2 = await fetch(ctx.origin + '/api/push/rest-timer/cancel', {
-        method: 'POST', headers: { Cookie: ctx.cookie }, body: '{}'
+        method: 'POST', headers: { Cookie: ctx.cookie, 'Content-Type': 'application/json' }, body: '{}'
       });
       assert.equal(r2.status, 200);
       await sleep(500);

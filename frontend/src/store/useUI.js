@@ -7,7 +7,7 @@ import { t } from '../lib/i18n.js'
 import { deviceId } from '../lib/push.js'
 import { nextUpBody } from '../lib/next-up.js'
 import { MOBILE } from '../lib/mobile.js'
-import { armRestAlert, bindNativeRest, disarmRestAlert, holdRestAlert } from '../lib/rest-alert.js'
+import { armRestAlert, bindNativeRest, disarmRestAlert, holdRestAlert, toneNative } from '../lib/rest-alert.js'
 import { useStore } from './useStore.js'
 import { REST_MAX } from '../lib/duration.js'
 import { accentValue } from '../lib/accent.js'
@@ -131,7 +131,7 @@ const runWork = (set, get) => {
     const snd = st.sound, endSound = restSoundOf(st)
     if (left <= 0) {
       if (seenLive && !wk.alerted) {
-        chime(snd, endSound)
+        endTone(snd, endSound)
         alertBuzz([200, 100, 200]); get().flashTimer()
       }
       if (wk.overtime && left > -MAX_WORK_OVERTIME_SEC) { set({ work: { ...wk, left, alerted: true } }); return }
@@ -195,7 +195,7 @@ const runRest = (set, get) => {
     if (left <= 0 && tm.kind === 'switch') {
       // Over like a hold is: the chime and its buzz, then the bar goes. No "Ready", no toast:
       // the other side is the next thing, one tap away.
-      if (seenLive) { chime(snd, endSound); alertBuzz([200, 100, 200]); get().flashTimer() }
+      if (seenLive) { endTone(snd, endSound); alertBuzz([200, 100, 200]); get().flashTimer() }
       stopRestTicking()
       set({ timer: null })
       return
@@ -204,7 +204,7 @@ const runRest = (set, get) => {
       if (seenLive) {
         // The Android alarm for this end stays quiet while the app is on screen, so this chime is
         // the only one. Locked, this branch never runs and the alarm's tone does.
-        chime(snd, endSound)
+        endTone(snd, endSound)
         alertBuzz([200, 100, 200]); get().flashTimer()
       }
       // The toast stays even when the rest ran out while the app was hidden: a guest, or anyone
@@ -224,6 +224,14 @@ const runRest = (set, get) => {
   }
   timerInt = setInterval(timerTick, 1000)
   document.addEventListener('visibilitychange', timerTick)
+}
+
+// The end of a rest or a hold, on screen. In the Android app the native side plays it, so music
+// ducks for it; anywhere else, or if that fails, the page's own chime.
+function endTone(enabled, kind) {
+  if (!enabled) return
+  if (!MOBILE) { chime(enabled, kind); return }
+  toneNative(kind === true ? 'classic' : kind).then(ok => { if (!ok) chime(enabled, kind) })
 }
 
 export const useUI = create((set, get) => ({
@@ -272,6 +280,12 @@ export const useUI = create((set, get) => ({
     clearTimeout(toastTm)
     set({ toastMsg: '', toastAction: null })
     act.run()
+  },
+  // The toast's ×: gone now, its action with it (what it would have undone stays done).
+  dismissToast() {
+    clearTimeout(toastTm)
+    toastPaused = false
+    set({ toastMsg: '', toastAction: null })
   },
   pauseToast() {
     if (!get().toastAction || toastPaused) return
