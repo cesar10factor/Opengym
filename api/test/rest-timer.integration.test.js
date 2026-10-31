@@ -63,7 +63,7 @@ webpush.sendNotification = function (sub, payload, options) {
 };
 `;
 
-async function withServer(fn) {
+async function withServer(fn, seedTimers) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rest-timer-it-'));
   const hookFile = path.join(dataDir, 'capture-hook.mjs');
   const captureFile = path.join(dataDir, 'payloads.log');
@@ -80,6 +80,8 @@ async function withServer(fn) {
     subs: [{ userId: uid, endpoint: sub.endpoint, keys: sub.keys, created: new Date().toISOString() }],
     invites: []
   }));
+
+  if (seedTimers) fs.writeFileSync(path.join(dataDir, 'rest-timers.json'), JSON.stringify(seedTimers(uid)));
 
   const port = await freePort();
   const origin = `http://127.0.0.1:${port}`;
@@ -99,7 +101,7 @@ async function withServer(fn) {
     method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ seconds })
   });
   const cancel = () => fetch(origin + '/api/push/rest-timer/cancel', { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: '{}' });
-  const ctx = { uid, origin, cookie, sent, schedule, cancel };
+  const ctx = { uid, origin, cookie, sent, schedule, cancel, dataDir };
   try {
     await waitReady(origin);
     await fn(ctx);
@@ -108,6 +110,41 @@ async function withServer(fn) {
     try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
   }
 }
+
+describe('a server restart in the middle of a rest', () => {
+  const booked = at => uid => [{ userId: uid, at, body: 'Bench press' }];
+
+  it('still sends the alert for a rest that was running', async () => {
+    const at = Date.now() + 6000;
+    await withServer(async ctx => {
+      await sleep(Math.max(0, at - Date.now()) + 1500);
+      assert.equal(ctx.sent(), 1);
+    }, booked(at));
+  });
+
+  it('fires one that came due while the server was down, if it is still worth it', async () => {
+    await withServer(async ctx => {
+      await sleep(500);
+      assert.equal(ctx.sent(), 1);
+    }, booked(Date.now() - 30000));
+  });
+
+  it('drops one that is too old to mean anything', async () => {
+    await withServer(async ctx => {
+      await sleep(500);
+      assert.equal(ctx.sent(), 0);
+    }, booked(Date.now() - 10 * 60 * 1000));
+  });
+
+  it('forgets a rest that was cancelled', async () => {
+    await withServer(async ctx => {
+      assert.equal((await ctx.schedule(30)).status, 200);
+      assert.equal((await ctx.cancel()).status, 200);
+      const left = JSON.parse(fs.readFileSync(path.join(ctx.dataDir, 'rest-timers.json'), 'utf8'));
+      assert.deepEqual(left, []);
+    });
+  });
+});
 
 describe('the scheduled rest-timer alert fires once, on time', () => {
   it('1. does not fire before its delay, and fires exactly once after it', async () => {

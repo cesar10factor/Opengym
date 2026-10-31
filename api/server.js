@@ -674,6 +674,16 @@ async function sendPush(userId, payload, deviceId) {
 // phone's alert. A client that sends no device id gets the old account-wide behaviour.
 // In memory only — an API restart drops whatever is pending.
 const restTimers = new Map(); // `${userId}:${deviceId}` -> Timeout
+// What each pending timer will send, on disk as well: a rest is the one alert with nobody left to
+// ask again, so a server restart mid-rest must not lose it (the fork had this before the rebase
+// onto upstream dropped it unnoticed, hence the tests in rest-timer.integration.test.js).
+const restPending = new Map(); // same key -> { userId, deviceId, at, lang, body }
+const restTimersFile = path.join(DATA, 'rest-timers.json');
+function saveRestPending() {
+  // Best effort: the timer in memory still fires if the disk refuses, only a restart would lose it.
+  try { atomicWrite(restTimersFile, JSON.stringify([...restPending.values()]), 0o600); }
+  catch (e) { console.error('rest timers: could not save', e.message); }
+}
 const restKey = (userId, deviceId) => `${userId}:${deviceId || ''}`;
 // A browser holds one device id, so a person has a timer or two pending, never more than the
 // devices they train with. Each request with a new id used to leave another hour-long timer (and
@@ -703,37 +713,69 @@ function sanitizeRestBody(v) {
   return v.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, REST_BODY_MAX);
 }
 
-function scheduleRestTimer(userId, deviceId, sec, lang, body) {
-  const k = restKey(userId, deviceId);
-  const t = restTimers.get(k);
-  if (t) clearTimeout(t);
-  restTimers.delete(k);                     // re-inserted below, so the map stays oldest first
-  const mine = [...restTimers.keys()].filter(x => x.startsWith(userId + ':'));
-  for (const old of mine.slice(0, Math.max(0, mine.length - MAX_REST_TIMERS_PER_USER + 1))) {
-    clearTimeout(restTimers.get(old)); restTimers.delete(old);
-  }
+function fireRestTimer({ userId, deviceId, lang, body }) {
+  const msg = restTimerPush(lang);
+  sendPush(userId, {
+    ...msg,
+    ...(body ? { body } : {}),
+    ttl: REST_TIMER_MAX_LATE_MS / 1000,
+    // The app is a HashRouter (frontend/src/App.jsx), so the workout screen is at /#/workout —
+    // "/workout" would 404 into the app root and look like the deep link almost worked.
+    navigate: '/#/workout'
+  }, deviceId);
+}
+function armRestTimer(k, entry) {
+  restPending.set(k, entry);
   restTimers.set(k, setTimeout(() => {
     restTimers.delete(k);
-    const msg = restTimerPush(lang);
-    sendPush(userId, {
-      ...msg,
-      ...(body ? { body } : {}),
-      ttl: REST_TIMER_MAX_LATE_MS / 1000,
-      // The app is a HashRouter (frontend/src/App.jsx), so the workout screen is at /#/workout —
-      // "/workout" would 404 into the app root and look like the deep link almost worked.
-      navigate: '/#/workout'
-    }, deviceId);
-  }, sec * 1000));
+    restPending.delete(k);
+    saveRestPending();
+    fireRestTimer(entry);
+  }, Math.max(0, entry.at - Date.now())));
+}
+function dropRestTimer(k) {
+  clearTimeout(restTimers.get(k));
+  restTimers.delete(k);
+  restPending.delete(k);
+}
+function scheduleRestTimer(userId, deviceId, sec, lang, body) {
+  const k = restKey(userId, deviceId);
+  dropRestTimer(k);                         // re-inserted below, so the map stays oldest first
+  const mine = [...restTimers.keys()].filter(x => x.startsWith(userId + ':'));
+  for (const old of mine.slice(0, Math.max(0, mine.length - MAX_REST_TIMERS_PER_USER + 1))) dropRestTimer(old);
+  armRestTimer(k, { userId, deviceId, at: Date.now() + sec * 1000, lang, body });
+  saveRestPending();
 }
 function cancelRestTimer(userId, deviceId) {
   // no device id: an older client — clear everything the account has pending, as it always did
-  for (const [k, t] of restTimers) {
-    if (deviceId ? k === restKey(userId, deviceId) : k.startsWith(userId + ':')) { clearTimeout(t); restTimers.delete(k); }
+  const before = restTimers.size;
+  for (const k of [...restTimers.keys()]) {
+    if (deviceId ? k === restKey(userId, deviceId) : k.startsWith(userId + ':')) dropRestTimer(k);
   }
+  if (restTimers.size !== before) saveRestPending();
+}
+// Rests that were running when the server stopped. One whose end passed while it was down still
+// fires if that is within REST_TIMER_MAX_LATE_MS, and is dropped if not: later than that the alert
+// is noise. Everything is re-validated: this file is only as trustworthy as the disk it sits on.
+function rearmRestTimers() {
+  let saved;
+  try { saved = JSON.parse(fs.readFileSync(restTimersFile, 'utf8')); } catch { return; }
+  if (!Array.isArray(saved)) return;
+  const now = Date.now();
+  for (const e of saved) {
+    if (!e || !db.users.some(u => u.id === e.userId) || !Number.isFinite(e.at)) continue;
+    if (now - e.at > REST_TIMER_MAX_LATE_MS || e.at - now > 3600 * 1000) continue;
+    armRestTimer(restKey(e.userId, deviceIdOf(e.deviceId)), {
+      userId: e.userId, deviceId: deviceIdOf(e.deviceId), at: e.at,
+      lang: typeof e.lang === 'string' ? e.lang : undefined, body: sanitizeRestBody(e.body)
+    });
+  }
+  saveRestPending();
 }
 // A device id is what the browser made up for itself (lib/push.js): one short token per browser
 // profile, nothing identifying. Anything else is treated as absent.
 const deviceIdOf = v => (typeof v === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(v) ? v : undefined);
+rearmRestTimers();
 
 // "Workout planned today" reminder — one per user per day, at their chosen time.
 // effectiveRoutineId (queue-aware) lives in ./queue.js — see there for the DONE RULE.

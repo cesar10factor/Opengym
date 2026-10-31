@@ -30,6 +30,37 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+describe('booking the alert on a patchy connection', () => {
+  const offline = () => Promise.reject(new TypeError('Failed to fetch'))
+
+  it('tries again with what is left of the rest, until the server has it', async () => {
+    mocks.api.mockImplementationOnce(offline).mockImplementationOnce(offline)
+    useUI.getState().startRest(60)
+    await vi.advanceTimersByTimeAsync(10000)
+
+    const booked = mocks.api.mock.calls.filter(c => c[0] === SCHEDULE).map(c => JSON.parse(c[1].body).seconds)
+    expect(booked).toEqual([60, 57, 51])
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(calls(SCHEDULE)).toBe(3)
+  })
+
+  it('stops trying once the rest is skipped', async () => {
+    mocks.api.mockImplementationOnce(offline)
+    useUI.getState().startRest(60)
+    await vi.advanceTimersByTimeAsync(1000)
+    useUI.getState().stopRest()
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(calls(SCHEDULE)).toBe(1)
+  })
+
+  it('does not retry an answer the server gave on purpose', async () => {
+    mocks.api.mockImplementationOnce(() => Promise.reject(Object.assign(new Error('locked'), { status: 429 })))
+    useUI.getState().startRest(60)
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(calls(SCHEDULE)).toBe(1)
+  })
+})
+
 describe('rest timer vs. the scheduled push', () => {
   it('leaves the push alone when the rest runs out on its own', () => {
     useUI.getState().startRest(2)

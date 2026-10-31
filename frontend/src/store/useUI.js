@@ -33,8 +33,27 @@ const restBody = () => {
 // alert the phone in the gym was waiting for, because the server held one timer per account.
 // `body` is dropped from the JSON when undefined — the "nothing to announce" case (last set of
 // the workout) — so the server keeps its own generic text rather than an empty line.
-const pushRestTimer = sec => { if (useStore.getState().user) api('/api/push/rest-timer', { method: 'POST', body: JSON.stringify({ seconds: sec, deviceId: deviceId(), body: restBody() }) }).catch(() => {}) }
-const cancelPushRestTimer = () => { if (useStore.getState().user) api('/api/push/rest-timer/cancel', { method: 'POST', body: JSON.stringify({ deviceId: deviceId() }) }).catch(() => {}) }
+// One try would not do: the schedule goes out as the rest starts, in a gym with patchy coverage,
+// and a lost request means no alert at all. A network or server failure tries again, with what is
+// left of the rest, until it lands, the rest ends or another booking replaces it. Anything the
+// server answered on purpose (signed out, throttled) is final.
+let restBooking = 0
+const pushRestTimer = sec => {
+  if (!useStore.getState().user) return
+  const booking = ++restBooking
+  const endsAt = Date.now() + sec * 1000
+  const body = restBody()
+  const attempt = n => {
+    const left = Math.round((endsAt - Date.now()) / 1000)
+    if (booking !== restBooking || left < 1 || !useStore.getState().user) return
+    api('/api/push/rest-timer', { method: 'POST', body: JSON.stringify({ seconds: left, deviceId: deviceId(), body }) }).catch(e => {
+      if (e?.status >= 400 && e.status < 500) return
+      setTimeout(() => attempt(n + 1), Math.min(15000, 3000 * 2 ** n))
+    })
+  }
+  attempt(0)
+}
+const cancelPushRestTimer = () => { restBooking++; if (useStore.getState().user) api('/api/push/rest-timer/cancel', { method: 'POST', body: JSON.stringify({ deviceId: deviceId() }) }).catch(() => {}) }
 
 // Books the end of a rest with whatever can announce it while the app is not looking: in the
 // Android app a native alarm and the countdown notification, everywhere else (and wherever that
