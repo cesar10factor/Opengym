@@ -52,13 +52,13 @@ describe('the local rest-over alert follows the Push switch', () => {
     await runOut()
     expect(showNotification).toHaveBeenCalledTimes(1)
     const [title, opts] = showNotification.mock.calls[0]
-    expect(title).toBe('Rest over — next set!')
+    expect(title).toBe('Rest’s over. Next set!')
     expect(opts.tag).toBe('rest-timer')
     // No active workout in this test (S.active is unset), so there is no "what's next" line to
     // compose — restBody() falls back to the same text as the title, exactly what the server's
     // own push would say too (api/push-messages.js restTimerPush), so the two alerts never
     // disagree about what happened. See useUI.next-up.test.js for the case with a real workout.
-    expect(opts.body).toBe('Rest over — next set!')
+    expect(opts.body).toBe('Rest’s over. Next set!')
     expect(opts.renotify).toBeUndefined()   // replacing an already-delivered push must be silent
   })
 

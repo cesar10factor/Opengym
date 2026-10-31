@@ -85,23 +85,16 @@ export function restOnRecheck({ timerRunning, unitDone, lastUnit }) {
  * absent field inherits. So a superset member at 0 rests nothing of its own, and the group still
  * takes whatever its other members ask for.
  */
-export function restSecFor(entries, unit, defaultRestSec) {
+export function restSecFor(entries, unit, defaultRestSec, setRest = null) {
   const fallback = defaultRestSec > 0 ? defaultRestSec : 0
   const idxs = Array.isArray(unit) && unit.length ? unit : []
   if (!idxs.length) return fallback
   return idxs.reduce((longest, idx) => {
-    const own = ownRestSec(entries?.[idx]?.target)
-    return Math.max(longest, own ?? fallback)
+    // `setRest` is the ticked set's own rest ({ idx, sec }, a pyramid set): it stands in for
+    // that member's exercise rest, and a superset still takes the longest of the group.
+    const own = setRest && setRest.idx === idx && setRest.sec > 0 ? setRest.sec : entries?.[idx]?.target?.restSec
+    return Math.max(longest, own > 0 ? own : fallback)
   }, 0)
-}
-
-/** The rest an exercise config asks for itself, in whole seconds (0 included), or null when it
- *  asks for none and inherits the global rest timer. */
-export function ownRestSec(cfg) {
-  const v = cfg?.restSec
-  if (v == null || v === '') return null
-  const n = Math.round(Number(v))
-  return Number.isFinite(n) && n >= 0 ? n : null
 }
 
 /**

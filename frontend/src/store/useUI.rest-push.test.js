@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({ api: vi.fn(() => Promise.resolve({})) }))
 vi.mock('../lib/api.js', () => ({ api: mocks.api }))
-vi.mock('../lib/sound.js', () => ({ beep: vi.fn(), chime: vi.fn(), vibrate: vi.fn() }))
+vi.mock('../lib/sound.js', () => ({ beep: vi.fn(), chime: vi.fn(), vibrate: vi.fn(), alertBuzz: vi.fn() }))
 
 const { useUI } = await import('./useUI.js')
 const { useStore } = await import('./useStore.js')

@@ -130,14 +130,6 @@ describe('restSecFor', () => {
     expect(restSecFor(entries, [0, 0], 0)).toBe(0)
   })
 
-  it('treats an exercise’s own 0 as no rest, not as the global default', () => {
-    const zero = [...entries, { id: 'd', target: { mode: 'reps', restSec: 0 } }]
-    expect(restSecFor(zero, [3], 90)).toBe(0)
-    // In a superset the group still rests as long as its other members ask for.
-    expect(restSecFor(zero, [3, 2], 90)).toBe(45)
-    expect(restSecFor(zero, [3, 0], 90)).toBe(90)
-  })
-
   it('survives a missing unit or entry rather than timing NaN', () => {
     expect(restSecFor(entries, null, 90)).toBe(90)
     expect(restSecFor(entries, [], 90)).toBe(90)
@@ -184,5 +176,20 @@ describe('warmupRestSecFor', () => {
     expect(warmupRestSecFor(legacy, 0, 120)).toBe(45)
     expect(warmupRestSecFor(undefined, 0, 120)).toBe(120)
     expect(warmupRestSecFor({ target: {}, sets: [] }, 0, 120)).toBe(120)
+  })
+})
+
+describe('restSecFor with a pyramid set’s own rest', () => {
+  const entries = [{ target: { restSec: 90 } }, { target: { restSec: 60 } }]
+  it('the set’s rest stands in for its exercise’s', () => {
+    expect(restSecFor(entries, [0], 120, { idx: 0, sec: 180 })).toBe(180)
+    expect(restSecFor(entries, [0], 120, { idx: 0, sec: 30 })).toBe(30)
+  })
+  it('0 falls back to the exercise’s rest', () => {
+    expect(restSecFor(entries, [0], 120, { idx: 0, sec: 0 })).toBe(90)
+  })
+  it('a superset still takes the longest of the group', () => {
+    expect(restSecFor(entries, [0, 1], 120, { idx: 1, sec: 30 })).toBe(90)
+    expect(restSecFor(entries, [0, 1], 120, { idx: 1, sec: 200 })).toBe(200)
   })
 })
