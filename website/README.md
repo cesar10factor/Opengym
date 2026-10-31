@@ -1,4 +1,4 @@
-# opengym.duarte-santos.ch
+# opengym.ch
 
 Source of the project website — plain hand-written HTML/CSS/JS, no build step,
 served by nginx.
@@ -10,20 +10,25 @@ Not in this folder (added at deploy time):
   `banner.png`, and `social.jpg` (1200×630, the og:image on every page)
 - `icon-180.png` / `icon-512.png` — copied from `../frontend/public/` (the same
   icons the PWA uses, so the browser tab, home screen and app all match)
-- `openGym.apk` — the signed release build (see `../docs/MOBILE.md`)
+- `app-store-badge.svg`: Apple's official "Download on the App Store" badge, shown once the
+  download card's `data-appstore` says `live`. The APKs themselves are not here any more: the
+  download buttons point at the GitHub release (`releases/latest/download/<name>`)
 - `demo/` — the browser-only demo build of the app, embedded in the `#demo` section and
-  reachable on its own at `/demo/`. Built from `../frontend` with `VITE_DEMO=1` and the
-  jsDelivr media bases (see the `pages` job in `../.gitlab-ci.yml`), so the ~140 MB
-  of exercise media stays out of it. It has to live on this host: the site frames it, and
-  `X-Frame-Options: SAMEORIGIN` would block it from anywhere else.
+  reachable on its own at `/demo/`. Built from `../frontend` with `VITE_DEMO=1`, with the
+  180 px exercise media from `../catalogue/media` staged into `demo/exercise-media/` by
+  `../scripts/catalogue/stage-media.mjs` (see the `pages` job in `../.gitlab-ci.yml`).
+  Never put larger media here (see `../catalogue/media/NOTICE.md`). It has to live on
+  this host: the site frames it, and `X-Frame-Options: SAMEORIGIN` would block it from
+  anywhere else.
 
-Navigation is a topic rail (`.side`): one title/subtitle list of everything on the
-site, a fixed column beside the page from 1300 px up and the hamburger sheet below
-that, with a scrollspy lighting the section under the reader. The top bar keeps
-only the brand, GitHub, Discord and the download button.
+Every page has the same top bar. Pages with a table of contents (home, docs, about, API)
+also have a contents drawer (`.side`), opened by the green **Contents** pill in the
+bottom-left corner. On the two reference pages (`<body class="dock">`: docs and API) a
+screen 1200 px or wider shows the contents as a fixed column beside the text instead, so
+there is nothing to find; a scrollspy lights the section under the reader.
 
 `site.js` carries five independent pieces, each one failing soft so the page is
-complete without any of them: the topic-rail sheet, its scrollspy, the scroll
+complete without any of them: the contents drawer (docked on wide docs/API pages), its scrollspy, the scroll
 reveals, the demo iframe (injected only once the frame is on screen, and never
 below 700 px, where the CSS swaps it for an "open it full-screen" card), and the
 two things that come from the public api.github.com at view time — the star/issue

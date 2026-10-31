@@ -2,16 +2,15 @@
 import { t } from './i18n-core.js'
 import { MOBILE } from './mobile.js'
 import { appBase } from './app-base.js'
+import { nativeFetch } from './capacitor-fetch.js'
 
 export const IS_APPLE = /iPhone|iPad|iPod|Macintosh/.test(navigator.userAgent)
 export const IS_ANDROID = /Android/.test(navigator.userAgent)
 export const BIO = IS_APPLE ? 'Face ID / Touch ID' : IS_ANDROID ? 'fingerprint or face unlock' : 'your fingerprint, face or PIN'
-export const VAULT = IS_APPLE ? 'iCloud Keychain' : IS_ANDROID ? 'Google Password Manager' : 'your password manager'
-// The same phrases in the UI language. They go into translated sentences ("confirm with {0}"),
-// so the English constants above left an English phrase in the middle of every other language.
+// The same phrase in the UI language. It goes into translated sentences ("confirm with {0}"),
+// so the English constant above left an English phrase in the middle of every other language.
 // Functions, not constants: the pack is loaded after this module is.
 export const bio = () => (IS_APPLE ? t('Face ID / Touch ID') : IS_ANDROID ? t('fingerprint or face unlock') : t('your fingerprint, face or PIN'))
-export const vault = () => (IS_APPLE ? t('iCloud Keychain') : IS_ANDROID ? t('Google Password Manager') : t('your password manager'))
 // PublicKeyCredential is the WebAuthn-specific capability signal. Do not also gate the UI on
 // navigator.credentials: some browsers expose WebAuthn while that generic Credential Management
 // API check produces a false negative (notably Chrome on iOS). The real create/get calls still run
@@ -23,6 +22,19 @@ export const webauthnOK = () => typeof window.PublicKeyCredential !== 'undefined
 let remoteBase = ''
 let remoteToken = null
 export function setRemoteAuth(base, token) { remoteBase = base || ''; remoteToken = token || null }
+// A Cloudflare Access service token (lib/cf-access.js): sent only to the origin it was entered
+// for, never on a same-origin request, where the browser's own Access session cookie already
+// does the job, and never to a server that merely happens to be paired or typed in.
+let accessHeaders = {}
+let accessOrigin = ''
+export function setAccessHeaders(h, origin) { accessHeaders = Object.assign({}, h); accessOrigin = origin || '' }
+const originOf = base => { try { return new URL(base).origin } catch { return '' } }
+const accessFor = base => (base && accessOrigin && originOf(base) === accessOrigin ? accessHeaders : {})
+const remoteHeaders = () => Object.assign({}, accessFor(remoteBase), remoteToken ? { Authorization: 'Bearer ' + remoteToken } : {})
+// The paired server and what a request to it carries (the token, an Access service token for that
+// origin), for the phone's background check (lib/nudge-check.js), which runs with no WebView and
+// so has to be handed them. null when this is not a paired phone.
+export const remoteAuth = () => (remoteBase && remoteToken ? { base: remoteBase, headers: remoteHeaders() } : null)
 
 export { appBase }
 
@@ -36,6 +48,14 @@ const TIMEOUT_GET_MS = 20000
 const TIMEOUT_MS = 60000
 
 const failure = (message, code, status) => Object.assign(new Error(message), { code, status })
+// The message an error answer is shown with. The server's English `error`, except a write the
+// origin check refused (or a passkey made at another address): a self-hoster whose ORIGIN is not
+// the address they opened only ever saw "cross-origin request refused", and nobody could tell
+// what to change. The answer names ORIGIN, so the sentence can too (api/verify-error.js).
+function refusal(status, body) {
+  if (body && body.code === 'origin-mismatch') return t('This server only takes changes made at {0}. If you opened openGym at another address, whoever runs the server can set ORIGIN and RP_ID to match it (the self-hosting guide shows how).', String(body.expected || '?'))
+  return (body && body.error) || ('HTTP ' + status)
+}
 
 export async function api(path, opts) {
   const { timeout, ...init } = opts || {}
@@ -45,8 +65,7 @@ export async function api(path, opts) {
   // there and the change was marked as synced while the server never saw it. status 0, not
   // undefined: this is not "offline", and the store must not show it as such.
   if (MOBILE && !remoteBase) throw failure(t('This phone is not connected to a server.'), 'not-paired', 0)
-  const headers = Object.assign({ 'Content-Type': 'application/json' }, init.headers)
-  if (remoteToken) headers.Authorization = 'Bearer ' + remoteToken
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, init.headers, remoteHeaders())
   // A paired phone has an absolute base of its own; everyone else is relative to where the app
   // is served, so a subpath deployment reaches its own API instead of the proxy's root.
   const url = remoteBase ? remoteBase + path : appBase().replace(/\/$/, '') + path
@@ -81,7 +100,7 @@ async function exchange(url, init) {
   try { data = await r.json() } catch { parsed = false }
   const body = parsed && data && typeof data === 'object' ? data : null
   // The body rides along on the error: a 409 from /api/data carries the server's document.
-  if (!r.ok) { const e = new Error((body && body.error) || ('HTTP ' + r.status)); e.status = r.status; e.data = body || {}; throw e }
+  if (!r.ok) { const e = new Error(refusal(r.status, body)); e.status = r.status; e.data = body || {}; throw e }
   if (!body) throw failure(t('The server answered with something other than openGym data.'), 'bad-response', r.status)
   return body
 }
@@ -105,7 +124,7 @@ export function beacon(path, body) {
    answer allows it for GET and PUT); both refuse to run on a phone without a server, like api(). */
 
 const mediaUrl = path => (remoteBase ? remoteBase + path : appBase().replace(/\/$/, '') + path)
-const mediaHeaders = () => (remoteToken ? { Authorization: 'Bearer ' + remoteToken } : {})
+const mediaHeaders = remoteHeaders
 const notPaired = () => failure(t('This phone is not connected to a server.'), 'not-paired', 0)
 const timedOut = () => failure(t('The server did not answer in time.'), 'timeout')
 
@@ -138,7 +157,7 @@ export async function apiBlob(path, { expectSize, idleMs = 30000, fetchImpl = gl
     if (!r.ok) {
       let body = null
       try { body = await r.json() } catch { /* not JSON: a proxy's page */ }
-      throw Object.assign(new Error((body && body.error) || 'HTTP ' + r.status), { status: r.status, code: (body && body.code) || 'http', data: body || {} })
+      throw Object.assign(new Error(refusal(r.status, body)), { status: r.status, code: (body && body.code) || 'http', data: body || {} })
     }
     const announced = Number(r.headers?.get?.('content-length'))
     if (Number.isFinite(announced) && announced > max) { ctl?.abort(); throw tooBig(r.status) }
@@ -196,7 +215,7 @@ export function apiUpload(path, blob, mime, { onProgress, idleMs = 60000, XHR = 
         return
       }
       if (xhr.status === 413 && !body) { reject(failure('HTTP 413', 'proxy-too-large', 413)); return }
-      const e = Object.assign(new Error((body && body.error) || 'HTTP ' + xhr.status), { status: xhr.status, code: (body && body.code) || 'http', data: body || {} })
+      const e = Object.assign(new Error(refusal(xhr.status, body)), { status: xhr.status, code: (body && body.code) || 'http', data: body || {} })
       if (xhr.status === 429) {
         const header = Number(xhr.getResponseHeader && xhr.getResponseHeader('Retry-After'))
         e.retryAfter = Number(body && body.retryAfter) || (Number.isFinite(header) && header > 0 ? header : 60)
@@ -210,12 +229,112 @@ export function apiUpload(path, blob, mime, { onProgress, idleMs = 60000, XHR = 
   })
 }
 
+// "Failed to fetch" is all the WebView says when pairing never got an answer (#329), and it says
+// the same for a wrong address and for a reverse proxy that answered the CORS preflight itself
+// without letting the app's origin in (a Traefik `headers` middleware with an allow-list, which
+// never passes the OPTIONS on to openGym). A no-cors request needs no preflight and tells the two
+// apart: it settles when the server is there at all. Its answer cannot be read, nor needs to be.
+const PROBE_MS = 5000
+const hostOfBase = base => {
+  try { const u = new URL(base); return u.host + u.pathname.replace(/\/$/, '') } catch { return base || '' }
+}
+// What /api/health says when it can be read (the app's native fetch reads it past CORS):
+// 'opengym', 'front' when something in front of openGym answered in its place (a redirect, a
+// 401/403 or an HTML page: an SSO login, forward-auth, a proxy rule), 'other' for an answer that
+// is just not openGym's (another app's JSON, a proxy's plain "404 page not found"), and null
+// when nothing readable came back.
+async function healthAnswer(base, ms) {
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null
+  let timer = null
+  try {
+    const res = await Promise.race([
+      nativeFetch(base + '/api/health', { method: 'GET', headers: { Accept: 'application/json' }, ...(ctl ? { signal: ctl.signal } : {}) }),
+      new Promise((_, reject) => { timer = setTimeout(() => { if (ctl) ctl.abort(); reject(new Error('timeout')) }, ms) }),
+    ])
+    const text = await res.text()
+    let body = null
+    try { body = JSON.parse(text) } catch { body = null }
+    if (res.ok && body && typeof body === 'object' && body.ok === true) return 'opengym'
+    const type = (res.headers && typeof res.headers.get === 'function' && res.headers.get('content-type')) || ''
+    const html = /html/i.test(type) || /^\s*</.test(text || '')
+    if ((res.status >= 300 && res.status < 400) || res.status === 401 || res.status === 403 || res.status === 407 || html) return 'front'
+    return 'other'
+  } catch {
+    return null
+  } finally { clearTimeout(timer) }
+}
+async function whyUnreachable(base, ms) {
+  let reached = false
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null
+  let timer = null
+  try {
+    await Promise.race([
+      fetch(base + '/api/health', { mode: 'no-cors', cache: 'no-store', ...(ctl ? { signal: ctl.signal } : {}) }),
+      new Promise((_, reject) => { timer = setTimeout(() => { if (ctl) ctl.abort(); reject(new Error('timeout')) }, ms) }),
+    ])
+    reached = true
+  } catch { /* not reachable either */ }
+  finally { clearTimeout(timer) }
+  // Something answered. Whether it is openGym needs a readable answer: in the app the native
+  // fetch reads /api/health past CORS. A login page or a proxy rule answering in openGym's place
+  // is not a wrong address, and a page that is simply not openGym's is (#329). No readable
+  // answer at all leaves the CORS explanation.
+  const answer = reached ? await healthAnswer(base, ms) : null
+  if (answer === 'front') {
+    return failure(t('That address answers, but a login page or proxy rule replied instead of openGym. Let /api/ through to openGym unchanged. See “Phone app and CORS” in docs/SELF_HOSTING.md.'), 'proxy-answered')
+  }
+  if (answer === 'other') {
+    return failure(t('That address answers, but it isn’t an openGym server. Check the URL.'), 'not-opengym')
+  }
+  if (reached) {
+    const origin = globalThis.location?.origin || 'https://localhost'
+    return failure(t('Your server was reached, but it refused the app’s request (CORS). If a reverse proxy such as Traefik adds CORS headers, let requests from {0} through to openGym unchanged. See “Phone app and CORS” in docs/SELF_HOSTING.md.', origin), 'cors')
+  }
+  // An address typed without a scheme is tried as https://. A home server on plain http gives
+  // that try nothing to talk to, while the phone's browser, which tries http, opens it (#428).
+  let u = null
+  try { u = new URL(base) } catch { /* said as it is below */ }
+  if (u && u.protocol === 'https:' && looksLocal(u.hostname)) {
+    return failure(t('Could not reach {0} over https://. If your server runs on plain http (common at home), type http://{0} instead.', hostOfBase(base)), 'unreachable')
+  }
+  return failure(t('Could not reach {0}. Check the address and that this phone can reach it.', hostOfBase(base)), 'unreachable')
+}
+
+// An address that only makes sense on a home network: a private or link-local IP, a name
+// without a dot ("nas"), or a LAN-only suffix (.local, .lan, .home.arpa, .internal). Those are
+// where a server most often runs on plain http, so an https:// try that got nowhere is worth a
+// hint about http:// (#428). A public name gets the plain "could not reach" instead.
+export function looksLocal(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
+  if (!h) return false
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(h)
+  if (v4) {
+    const a = +v4[1], b = +v4[2]
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) ||
+      (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127)
+  }
+  if (h.includes(':')) return h === '::1' || /^f[cd]/.test(h) || /^fe[89ab]/.test(h)
+  return !h.includes('.') || /\.(local|lan|home|home\.arpa|internal|localdomain)$/.test(h)
+}
+
 // Bootstraps the connection itself: the base isn't configured yet (that's what this call decides),
-// so it talks straight to the server the user typed in, no Authorization header.
-export async function pairRedeem(serverBase, code) {
-  const data = await request(serverBase + '/api/pair/redeem', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code })
-  }, TIMEOUT_GET_MS)
+// so it talks straight to the server the user typed in, no Authorization header. A Cloudflare
+// Access token goes along when it was entered for that server: without it Access never lets
+// the code through, and to any other server it would be handed to a stranger.
+export async function pairRedeem(serverBase, code, { probeMs = PROBE_MS } = {}) {
+  let data
+  try {
+    data = await request(serverBase + '/api/pair/redeem', {
+      method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, accessFor(serverBase)), body: JSON.stringify({ code })
+    }, TIMEOUT_GET_MS)
+  } catch (e) {
+    // A wrong, spent or expired code is the one refusal a person can fix, and the server says it
+    // in English only ('invalid or expired code'), so it is said here in the UI language.
+    if (e && e.status === 400) throw failure(t('That code didn’t work. Codes last 5 minutes and work once, so grab a fresh one.'), 'pair-invalid', 400)
+    // The server answered (any status) or did not answer in time: that error says it already.
+    if (e && (e.status != null || e.code)) throw e
+    throw await whyUnreachable(serverBase, probeMs)
+  }
   // Anything that is not a pairing would be saved as one — and the phone would then send every
   // change to a server that never gave it a token.
   if (!data.token || !data.user) throw failure(t('The server answered with something other than openGym data.'), 'bad-response', 200)
@@ -254,6 +373,19 @@ function credToJSON(cred) {
     out.response.userHandle = r.userHandle ? bufToB64u(r.userHandle) : null
   }
   return out
+}
+// A passkey sign-in or sign-up the server refused, in the UI language. The routes send a stable
+// `code` beside their English message; an answer without one (an older server, a verify error)
+// is shown as it came.
+export function passkeyError(e, fallback) {
+  switch (e?.data?.code) {
+    case 'invite': return t('That invite code is not valid.')
+    case 'unknown-credential': return t('This server doesn’t know that passkey. Make a profile first.')
+    case 'disabled': return t('This account has been disabled.')
+    case 'challenge-expired': return t('That took a little too long. Give it another go.')
+    case 'origin-mismatch': return refusal(e.status, e.data)
+  }
+  return e?.message || fallback
 }
 export async function passkeyRegister(name, code) {
   const { cid, options } = await api('/api/register/options', { method: 'POST', body: JSON.stringify({ name, code: code || '' }) })

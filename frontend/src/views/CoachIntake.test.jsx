@@ -15,7 +15,9 @@ import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CoachIntake from './CoachIntake.jsx'
 import { requestPlan, disclosure } from '../lib/coach-api.js'
-import { CONSENT_VERSION } from '../lib/coach.js'
+import { CONSENT_VERSION, CATEGORY_TEXT } from '../lib/coach.js'
+import { setLang } from '../lib/i18n.js'
+import { consentTarget, hasAiConsent, aiConsents, _resetAiConsent } from '../lib/coach-consent.js'
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
@@ -26,6 +28,8 @@ const mocks = vi.hoisted(() => {
     user: state.user,
     config: state.config,
     coachLocal: null,
+    ready: true,
+    refreshConfig: async () => state.config,
     update: mut => mut(state.S),
   })
   return state
@@ -48,6 +52,10 @@ vi.mock('react-router-dom', () => ({
 vi.mock('../lib/coach-api.js', () => ({
   requestPlan: vi.fn(() => Promise.resolve({})),
   disclosure: vi.fn(() => Promise.resolve(null)),
+  JOB_ERRORS: { busy: 'the app’s busy line' },
+  ensureAiConsent: vi.fn(() => Promise.resolve(true)),
+  coachVia: () => 'server',
+  isDeclined: e => e?.code === 'declined',
 }))
 vi.mock('../coach.css', () => ({}))
 
@@ -82,12 +90,10 @@ const tap = (sel, text) => {
 }
 const footBtn = () => host.querySelector('.ob-foot .btn')
 const cont = () => act(() => footBtn().click())
-// A <select> is driven the same way an <input> is: React tracks the value through the
-// prototype setter, so a bare el.value never reaches onChange.
-const pick = (el, value) => act(() => {
-  Object.getOwnPropertyDescriptor(el.constructor.prototype, 'value').set.call(el, String(value))
-  el.dispatchEvent(new Event('change', { bubbles: true }))
-})
+// A wheel is driven by its keys, the spinbutton every wheel in the app is for a screen reader.
+const spin = (el, key) => act(() => { el.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })) })
+// An <input> is driven through the prototype setter: React tracks the value there, so a bare
+// el.value never reaches onChange.
 const typeIn = (el, value) => act(() => {
   Object.getOwnPropertyDescriptor(el.constructor.prototype, 'value').set.call(el, value)
   el.dispatchEvent(new Event('input', { bubbles: true }))
@@ -122,6 +128,17 @@ describe('CoachIntake — who gets in', () => {
   })
 })
 
+// A cold start (a reload on #/coach/intake): the boot's /api/config was read before the session
+// and has no `coach` key yet. The screen waits for the answer for this session, not home.
+describe('CoachIntake — a cold start', () => {
+  it('asks again and stays while the config is the one from before the session', async () => {
+    mocks.config = { allow_guest: true }
+    mount()
+    expect(mocks.nav).not.toHaveBeenCalledWith('/home', { replace: true })
+    expect(host.textContent).toBe('')
+  })
+})
+
 describe('CoachIntake — the consent screen', () => {
   it('is the first screen on a fresh profile, and is not one of the progress dots', () => {
     mount()
@@ -140,11 +157,69 @@ describe('CoachIntake — the consent screen', () => {
     expect(all('.ob-dot')).toHaveLength(7)
   })
 
+  it('agreeing is also the yes for the provider it names, so the data-sharing sheet does not ask again', async () => {
+    localStorage.clear(); _resetAiConsent()
+    const info = { provider: 'openai', providerLabel: 'OpenAI API', host: 'api.openai.com', categories: ['plan'], payer: 'instance' }
+    vi.mocked(disclosure).mockResolvedValue(info)
+    mount()
+    await settle()
+    tap('button', 'I understand')
+    await settle()
+    expect(await hasAiConsent(consentTarget(info, 'server'))).toBe(true)
+    expect((await aiConsents()).map(c => c.name)).toEqual(['OpenAI'])
+  })
+
+  it('a compatible endpoint is named by its host, and a model on the LAN or an unread disclosure records nothing', async () => {
+    localStorage.clear(); _resetAiConsent()
+    vi.mocked(disclosure).mockResolvedValue({ provider: 'compatible', providerLabel: 'OpenAI-compatible endpoint', host: 'llm.example.org', categories: ['plan'], payer: 'instance' })
+    mount()
+    await settle()
+    expect(host.textContent).toContain('Sent to llm.example.org')
+    act(() => root.unmount()); root = createRoot(host)
+
+    vi.mocked(disclosure).mockResolvedValue({ provider: 'compatible', providerLabel: 'OpenAI-compatible endpoint', host: '192.168.1.20:11434', categories: ['plan'], payer: 'instance' })
+    mount()
+    await settle()
+    tap('button', 'I understand')
+    await settle()
+    act(() => root.unmount()); root = createRoot(host)
+
+    mocks.S = fresh()
+    vi.mocked(disclosure).mockResolvedValue(null)
+    mount()
+    await settle()
+    tap('button', 'I understand')
+    await settle()
+    expect(await aiConsents()).toEqual([])
+  })
+
   it('"Not now" writes nothing at all and goes back to the plan', () => {
     mount()
     tap('button', 'Not now')
     expect(mocks.S.coach).toBeUndefined()
     expect(mocks.nav).toHaveBeenCalledWith('/plan')
+  })
+
+  it('a returning athlete whose consent is out of date reads the new terms only, then goes back to the Coach', () => {
+    // CONSENT_VERSION moved (the training line now names the session notes). The chat's redirect
+    // used to replay all seven questions and end in a new plan request.
+    mocks.S.coach = { consent: { agreedAt: '2026-09-01T00:00:00Z', version: CONSENT_VERSION - 1 }, profile: { goal: 'strength', experience: 'intermediate', daysPerWeek: 3 }, chat: [] }
+    mount()
+    expect(eyebrow()).toBe('Before we start')
+    expect(all('.ob-dot')).toHaveLength(0)
+    tap('button', 'I understand')
+    expect(mocks.S.coach.consent.version).toBe(CONSENT_VERSION)
+    expect(mocks.S.coach.profile.goal).toBe('strength')            // the answers stay as they were
+    expect(mocks.nav).toHaveBeenCalledWith('/coach', { replace: true })
+    expect(vi.mocked(requestPlan)).not.toHaveBeenCalled()
+  })
+
+  it('the training line names the session notes, which the Coach reads', () => {
+    // api/coach/core/payload.js sends each recent session's note (cleanWorkout). The consent
+    // screen listed weights, reps, times, effort and durations, and never said so.
+    mount()
+    const training = all('.ob-consent-row').find(r => r.querySelector('b').textContent === 'Your logged training')
+    expect(training.textContent).toContain('your session notes')
   })
 
   it('lists the built-in categories first, then whatever the server says actually goes', async () => {
@@ -188,6 +263,19 @@ describe('CoachIntake — the consent screen', () => {
     expect(all('.ob-consent-row').map(r => r.querySelector('b').textContent)).toEqual(['Your plan', 'sleep'])
   })
 
+  it('names every category in the app’s language', async () => {
+    // The screen used to pass these lines to t() as variables, which check-source-strings cannot
+    // see, and eight of the ten had no translation in any pack.
+    const english = Object.values(CATEGORY_TEXT).map(text => text())
+    const de = (await import('../locales/de.js')).default
+    await setLang('de')
+    try {
+      mount()
+      expect(all('.ob-consent-row').map(r => [r.querySelector('b').textContent, r.querySelector('span').textContent]))
+        .toEqual(english.map(([title, sub]) => [de[title], de[sub]]))
+    } finally { await setLang('en') }
+  })
+
   it('is skipped entirely once consent is on file', () => {
     mocks.S.coach = { consent: { agreedAt: '2026-09-01T00:00:00Z', version: CONSENT_VERSION }, profile: null, chat: [] }
     mount()
@@ -220,22 +308,50 @@ describe('CoachIntake — the two answers that gate the flow', () => {
     expect(eyebrow()).toBe('Schedule')
   })
 
-  it('refuses a session shorter than ten minutes', () => {
+  it('names and describes every goal and starting point in the app’s language', async () => {
+    // The screen used to pass these lines to t() as variables, which check-source-strings cannot
+    // see, and the eight descriptions had no translation in any pack.
+    const goals = [
+      ['Get stronger', 'Heavier lifts, lower reps.'],
+      ['Build muscle', 'Volume and progression.'],
+      ['General fitness', 'Balanced, sustainable training.'],
+      ['Lose fat', 'Keep strength while leaning out.'],
+      ['Endurance', 'Higher reps, less rest, cardio.']
+    ]
+    const experience = [
+      ['New to lifting', 'First months in the gym.'],
+      ['Coming back after a break', 'You know the movements; the numbers need rebuilding.'],
+      ['Training regularly', 'Consistent for a while now.']
+    ]
+    const choices = () => all('.ob-choice').map(c => [c.querySelector('.ob-choice-t').firstChild.textContent, c.querySelector('.ob-choice-s').textContent])
+    const de = (await import('../locales/de.js')).default
+    mocks.S.coach = { consent: { agreedAt: '2026-09-01T00:00:00Z', version: CONSENT_VERSION }, profile: null, chat: [] }
+    await setLang('de')
+    try {
+      mount()
+      expect(choices()).toEqual(goals.map(([title, sub]) => [de[title], de[sub]]))
+      act(() => host.querySelector('.ob-choice').click())
+      cont()
+      expect(choices()).toEqual(experience.map(([title, sub]) => [de[title], de[sub]]))
+    } finally { await setLang('en') }
+  })
+
+  // The app's own wheels (DurationWheel.jsx HourMinuteWheel), like every other time picker.
+  it('the session wheels never go under ten minutes', () => {
     mount(); walkTo('Session length')
-    const [hours, minutes] = all('.ob-wheel')
+    expect(all('.ob-wheel')).toEqual([])
+    const [hours, minutes] = all('.dw .dw-col')
+    expect(hours.getAttribute('aria-label')).toBe('Hours')
     expect(footBtn().disabled).toBe(false)
-
-    // 00:00 is not a session, so the screen snaps it to five minutes — and five is still refused.
-    pick(hours, 0)
-    expect(footBtn().disabled).toBe(true)
-    expect(minutes.value).toBe('5')
-
-    pick(minutes, 0)                      // both wheels at nought snaps back to five, not zero
-    expect(minutes.value).toBe('5')
-    expect(footBtn().disabled).toBe(true)
-
-    pick(minutes, 15)
+    spin(hours, 'Home')                   // 0:00 is not a session: the wheels stop at 0:10
+    expect(hours.getAttribute('aria-valuenow')).toBe('0')
+    expect(minutes.getAttribute('aria-valuenow')).toBe('2')
+    expect(host.querySelector('.dw-read').textContent).toBe('0:10')
     expect(footBtn().disabled).toBe(false)
+    spin(minutes, 'ArrowDown')
+    expect(host.querySelector('.dw-read').textContent).toBe('0:10')
+    spin(minutes, 'ArrowUp')
+    expect(host.querySelector('.dw-read').textContent).toBe('0:15')
     cont()
     expect(eyebrow()).toBe('Equipment')
   })
@@ -290,6 +406,10 @@ describe('CoachIntake — moving around', () => {
 describe('CoachIntake — the answers themselves', () => {
   it('preferred days toggle off and back on, and stay in weekday order', () => {
     mount(); walkTo('Schedule')
+    // The count and the weekdays are two labelled groups (owner, TestFlight: they read as one list).
+    expect(all('.ob-group').map(g => g.querySelector('.ob-sub').textContent)).toEqual(['Days per week', 'Which days suit you? (optional)'])
+    expect(all('.ob-group')[0].querySelectorAll('.ob-day')).toHaveLength(7)
+    expect(all('.ob-group')[1].querySelectorAll('.ob-wd')).toHaveLength(7)
     const wd = () => all('.ob-wd').filter(b => b.classList.contains('on')).map(b => b.textContent)
     expect(wd()).toEqual(['Mo', 'We', 'Fr'])
     tap('.ob-wd', 'We')
@@ -300,6 +420,32 @@ describe('CoachIntake — the answers themselves', () => {
     walkTo('Almost there')
     cont()
     expect(mocks.S.coach.profile).toMatchObject({ daysPerWeek: 5, preferredDays: [0, 1, 5] })
+  })
+
+  // #620: Mon/Wed/Fri is the pre-selection for three. Left standing under a count of four, it
+  // saved a profile asking for four days that preferred three nobody had picked.
+  it('the pre-selected days follow the count while nobody has picked their own', () => {
+    mount(); walkTo('Schedule')
+    const wd = () => all('.ob-wd').filter(b => b.classList.contains('on')).map(b => b.textContent)
+    tap('.ob-day', '4')
+    expect(wd()).toEqual(['Mo', 'Tu', 'Th', 'Fr'])
+    tap('.ob-day', '2')
+    expect(wd()).toEqual(['Mo', 'Th'])
+    tap('.ob-day', '4')
+    walkTo('Almost there')
+    cont()
+    expect(mocks.S.coach.profile).toMatchObject({ daysPerWeek: 4, preferredDays: [1, 2, 4, 5] })
+  })
+
+  it('days picked by hand stay put when the count changes, even fewer than the count', () => {
+    mount(); walkTo('Schedule')
+    const wd = () => all('.ob-wd').filter(b => b.classList.contains('on')).map(b => b.textContent)
+    tap('.ob-wd', 'Fr')
+    tap('.ob-day', '4')
+    expect(wd()).toEqual(['Mo', 'We'])
+    walkTo('Almost there')
+    cont()
+    expect(mocks.S.coach.profile).toMatchObject({ daysPerWeek: 4, preferredDays: [1, 3] })
   })
 
   it('equipment chips toggle and reach the profile', () => {
@@ -314,10 +460,11 @@ describe('CoachIntake — the answers themselves', () => {
   it('the quick length chips and the two wheels write the same field', () => {
     mount(); walkTo('Session length')
     tap('.ob-quick .chip', '90')
-    const [hours, minutes] = all('.ob-wheel')
-    expect(hours.value).toBe('1')
-    expect(minutes.value).toBe('30')
-    pick(hours, 2)
+    const [hours, minutes] = all('.dw .dw-col')
+    expect(hours.getAttribute('aria-valuenow')).toBe('1')
+    expect(minutes.getAttribute('aria-valuenow')).toBe('6')
+    expect(host.querySelector('.dw-read').textContent).toBe('1:30')
+    spin(hours, 'ArrowUp')
     expect(host.querySelector('.ob-quick .chip.on')).toBe(null)
     walkTo('Almost there'); cont()
     expect(mocks.S.coach.profile.sessionMin).toBe(150)
@@ -374,6 +521,14 @@ describe('CoachIntake — building the plan', () => {
     expect(mocks.S.coach.chat[0]).toMatchObject({ role: 'user', kind: 'intake' })
   })
 
+  // The server's refusal is English; the class beside it picks the app's own, translated line.
+  it('a refusal the server names a class for says the app\'s line for it, not the server\'s English', async () => {
+    vi.mocked(requestPlan).mockRejectedValueOnce(Object.assign(new Error('the Coach is already thinking about your training'), { status: 409, data: { error: 'the Coach is already thinking about your training', code: 'busy' } }))
+    mount(); walkTo('Almost there')
+    cont(); await settle()
+    expect(mocks.toast).toHaveBeenCalledWith('the app’s busy line')
+  })
+
   it('falls back to a generic message when the failure carries none', async () => {
     vi.mocked(requestPlan).mockRejectedValueOnce(new Error())
     mount(); walkTo('Almost there')
@@ -422,6 +577,13 @@ describe('CoachIntake — the editor behind ?edit=1', () => {
     expect(host.querySelector('.ob-field textarea').value).toBe('bad knee')
     walkTo('Almost there')
     expect(footBtn().textContent).toContain('Save')
+  })
+
+  it('keeps the saved weekdays when the count changes', () => {
+    editing(PROFILE)
+    mount(); walkTo('Schedule')
+    tap('.ob-day', '3')
+    expect(all('.ob-wd').filter(b => b.classList.contains('on')).map(b => b.textContent)).toEqual(['Tu', 'Th'])
   })
 
   it('skips consent even when none was ever given — the editor is not a second opt-in', () => {

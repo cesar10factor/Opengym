@@ -645,10 +645,20 @@ export function stravaExerciseFor(ex) {
   if (override && STRAVA_VOCABULARY.has(override)) return override;
 
   const nameMatch = matchByName(ex);
-  if (nameMatch && STRAVA_VOCABULARY.has(nameMatch)) return nameMatch;
+  if (nameMatch && STRAVA_VOCABULARY.has(nameMatch)) {
+    // A "... stretch" is a stretch, whatever else its name says ("dead hang stretch"): the v1.4
+    // catalogue has many of them and a single other word must not relabel one as that lift.
+    const isStretch = (ex.n || '').trim().toLowerCase().endsWith('stretch');
+    const inFamily = nameMatch.endsWith('STRETCH') || CATEGORY_OF_ID.get(nameMatch) === 'WARM_UP';
+    return isStretch && !inFamily ? 'STRETCH' : nameMatch;
+  }
 
   const generic = genericFor(ex);
-  return STRAVA_VOCABULARY.has(generic) ? generic : 'TOTAL_BODY_GENERIC';
+  if (!STRAVA_VOCABULARY.has(generic)) return 'TOTAL_BODY_GENERIC';
+  // Same guard as the name tier: a keyword must not put an exercise under another muscle's category.
+  const domains = CATEGORY_DOMAINS[CATEGORY_OF_ID.get(generic)];
+  const domain = ex.tg ? TG_DOMAIN[ex.tg] : undefined;
+  return domains && domain && !domains.includes(domain) ? 'TOTAL_BODY_GENERIC' : generic;
 }
 
 // Exposed for the test suite's coverage accounting (which tier a given exercise resolved through).

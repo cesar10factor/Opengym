@@ -262,7 +262,8 @@ test('a flood from a shared address leaves passkey sign-in, registration and pai
   assert.equal(signedIn.status, 200, 'passkey sign-in');
   assert.ok(signedIn.cookie);
   assert.equal((await h.req('POST', '/api/register/options', { body: { name: 'Cleo', code: 'goodcode' } })).status, 200, 'passkey signup');
-  const { code } = (await h.req('POST', '/api/pair/create', { cookie: signedIn.cookie })).body;
+  const pairProof = (await h.req('POST', '/api/login/options', { body: {} })).body;
+  const { code } = (await h.req('POST', '/api/pair/create', { cookie: signedIn.cookie, body: { cid: pairProof.cid, credential: key.assertion(pairProof.options.challenge) } })).body;
   assert.equal((await h.req('POST', '/api/pair/redeem', { body: { code } })).status, 200, 'pairing');
   assert.equal(h.audit().some(e => e.ev === 'auth.throttled' && e.msg !== 'password'), false);
 
@@ -377,10 +378,13 @@ for (const [label, stored] of [['current', () => pwHash], ['older parameters', (
     const owner = `gymsid=${mintSession('u1')}`;
     const next = 'a much better passphrase';
     const attempts = [];
-    let change;
-    for (let i = 0; i < 30; i++) {
+    let change, changed = false;
+    // Stop once the change has answered. A sign-in with the old password sent after that is a real
+    // wrong password, and the sixth of those would pause the name for the new one below too.
+    for (let i = 0; i < 30 && !changed; i++) {
       attempts.push(login(h, 'Ana', GOOD, `198.51.100.${10 + i}`));
-      if (i === 3) change = h.req('POST', '/api/account/password', { body: { next, current: GOOD }, cookie: owner, ip: '203.0.113.200' });
+      if (i === 3) change = h.req('POST', '/api/account/password', { body: { next, current: GOOD }, cookie: owner, ip: '203.0.113.200' })
+        .finally(() => { changed = true; });
       await new Promise(r => setTimeout(r, 20));
     }
     const done = await change;

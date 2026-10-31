@@ -1,20 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { fmtVol, isoOf, todayISO, MONTHS, weekStartOf, weekDayOffset } from '../lib/format.js'
-import { workoutDay, workoutDuration, workoutVolume } from '../lib/history.js'
-import { t } from '../lib/i18n.js'
+import { workoutDay, workoutDuration, sessionVolume } from '../lib/history.js'
+import { t, tn } from '../lib/i18n.js'
 import { tappable } from '../lib/use-sheet-keyboard.js'
 import { Segmented } from './ui.jsx'
+import { dayNoteOf, dayNoteLine } from '../lib/day-notes.js'
 
 const normalizeMetric = value => value === 'vol' ? 'vol' : 'time'
-
-// Legacy records without entries only have the cached volume available. Current records are
-// always recomputed from their completed sets so unit changes and warm-up/per-side rules stay
-// authoritative.
-const volumeOf = w => {
-  if (Array.isArray(w?.entries)) return Math.max(0, Number(workoutVolume(w)) || 0)
-  const volume = Number(w?.vol)
-  return Number.isFinite(volume) ? Math.max(0, volume) : 0
-}
 
 // GitHub-style activity heatmap, shaded by the selected time or volume metric per day.
 export default function Heatmap({ S, onDay, metric: selectedMetric, onMetricChange }) {
@@ -36,7 +28,8 @@ export default function Heatmap({ S, onDay, metric: selectedMetric, onMetricChan
     if (!day) return
     const a = agg[day] = agg[day] || { n: 0, vol: 0, min: 0 }
     a.n++
-    a.vol += volumeOf(w)
+    // Recounted from the sets (sessionVolume), so units, per-side and the warm-up switch apply.
+    a.vol += sessionVolume(w, S)
     a.min += Math.max(0, Math.round(workoutDuration(w) / 60000))
   })
   const values = Object.values(agg).map(a => a[metricValue]).filter(v => v > 0).sort((a, b) => a - b)
@@ -67,10 +60,13 @@ export default function Heatmap({ S, onDay, metric: selectedMetric, onMetricChan
       const day = new Date(colStart); day.setDate(colStart.getDate() + d)
       const key = isoOf(day)
       const a = agg[key]
-      const cls = 'hm-c l' + level(a) + (key === todayISO() ? ' today' : '') + (day > today ? ' future' : '')
+      // A day off with a note (#261): outlined, its note in the tooltip, and tappable like a
+      // trained day so the note can be read (and changed) on a phone too.
+      const note = !a && dayNoteOf(S, key)
+      const cls = 'hm-c l' + level(a) + (note ? ' noted' : '') + (key === todayISO() ? ' today' : '') + (day > today ? ' future' : '')
       cells.push(<div key={d} className={cls}
-        title={key + (a ? ` · ${t(a.n === 1 ? '{0} workout' : '{0} workouts', a.n)} · ${t('{0} min', a.min)} · ${fmtVol(a.vol, S.unit)}` : '')}
-        {...tappable(a ? () => onDay?.(key) : undefined)} />)
+        title={key + (a ? ` · ${tn('{0} workout', '{0} workouts', a.n)} · ${t('{0} min', a.min)} · ${fmtVol(a.vol, S.unit)}` : note ? ` · ${dayNoteLine(note, t)}` : '')}
+        {...tappable(a || note ? () => onDay?.(key) : undefined)} />)
     }
     cols.push(<div key={wk} className="hm-col">{cells}</div>)
   }

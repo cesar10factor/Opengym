@@ -5,6 +5,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 const DATA_DIR = process.env.OPENGYM_DATA || path.join(process.cwd(), 'data')
+// Whether a data directory was asked for, as opposed to the ./data guess.
+const DATA_SET = !!process.env.OPENGYM_DATA
 
 // null = no state file (brand-new account); undefined = not yet loaded.
 let _state = undefined
@@ -12,9 +14,32 @@ let _db = undefined
 let _uid = null
 let _watcher = null
 let _loadedMtime = 0    // mtimeMs we last read at — used to catch watcher omissions
+let _seeded = false     // a test's in-memory state, never compared with the disk
 
+// null means one thing only: the file is not there (an account that never synced from a device).
+// Every other failure — no permission on the mount, a truncated or corrupt file — is a real fault,
+// and reporting it as "no synced state yet, sign in from a device" sends the operator to fix the
+// wrong thing while the data sits there unreadable.
 function readJsonOrNull(file) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return null }
+  let raw
+  try {
+    raw = fs.readFileSync(file, 'utf8')
+  } catch (e) {
+    if (e.code === 'ENOENT') return null
+    // Node's own message repeats the path it was given, and that is the server's absolute path:
+    // the basename identifies the file just as well.
+    const base = path.basename(file)
+    const err = new Error(`cannot read ${base}: ${e.code || e.name} — ${String(e.message).replaceAll(file, base)}`)
+    err.code = 'EIO'
+    throw err
+  }
+  try {
+    return JSON.parse(raw)
+  } catch (e) {
+    const err = new Error(`${path.basename(file)} is not valid JSON: ${e.message}`)
+    err.code = 'EIO'
+    throw err
+  }
 }
 
 function reloadDb() { _db = readJsonOrNull(path.join(DATA_DIR, 'db.json')) || { users: [], creds: [], subs: [], invites: [] } }
@@ -40,17 +65,23 @@ function resolveUid() {
     reloadDb()
     if (_db.users.length === 1) return _db.users[0].id
     if (_db.users.length === 0) throw new Error(`no openGym users found in ${path.join(DATA_DIR, 'db.json')} — sign in at least once on a device`)
-    // Multiple users in db.json but no state files yet — list their ids, not the (empty)
-    // files list. Hit when accounts exist but none has signed in on a device.
-    throw new Error(
-      `multiple openGym users found — set OPENGYM_UID to one of: ${_db.users.map(u => u.id).join(', ')}\n` +
-      `  (look them up in ${path.join(DATA_DIR, 'db.json')} under "users"[].id)`
-    )
+    // Multiple users in db.json but no state file yet — hit when accounts exist but none has
+    // signed in on a device.
+    throw ambiguousUid(_db.users.map(u => u.id))
   }
-  throw new Error(
-    `multiple openGym users found — set OPENGYM_UID to one of: ${files.join(', ')}\n` +
-    `  (look them up in ${path.join(DATA_DIR, 'db.json')} under "users"[].id)`
-  )
+  throw ambiguousUid(files)
+}
+
+// "Which profile?" is a config question for the operator, and this message travels as a tool
+// result: into the model's context and into whatever transcript it lands in. Every account id on
+// the box, plus the server's absolute paths, has no business there. The count and the setting to
+// change are what the model can act on; the ids and the path go to the server log on stderr,
+// where the operator is already reading the startup line.
+function ambiguousUid(ids) {
+  console.error(`[opengym-mcp] ${ids.length} openGym profiles in ${DATA_DIR}: ${ids.join(', ')} — set OPENGYM_UID to one of them`)
+  const err = new Error(`this openGym data directory holds ${ids.length} profiles — set OPENGYM_UID to the one this server should read (the ids are on the server's stderr, and in db.json under "users"[].id)`)
+  err.code = 'EINVAL'
+  return err
 }
 
 // Idempotent. Picks the uid, loads db.json, attaches the watcher, primes state.
@@ -91,8 +122,12 @@ export function getState() {
   // Re-read if the file's mtime changed since our last load — covers watcher omissions and
   // platforms with no fs.watch.
   let mtime
-  try { mtime = fs.statSync(file).mtimeMs } catch {
-    return _state === undefined ? null : _state
+  try { mtime = fs.statSync(file).mtimeMs } catch (e) {
+    if (_seeded) return _state
+    // Gone (the account was deleted, say): without a watcher the cached profile used to be
+    // served on and on. Anything else gets the read below, which reports it as the fault it is.
+    if (e.code === 'ENOENT') { _state = null; _loadedMtime = 0; return null }
+    mtime = NaN
   }
   if (_state === undefined || mtime !== _loadedMtime) {
     const fresh = readJsonOrNull(file)
@@ -101,8 +136,10 @@ export function getState() {
       // field the app added since the snapshot was last saved shows up undefined-safe.
       _state = Object.assign({}, defaultsShape(), fresh)
       _loadedMtime = mtime
-    } else if (_state === undefined) {
-      _state = null  // no state file at all — never signed in on a device
+    } else {
+      // No state file at all (never signed in on a device), or it went between stat and read.
+      _state = null
+      _loadedMtime = 0
     }
   }
   return _state
@@ -117,12 +154,34 @@ export function getUser() {
 
 export const dataDir = () => DATA_DIR
 
+// The profile this server is set up for, which log_workout holds a token against: OPENGYM_UID
+// when it is given, whether or not its data is readable here, else the one the data directory
+// names. null only when nothing names one: no OPENGYM_UID, no OPENGYM_DATA and no ./data, the
+// remote-server setup. A data directory that was asked for and cannot be read, or that holds
+// several profiles, throws: a broken mount is no licence to write to whichever profile the token is.
+export function localUid() {
+  if (_uid !== null) return _uid
+  const envUid = (process.env.OPENGYM_UID || '').trim()
+  if (envUid) return envUid
+  if (!DATA_SET && !fs.existsSync(DATA_DIR)) return null
+  init()
+  return _uid
+}
+
+// Drop the cached state, so the next read sees a write log_workout just made without waiting for
+// the watcher. Only meaningful when this data directory is the one the server writes.
+export function invalidate() {
+  _state = undefined
+  _loadedMtime = 0
+}
+
 // Test-only: work against a passed-in state, not the disk.
 export function _seedStateForTests(state) {
   _uid = 'test-uid'
   _db = { users: [{ id: _uid, name: 'Test', created: '2026-07-26T00:00:00.000Z' }], creds: [], subs: [], invites: [] }
   _state = state
   _loadedMtime = Number.MAX_SAFE_INTEGER   // never re-read from disk in a test
+  _seeded = true
   if (_watcher) { _watcher.close(); _watcher = null }
 }
 

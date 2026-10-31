@@ -42,7 +42,7 @@ export default function StructuralBalance() {
   }
 
   return <>
-    <div className="hdr"><button className="iconbtn" onClick={() => nav('/stats')} aria-label={t('Stats')}><Icon name="chevronLeft" /></button>
+    <div className="hdr"><button className="iconbtn" data-back="/stats" onClick={() => nav('/stats')} aria-label={t('Stats')}><Icon name="chevronLeft" /></button>
       <div style={{ flex: 1, marginInlineStart: 12 }}><h1>{t('Structural balance')}</h1>
         <div className="sub">{t('Compare your lifts against a published ratio table to find the weak link.')}</div></div></div>
 
@@ -59,7 +59,7 @@ export default function StructuralBalance() {
         const exId = r.mappedExerciseId || r.configuredExerciseId
         const name = exerciseName(exId)
         const reps = role.evaluationMode === EVALUATION_MODES.REP_COUNT
-        const actual = r.status === 'no-data' ? '—' : reps ? r.current.r : `${Math.round(r.actualPct)}%`
+        const actual = r.status === 'no-data' ? '–' : reps ? r.current.r : `${Math.round(r.actualPct)}%`
         const valueText = `${actual} / ${r.targetPct}${reps ? '' : '%'}`
         return (
           <div key={r.roleId} className="mrow" data-role-id={r.roleId} data-status={r.status}

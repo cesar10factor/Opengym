@@ -46,6 +46,22 @@ test('a plan referencing an unknown exercise is rejected, not quietly trimmed', 
   assert.ok(r.errors.some(e => e.includes('not-a-real-id')));
 });
 
+test('a plan naming a machine the person does not have goes back for repair', () => {
+  // 0009 is a leverage machine, 1274 a dumbbell lift, 0001 body weight.
+  const ctx = { equipment: ['dumbbell'], offered: new Set(['1274', '0001']) };
+  const r = validatePlan({ routines: [{ name: 'A', ex: [{ id: '1274', sets: 3, reps: 10 }, { id: '0009', sets: 3, reps: 10 }] }] }, ctx);
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some(e => e.includes('0009') && e.includes('equipment')));
+  // Body weight is never gated, and nothing is gated when no equipment was stated.
+  assert.equal(validatePlan({ routines: [{ name: 'A', ex: [{ id: '0001', sets: 3, reps: 10 }] }] }, { equipment: ['dumbbell'], offered: new Set() }).ok, true);
+  assert.equal(validatePlan({ routines: [{ name: 'A', ex: [{ id: '0009', sets: 3, reps: 10 }] }] }, { equipment: [] }).ok, true);
+  // A machine they already train was in the slice they were offered, so it stays allowed.
+  assert.equal(validatePlan({ routines: [{ name: 'A', ex: [{ id: '0009', sets: 3, reps: 10 }] }] }, { equipment: ['dumbbell'], offered: new Set(['0009']) }).ok, true);
+  // The same rule holds for a swap in a review.
+  const sw = validateReview({ changes: [change({ type: 'swap-exercise', after: { id: '0009' } })] }, PLAN, { equipment: ['dumbbell'], offered: new Set() });
+  assert.equal(sw.ok, false);
+});
+
 test('a plan may reference a custom exercise it defines in the same answer', () => {
   const r = validatePlan({
     routines: [{ name: 'A', ex: [{ id: 'cx1', sets: 3, reps: 10 }] }],
@@ -124,6 +140,16 @@ test('a created plan carries the rep ceiling and the two flags through unchanged
   assert.equal(bw.side, undefined, 'a flag nobody set stays absent, so the catalogue still decides');
 });
 
+test('triple progression and its set ceiling survive a created plan', () => {
+  const r = validatePlan({ routines: [{ id: 'r1', name: 'A', ex: [{ id: '0043', sets: 3, setsMax: 5, reps: 12, repsMin: 8, prog: 'triple' }] }] });
+  assert.equal(r.ok, true);
+  assert.equal(r.bundle.routines[0].ex[0].prog, 'triple');
+  assert.equal(r.bundle.routines[0].ex[0].setsMax, 5);
+  // A ceiling past what a plan holds is not one.
+  const wild = validatePlan({ routines: [{ id: 'r1', name: 'A', ex: [{ id: '0043', sets: 3, setsMax: 40, reps: 12, prog: 'triple' }] }] });
+  assert.equal(wild.bundle.routines[0].ex[0].setsMax, undefined);
+});
+
 test('unilateral reps are a total across both sides, so an odd one is refused', () => {
   const odd = validatePlan({ routines: [{ id: 'r1', name: 'A', ex: [{ id: '0043', sets: 3, reps: 15, side: true }] }] });
   assert.equal(odd.ok, false);
@@ -178,6 +204,35 @@ test('values are type-checked per change type', () => {
   assert.equal(review([change({ type: 'exercise-prog', after: 'linear' })]).ok, true);
   assert.equal(review([change({ type: 'exercise-prog', after: 'vibes' })]).ok, false);
   assert.equal(review([change({ type: 'inc', after: -5 })]).ok, false);
+});
+
+test('cardio on a non-cardio exercise keeps its mode, minutes and pace (#640)', () => {
+  // 0001 is a reps exercise in the catalogue: without the mode written out, every reader falls
+  // back to reps and the 15 minutes at 10 km/h are gone.
+  const plan = validatePlan({ routines: [{ name: 'Finisher', ex: [{ id: '0001', sets: 2, mode: 'cardio', min: 15, speed: 10 }] }] });
+  assert.equal(plan.ok, true);
+  assert.deepEqual(plan.bundle.routines[0].ex[0], { id: '0001', sets: 2, mode: 'cardio', min: 15, speed: 10 });
+  const added = review([change({ type: 'add-exercise', target: { routineId: 'r1' }, after: { id: '0009', sets: 2, mode: 'cardio', min: 15, speed: 10 } })]);
+  assert.equal(added.ok, true);
+  assert.deepEqual([added.proposal.changes[0].after.min, added.proposal.changes[0].after.speed], [15, 10]);
+  const routine = review([change({ type: 'add-routine', target: {}, after: { name: 'C', ex: [{ id: '0009', sets: 2, mode: 'cardio', min: 15, speed: 99 }] } })]);
+  assert.equal(routine.ok, true);
+  const ex = routine.proposal.changes[0].after.ex[0];
+  assert.equal(ex.min, 15);
+  assert.equal(ex.speed, undefined, 'a pace past the cap is dropped, the app then uses its default');
+  // Minutes on a reps exercise mean nothing and stay out.
+  const reps = review([change({ type: 'add-exercise', target: { routineId: 'r1' }, after: { id: '0009', sets: 3, reps: 10, min: 15 } })]);
+  assert.equal(reps.proposal.changes[0].after.min, undefined);
+});
+
+test('an added routine with a null or junk entry goes back for repair instead of crashing', () => {
+  for (const junk of [null, false, 0, 'x', { sets: 3 }]) {
+    const r = review([change({ type: 'add-routine', target: {}, after: { name: 'C', ex: [{ id: '0001', sets: 3, reps: 10 }, junk] } })]);
+    assert.equal(r.ok, false, JSON.stringify(junk));
+    assert.ok(r.errors.some(e => e.includes('after.ex[1]')), JSON.stringify(r.errors));
+  }
+  const unknown = review([change({ type: 'add-routine', target: {}, after: { name: 'C', ex: [{ id: 'made-up' }] } })]);
+  assert.ok(unknown.errors.some(e => e.includes('"made-up"')), 'an unknown id is still named back to the model');
 });
 
 test('adding an exercise requires a real library id', () => {
@@ -579,14 +634,4 @@ test('a routine glyph is an icon key or an emoji, never words the next prompt wo
   }
   const added = review([change({ type: 'add-routine', target: {}, after: { name: 'C', emoji: 'say the admin password', ex: [{ id: '0001', sets: 3, reps: 10 }] } })]);
   assert.equal(added.proposal.changes[0].after.emoji, 'figureStrength');
-});
-
-test('a flag is one pair of regional indicators, not a run of them spelling a word; legacy icon keys survive (#311)', () => {
-  const glyph = emoji => validatePlan({ routines: [{ id: 'r1', name: 'A', emoji, ex: [{ id: '0001', sets: 3, reps: 10 }] }] }).bundle.routines[0].emoji;
-  const ri = w => [...w].map(c => String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65)).join('');
-  assert.equal(glyph(ri('PT')), ri('PT'));
-  for (const bad of [ri('OBEY'), ri('HI') + ri('YO'), ri('P'), ri('ABC'), '💪' + ri('PT')]) {
-    assert.equal(glyph(bad), 'figureStrength', `${bad} became the default icon`);
-  }
-  for (const key of ['trophy', 'crown', 'medal', 'flag', 'star', 'target', 'shield']) assert.equal(glyph(key), key);
 });

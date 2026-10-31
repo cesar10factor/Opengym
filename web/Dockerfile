@@ -7,16 +7,16 @@
 # QEMU — and QEMU-emulated npm installs are known to corrupt esbuild/rollup's platform-
 # specific native binaries, which is what breaks `vite build` with unrelated-looking
 # module-resolution errors.
-FROM --platform=$BUILDPLATFORM node:22-alpine AS build
+FROM --platform=$BUILDPLATFORM node:22.23.4-alpine AS build
 # The frontend sits at /app/frontend, not /app: the Coach's runtime-neutral core lives in
 # api/coach/core and is imported from frontend/src as ../../../api/coach/core/*, so the two
 # have to keep the same relative position they have in the repository. Copying frontend/ alone
 # is exactly what made the v1.2.15 web image fail to build.
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json* ./
-# --ignore-scripts: the web image only needs `vite build`; the one heavy postinstall in this tree
-# (@capacitor/assets -> sharp, a libvips download from GitHub) is for drawing app icons and has
-# timed out on the shared runners — a lockfile-ignoring `npm install` fallback is no answer to that.
+# --ignore-scripts: the web image only needs `vite build`, and no postinstall should be able to
+# break it (@capacitor/assets' sharp download once timed out on the shared runners; the icon
+# tool is now run with npx, docs/MOBILE.md, and not installed here).
 RUN npm ci --ignore-scripts
 COPY api/coach/core/ /app/api/coach/core/
 COPY frontend/ ./
@@ -26,27 +26,58 @@ COPY frontend/ ./
 ARG APP_BUILD=""
 RUN APP_BUILD="$APP_BUILD" npm run build
 
-FROM nginx:alpine
+FROM nginxinc/nginx-unprivileged:1.30.6-alpine
 # Same reason as in api/Dockerfile: alpine fixes land faster than the nginx image is rebuilt.
-RUN apk upgrade --no-cache
+# The base's last instruction is USER 101, and apk then exits 99 — it cannot open its log as
+# that user. Upgrade as root, then switch back. 101 has to be the last USER in this file so
+# the entrypoint and the nginx master both stay uid 101. It can bind port 80 under Docker,
+# which sets net.ipv4.ip_unprivileged_port_start=0; the base image's EXPOSE 8080 is metadata,
+# and nothing here listens on it. Another runtime (most Kubernetes ones, Podman rootless)
+# needs NGINX_PORT=1024 or higher, or that sysctl: helm/ and kubernetes/ use 8080.
+#
+# An upgrade can put the packaged nginx.conf back (a `user` directive, pid under /run) and
+# recreate /var/cache/nginx as root, which is the mkdir a non-root master dies on. Restore
+# the layout the base established, still as root, and idempotently: drop a user directive
+# if one is present, point pid at /tmp/nginx.pid, and insert the /tmp temp paths only when
+# client_body_temp_path is absent — a second insert duplicates them and nginx refuses the
+# config. chown/chmod cover /var/cache/nginx and /etc/nginx only, so uid 101 can render the
+# template. The static tree keeps the default modes; uid 101 only reads it.
+USER root
+RUN apk upgrade --no-cache \
+ && sed -i '/^[[:space:]]*user[[:space:]]/d' /etc/nginx/nginx.conf \
+ && sed -i 's,\(/var\)\{0\,1\}/run/nginx.pid,/tmp/nginx.pid,' /etc/nginx/nginx.conf \
+ && if ! grep -q 'client_body_temp_path' /etc/nginx/nginx.conf; then \
+      sed -i "/^http {/a \    proxy_temp_path /tmp/proxy_temp;\n    client_body_temp_path /tmp/client_temp;\n    fastcgi_temp_path /tmp/fastcgi_temp;\n    uwsgi_temp_path /tmp/uwsgi_temp;\n    scgi_temp_path /tmp/scgi_temp;\n" /etc/nginx/nginx.conf; \
+    fi \
+ && chown -R nginx:root /var/cache/nginx /etc/nginx \
+ && chmod -R g+w /var/cache/nginx /etc/nginx \
+ && grep -Eq '^[[:space:]]*pid[[:space:]]+/tmp/nginx\.pid;' /etc/nginx/nginx.conf \
+ && ! grep -Eq '^[[:space:]]*user[[:space:]]' /etc/nginx/nginx.conf
+USER 101
 ARG VERSION=dev
 ARG VCS_REF=dev
 ARG BUILD_DATE=unknown
 
-LABEL maintainer="Duarte Santos https://gitlab.com/DuarteSantos8" \
+LABEL maintainer="Duarte Santos https://github.com/DuarteSantos8" \
     org.opencontainers.image.title="opengym-web" \
     org.opencontainers.image.description="Frontend for Self-hosted gym & body-weight tracker — plan routines, log workouts (supersets & cardio too), track your weight and progress, passkey login. Your data, your server." \
-    org.opencontainers.image.source="https://gitlab.com/DuarteSantos8/opengym" \
-    org.opencontainers.image.url="https://gitlab.com/DuarteSantos8/opengym/container_registry" \
-    org.opencontainers.image.documentation="https://gitlab.com/DuarteSantos8/opengym#readme" \
+    org.opencontainers.image.source="https://github.com/DuarteSantos8/openGym" \
+    org.opencontainers.image.url="https://opengym.ch" \
+    org.opencontainers.image.documentation="https://github.com/DuarteSantos8/openGym#readme" \
     org.opencontainers.image.licenses="AGPL-3.0-or-later" \
     org.opencontainers.image.version=$VERSION \
     org.opencontainers.image.revision=$VCS_REF \
     org.opencontainers.image.created=$BUILD_DATE
 
 COPY web/nginx.conf.template /etc/nginx/templates/default.conf.template
+# Stops the container at start-up on a BASE_PATH the config cannot serve ("/gym/", "gym"), instead
+# of a server that 404s under the prefix. nginx's entrypoint runs these scripts in order; 05 is
+# before the template rendering at 20.
+COPY --chmod=755 web/05-check-base-path.sh /docker-entrypoint.d/
 COPY --from=build /app/frontend/dist /usr/share/nginx/html
-# exercise media (img/gif) is mounted at runtime from the media volume
+# The exercise stills and animations, 180 px, licensed from Gym visual for openGym only: see
+# catalogue/media/NOTICE.md. They ship inside the image; nothing is downloaded at start-up.
+COPY catalogue/media/ /usr/share/nginx/html/exercise-media/
 
 # Set Default ENVs for nginx
 ENV NGINX_PORT=80
@@ -70,6 +101,13 @@ ENV BASE_PATH=""
 # Above the API's own video cap (MEDIA_VIDEO_MAX_MB, 40 by default) so the API, which says why,
 # is the one that refuses a file — raise both together.
 ENV MEDIA_UPLOAD_MAX=48m
+# Sent on every page and file. Scripts run only from this origin, plus the one inline script in
+# frontend/index.html by its hash (src/lib/csp.test.js keeps the two in step). connect-src stays
+# open to any https: and http: address: the Coach on a device talks to the provider the person
+# chose, an Ollama on their LAN included, and the update check asks GitHub. Behind a proxy that
+# injects a script of its own (analytics), set this to a policy that allows it, or to
+# "frame-ancestors 'none'" for the old header.
+ENV CONTENT_SECURITY_POLICY="default-src 'self'; script-src 'self' 'sha256-xUZtZS1nWJaAyUqA7ZKgkLhjdEisnY0MiRmax16aGFg='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; font-src 'self' data:; connect-src 'self' https: http:; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 
 # Probe the port nginx was actually told to listen on (NGINX_PORT is configurable, so a
 # hardcoded http://localhost/ breaks on any instance that changed it), and address it as

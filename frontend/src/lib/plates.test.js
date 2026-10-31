@@ -195,7 +195,17 @@ describe('rowLoad', () => {
 
   test('a single stack takes all of it beyond the base: a belt, a sled', () => {
     expect(rowLoad('single', 25, 0, homeInv)).toEqual({ kind: 'single', barOnly: false, perSide: 25, plates: [25], missing: 0 })
-    expect(rowLoad('single', 190, 100, homeInv).plates).toEqual([45, 35, 10])
+    // One pair of 45s is two 45s: a stack takes both plates of a pair.
+    expect(rowLoad('single', 190, 100, homeInv).plates).toEqual([45, 45])
+  })
+
+  test('a single stack counts both plates of each pair you own (QA 1.3.11)', () => {
+    const inv = inventoryFor({ unit: 'kg', plates: { kg: { 20: 1, 10: 1, _ts: 1 } } })
+    // A sled leg press at 150 kg: 20+20+10+10 = 60 on, 90 short (was "20 + 10 · 120 short").
+    expect(rowLoad('single', 150, 0, inv)).toMatchObject({ plates: [20, 20, 10, 10], missing: 90 })
+    expect(rowLoad('single', 40, 0, inv)).toMatchObject({ plates: [20, 20], missing: 0 })
+    // A bar still takes one plate of each pair per side.
+    expect(rowLoad('pairs', 80, 20, inv)).toMatchObject({ perSide: 30, plates: [20, 10], missing: 0 })
   })
 
   test('kind none never loads', () => {
@@ -230,8 +240,50 @@ describe('dropGrid', () => {
     expect(snap(64)).toBe(60)
     expect(snap(15)).toBe(20)      // below the bar: the bar is the lightest you can load
   })
+  test('a single stack drops onto both plates of each pair', () => {
+    const sled = idOf('sled machine')
+    const S = { unit: 'kg', plates: { kg: { 20: 1, 10: 1, _ts: 1 } }, barWeights: { [sled]: 0 } }
+    const snap = dropGrid(S, { id: sled })
+    expect(snap(55)).toBe(50)      // 20+20+10, not 30 (one plate per pair)
+    expect(snap(100)).toBe(60)     // everything owned
+  })
   test('a dumbbell is not plate-loaded, so plates do not decide its drop', () => {
     const S = { unit: 'kg', plates: { kg: { 10: 2, _ts: 1 } } }
     expect(dropGrid(S, { id: db, inc: 2 })).toBe(2)
+  })
+})
+
+describe('loads between quarter-unit boundaries', () => {
+  test.each([0.1, 2.4, 2.6, 7.4, 8.1])('never exceeds %s and reports the actual deficit', weight => {
+    const result = plateStack(weight, [{ w: 2.5, n: 3 }])
+    const loaded = result.plates.reduce((sum, w) => sum + w, 0)
+    expect(loaded).toBeLessThanOrEqual(weight)
+    expect(result.missing).toBeCloseTo(weight - loaded)
+  })
+
+  test('drop sets snap to a load the counted plates can make', () => {
+    const S = { unit: 'kg', plates: { kg: { 5: 3 } } }
+    const snap = dropGrid(S, { id: idOf('barbell') })
+    expect(snap(48.74)).toBe(40)
+  })
+})
+
+// #510 and Discord "1 kg / 2 kg discs": whole and half kilo change plates, and 1 / 0.5 lb.
+describe('change plates beyond the standard set', () => {
+  test('the editor lists them, heaviest first, and the standard set is what it always was', () => {
+    expect(PLATE_SIZES.kg).toEqual([25, 20, 15, 10, 5, 2.5, 2, 1.5, 1.25, 1, 0.5])
+    expect(PLATE_SIZES.lb).toEqual([45, 35, 25, 15, 10, 5, 2.5, 1.25, 1, 0.5])
+    for (const u of ['kg', 'lb']) expect([...PLATE_SIZES[u]].sort((a, b) => b - a)).toEqual(PLATE_SIZES[u])
+    expect(inventoryFor({ unit: 'kg' }).map(p => p.w)).toEqual([25, 20, 15, 10, 5, 2.5, 1.25])
+    expect(inventoryFor({ unit: 'lb' }).map(p => p.w)).toEqual([45, 35, 25, 10, 5, 2.5])
+    for (const w of [2, 1.5, 1]) expect(pairsOf({ unit: 'kg' }, w)).toBe(0)
+  })
+  test('counted ones load like any other size', () => {
+    const inv = inventoryFor({ unit: 'kg', plates: { kg: { 20: 2, 10: 1, 5: 1, 2.5: 1, 2: 1, 1.5: 1, 1: 1 } } })
+    expect(plateStack(4.5, inv)).toEqual({ plates: [2.5, 2], missing: 0 })
+    expect(plateStack(3, inv)).toEqual({ plates: [2, 1], missing: 0 })
+    expect(plateStack(1.5, inv)).toEqual({ plates: [1.5], missing: 0 })
+    const S = { unit: 'kg', plates: withPlatePairs({ unit: 'kg' }, 2, 1, 1000) }
+    expect(inventoryFor(S).map(p => p.w)).toEqual([25, 20, 15, 10, 5, 2.5, 2, 1.25])
   })
 })

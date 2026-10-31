@@ -5,7 +5,7 @@ import { Window } from 'happy-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EXIDX } from '../lib/exercises.js'
 import { MUSCLES, levelsOf } from '../lib/muscles.js'
-import { FATIGUE_STATES, STRENGTH_FLOOR } from '../lib/recovery.js'
+import { FATIGUE_STATES, STRENGTH_FLOOR, fatigueHalfLifeOf, FATIGUE_SETS_PER_UNIT, resolveSetRir } from '../lib/recovery.js'
 import { fatigueStateOf } from '../lib/recovery-view.js'
 import Stats from './Stats.jsx'
 import Modals from '../components/Modals.jsx'
@@ -27,6 +27,12 @@ const mocks = vi.hoisted(() => ({
     bodyweight: [], routines: [], workouts: [],
   },
 }))
+
+// Passed through untouched; the spy only counts how often the Effort card reads a set.
+vi.mock('../lib/recovery.js', async importOriginal => {
+  const actual = await importOriginal()
+  return { ...actual, resolveSetRir: vi.fn(actual.resolveSetRir) }
+})
 
 vi.mock('../store/useStore.js', () => ({
   useStore: selector => selector({ S: mocks.S }),
@@ -85,12 +91,13 @@ function entry(id, sets) {
 }
 
 function lifecycleWorkouts(now = BASE_NOW) {
-  // The old one-set session lowers the causal reference seen by the six-set session. Position
-  // that newer stimulus 30 seconds before its .5 crossing so the real interval update flips it.
-  const weightedSet = 640 * (30 / 38) ** 1.5
-  const referenceAfterOldSession = 2000 + (weightedSet - 2000) / 3
+  // Six same-load sets on the chest score 6/8 of a full session, amplified by the
+  // acute:chronic gain of a lone recent session ((6+4)/(1.5+4)). Position that
+  // stimulus 30 seconds before its .5 crossing so the real interval update flips it.
+  // (The 30-day-old balance session sits outside the 28-day chronic window.)
+  const loneGain = (6 + 4) / (6 / 4 + 4)
   const fatigueEdge = now - (
-    36 * Math.log2((6 * weightedSet / referenceAfterOldSession) / Math.LN2) * HOUR - 30000
+    fatigueHalfLifeOf('chest') * Math.log2(6 / FATIGUE_SETS_PER_UNIT * loneGain / Math.LN2) - 30000
   )
   const balanceEdge = now - (30 * DAY - 30000)
   const strengthEdge = now - (14 * DAY - 30000)
@@ -103,13 +110,13 @@ function lifecycleWorkouts(now = BASE_NOW) {
   ]
 }
 
-function allFatiguedWorkout(now = BASE_NOW) {
+function allFatiguedWorkout(now = BASE_NOW, wid = 'all-fatigued') {
   const ids = [
     '1018', '1012', '1167', '1013', '3011', '1413', '1399', '1016', '1005',
     '1010', '1003', '1001', '1511', '1494', '1002', '1000', '1396',
   ]
   return workout(
-    'all-fatigued',
+    wid,
     now,
     ids.map(id => entry(id, Array.from({ length: 12 }, () => set(true)))),
   )
@@ -278,6 +285,30 @@ describe('Stats muscle recovery view runtime', () => {
     expect(lastMap().load.chest).toBe(6)
   })
 
+  it('shows the selected muscle fatigue as a labelled zone bar with a value marker', async () => {
+    await mountStats()
+    await click(viewButton('Fatigue'))
+    await click(muscleCard().querySelector('[data-muscle="chest"]'))
+    const value = lastMap().load.chest
+    expect(value).toBeGreaterThan(0.5)
+    const pct = Math.round(value * 100)
+    const card = muscleCard()
+    const bar = card.querySelector('.fbar')
+    expect(bar).toBeTruthy()
+    // The bar carries the band, reads the same state the map does, and marks the value.
+    expect(bar.getAttribute('aria-label')).toBe(`Fatigue: ${pct}% · Fatigued`)
+    expect(bar.querySelector('.zone.fatigued')).toBeTruthy()
+    expect(card.querySelector('.knob').getAttribute('style')).toContain(`${pct}%`)
+    // The value rides above the marker; the scale runs 0–100 with each zone named.
+    expect(card.querySelector('.fval').textContent).toBe(`${pct}%`)
+    const ends = [...card.querySelectorAll('.fends span')].map(el => el.textContent)
+    expect(ends).toEqual(['0%', '100%'])
+    const zones = [...card.querySelectorAll('.fzones .z')].map(el => el.textContent)
+    expect(zones).toEqual(['Ready', 'Recovering', 'Fatigued'])
+    expect(card.textContent).toContain('Recovering in')
+    expect(card.textContent).toContain('Ready in')
+  })
+
   it('derives a pound-profile bodyweight in kg and passes it into the rendered Fatigue map', async () => {
     const bodyweightWorkout = workout('bodyweight', BASE_NOW, [
       entry('0001', [{ done: true, w: 0, r: 10 }]),
@@ -289,13 +320,17 @@ describe('Stats muscle recovery view runtime', () => {
     await mountStats()
     await click(viewButton('Fatigue'))
 
-    // 220.462262 lb ~= 100 kg; ten reps score 1000 kg against the initial 2000 kg reference.
-    expect(lastMap().load.abs).toBeCloseTo(1 - Math.exp(-0.5), 6)
+    // One unloaded set is one effective set whatever the profile unit or body mass:
+    // intensity is session-local and relative, so the 220 lb bodyweight only travels
+    // through opts while the score stays 1 - exp(-1/8 x novice gain of 5/4.25).
+    expect(lastMap().load.abs).toBeCloseTo(1 - Math.exp(-5 / 34), 6)
     expect(lastMap().thresholds).toBeTruthy()
   })
 
   it('renders fixed absolute bands through the actual Fatigue and Strength views', async () => {
-    resetFixture([allFatiguedWorkout()])
+    // Two back-to-back full sessions: even 0.4-weighted secondary movers accumulate
+    // 2 x 12 x 0.4 / 8 = 1.2 raw units, clearing the top band everywhere.
+    resetFixture([allFatiguedWorkout(), allFatiguedWorkout(BASE_NOW, 'all-fatigued-2')])
     await mountStats()
     await click(viewButton('Fatigue'))
     const fatigueMap = lastMap()
@@ -311,6 +346,103 @@ describe('Stats muscle recovery view runtime', () => {
     expect(Object.values(strengthMap.load).every(value => value < 1)).toBe(true)
     expect(Math.min(...Object.values(strengthMap.load))).toBe(STRENGTH_FLOOR)
     expect(strengthMap.thresholds.at(-1)).toEqual({ at: 1, level: 4 })
+  })
+
+  it('keeps zero-weight snapshots out of recovery maps and last-trained recency', async () => {
+    resetFixture([workout('zero-mapped', BASE_NOW, [{
+      id: 'deleted-zero-mapped',
+      muscleSnapshot: { n: 'Zero mapped', muscleWeights: { chest: 1, biceps: 0 } },
+      sets: [set(true)],
+    }])])
+    await mountStats()
+
+    expect(lastMap().load).toEqual({ chest: 1 })
+    await click(viewButton('Fatigue'))
+    expect(lastMap().load.chest).toBeGreaterThan(0)
+    expect(lastMap().load.biceps).toBe(0)
+    expect(levelsOf(lastMap().load, lastMap().thresholds).biceps).toBe(0)
+
+    await click(viewButton('Strength'))
+    expect(lastMap().load.chest).toBe(1)
+    expect(lastMap().load.biceps).toBe(STRENGTH_FLOOR)
+    const bicepsRow = [...muscleCard().querySelectorAll('.mrow')]
+      .find(row => row.querySelector('.nm')?.textContent === 'Biceps')
+    expect(bicepsRow.querySelector('.v').textContent).toContain('not trained')
+  })
+})
+
+describe('Stats estimated effort', () => {
+  const effortHead = () => [...container.querySelectorAll('.card h2')]
+    .find(h => h.textContent.trim().startsWith('Effort'))
+
+  it('badges estimated numbers on unrated import history', async () => {
+    resetFixture([workout('unrated', BASE_NOW, [
+      entry('0025', Array.from({ length: 6 }, () => set(true, { w: 80, r: 8 }))),
+    ])])
+    await mountStats()
+    const head = effortHead()
+    expect(head, 'expected an Effort card for estimable history').toBeTruthy()
+    // Six self-anchored sets estimate RIR 0: a real average with an honest badge.
+    expect(head.textContent).toContain('estimated')
+    expect(container.textContent).toContain('0 rated')
+  })
+
+  // The summary, the weekly curve and the histogram share one reading per set.
+  it('reads each set once for the whole card', async () => {
+    resetFixture([workout('unrated', BASE_NOW, [
+      entry('0025', Array.from({ length: 6 }, () => set(true, { w: 80, r: 8 }))),
+    ])])
+    resolveSetRir.mockClear()
+    await mountStats()
+    expect(effortHead().textContent).toContain('estimated')
+    const sets = resolveSetRir.mock.calls.map(c => c[0])
+    expect(sets.length).toBeGreaterThan(0)
+    expect(new Set(sets).size).toBe(sets.length)
+  })
+
+  it('keeps the logged view badge-free on rated history', async () => {
+    resetFixture([workout('rated', BASE_NOW, [
+      entry('0025', Array.from({ length: 6 }, () => set(true, { w: 80, r: 8, rir: 2 }))),
+    ])])
+    await mountStats()
+    const head = effortHead()
+    expect(head, 'expected an Effort card for rated history').toBeTruthy()
+    expect(head.textContent).not.toContain('estimated')
+  })
+
+  it('estimates the unrated rest when the only ratings are imported failures', async () => {
+    // The v1.4.0 import case: six sets taken to failure across six sessions, every
+    // other set unrated. Averaging rated sets only would read 0 RIR / 100% hard.
+    const day = (ago, w, fw) => workout(`import-${ago}`, BASE_NOW - ago * DAY, [
+      entry('0025', [
+        set(true, { w, r: 8 }), set(true, { w, r: 8 }),
+        set(true, { w: 40, r: 5 }),
+        set(true, { w: fw, r: 9, failure: true }),
+      ]),
+    ])
+    resetFixture([
+      day(80, 60, 62.5), day(65, 60, 62.5), day(50, 62.5, 65),
+      day(35, 62.5, 65), day(15, 65, 67.5), day(5, 65, 67.5),
+    ])
+    await mountStats()
+    const card = effortHead()?.closest('.card')
+    expect(card, 'expected an Effort card for failure-marked imports').toBeTruthy()
+    expect(effortHead().textContent).toContain('estimated')
+    // Six imported failures plus estimates for the eighteen unrated sets.
+    expect(card.textContent).toContain('6 rated · 18 estimated of 24 sets')
+    // The average speaks for the whole training, not just the failures.
+    const [avg, hard] = [...card.querySelectorAll('.stat-v')].map(el => el.textContent.trim())
+    expect(avg).toMatch(/RIR$/)
+    expect(parseFloat(avg)).toBeGreaterThan(0)
+    expect(hard).not.toBe('100%')
+    // The failures stay a visible spike at the hard end of the histogram.
+    const zeroBin = [...card.querySelectorAll('.mrow')]
+      .find(row => row.querySelector('.nm')?.textContent.trim() === 'RIR 0')
+    expect(zeroBin?.querySelector('.v').textContent).toContain('6')
+
+    // The resolver applies on every window, not just the default 90d.
+    await click(buttonWithText(card.querySelector('.seg'), '30d'))
+    expect(card.textContent).toContain('2 rated · 6 estimated of 8 sets')
   })
 })
 

@@ -859,10 +859,61 @@ sus tests exigen completos. Los tests de tamaño vuelven a 1326 y dicen por qué
 **Si se repite la maniobra del rebase, reaplicar estos cambios a `exercises-data.js` después**, igual
 que los documentos de planificación.
 
+## Ciclo 7 — subir el fork a upstream v1.4.3 (2026-10-31)
+
+Hecho en el worktree `../Opengym-upgrade`, por etapas: `upgrade/v1.3.10` → `upgrade/v1.4.0` →
+`upgrade/v1.4.2` (incluye v1.4.1) → `upgrade/v1.4.3` → `fix/rest-alert-reliability` (la punta, con
+todo). **Sin desplegar y sin subir a `origin`.**
+
+Qué se quedó de cada lado:
+
+- **Gana upstream:** descanso por ejercicio (rueda, `restOff`, descanso por serie), historial y
+  sustituir ejercicio. Se retiraron `RestField`, `exerciseRestSheet`, `rest-edit.js` y `ownRestSec`.
+- **Se queda lo del fork:** Strava; orden de recomendados (`sortRecommendedFirst`, siempre y por
+  frecuencia; el `sortYoursFirst` de upstream solo actúa al buscar y no ordena por uso); push con
+  TTL, `topic`, formato declarativo y texto de «qué toca»; vista compacta.
+
+**Trampa de catálogo:** upstream usa `9002` para «bird dog plank». El press con pausa del fork habría
+pasado a ser una plancha en todo el historial. `scripts/migrate-to-v143.mjs` mueve los datos:
+`9002→5013`, `0233→5656`, `0410→2290` y ocho ids personalizados a su gemelo (`mapa ID_MAP`, una
+entrada recupera los «negative pull up» huérfanos). Un `restSec: 0` pasa a `restOff: true`. `9001`
+no tiene equivalente y vive en `catalogue/exercises/9001.json`, con la imagen de `0605`. Se quedan
+como personalizados «video abdominales» y «Dorsiflexión de tobillo en pared»: la «ankle dorsal
+flexion» de upstream es otro gesto, comprobado con la imagen.
+
+**Descansos.** Los registros del servidor no tienen ningún fallo de envío, así que el problema está
+antes del envío. Dos causas corregidas: la reserva del aviso era una sola petición sin reintento, y
+los temporizadores vivían solo en memoria. La persistencia de N2 existió y un rebase la perdió sin
+que nadie lo viera; ahora va en `data/rest-timers.json`, con test. Límite que no se arregla por
+código: el servidor es el PC de casa, si duerme no hay temporizador.
+
+**Verificado:** API en Linux 868 correctos, 0 fallos, 3 omitidos. Frontend: 4 tests fallan solo en Windows por
+rutas, y en Linux los únicos fallos son ficheros `android/`/`ios/` fuera del archivo de prueba.
+Ensayo sobre copia: 298 entrenamientos y 5.557 series idénticos, 121 referencias migradas, ningún id
+sin resolver. Pila nueva levantada aparte con esos datos: sesión, `/api/data`, vídeos y descanso OK.
+**Sin verificar:** nada de esto se ha probado en el móvil.
+
+### Pasos para desplegar
+
+1. Sin entreno en curso: abrir la app en el móvil, dejar que sincronice y cerrarla.
+2. Fusionar `fix/rest-alert-reliability` en `main` y subirlo.
+3. `docker compose -f docker-compose.yml -f docker-compose.tunnel.yml down`
+4. Copiar `data/` entera a un backup fechado.
+5. Con el backup hecho, migrar y sustituir los dos ficheros:
+   `node scripts/migrate-to-v143.mjs data/state-<uid>.json data/state.new.json data/coach/<uid>.json data/coach.new.json`
+6. `powershell -File scripts\auto-deploy.ps1` y verificar las etiquetas de imagen (paso 12 de
+   `docs/DESPLIEGUE.md`). Cerrar y reabrir la PWA.
+7. Comprobar: press con pausa en el historial, recomendados primero, Strava, un descanso con la app
+   en segundo plano.
+
+Para volver atrás: restaurar el backup de `data/` y desplegar el `main` anterior. No repetir la
+migración sobre datos ya migrados: el marcador `forkCatalogueV143` la rechaza a propósito.
+
 ## Registro
 
 | Fecha | Qué |
 |-------|-----|
+| 2026-10-31 | Ciclo 7: fork sobre upstream v1.4.3 en ramas locales, con los avisos de descanso reforzados y la migración de ids ensayada sobre copia. Pendiente de desplegar. |
 | 2026-09-04 | Rama `develop` creada desde `main`. `PLAN.md` y `ESTADO.md` escritos. |
 | 2026-09-07 | Ciclo 4 planificado: `PLAN-NOTIFICACIONES.md`. N0 cerrado en el móvil. N1 fusionado. |
 | 2026-09-21 | Ciclo 6, U0 hecho: rama `rebase/v1.3.7` desde upstream v1.3.8, backup y etiqueta de retorno, línea base medida (1584 front / 176 de 193 api), stack de upstream verificado en Docker aislado sin tocar producción. |

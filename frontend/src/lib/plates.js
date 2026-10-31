@@ -9,25 +9,28 @@
 //
 // Logged weights stay the total on the bar (or the added load). Everything here is display.
 
-import { EXIDX } from './exercises.js'
-import { usesBar, defaultBarWeight } from './bar.js'
+import { exerciseOf as exOf } from './exercises.js'
+import { usesBar, barTypeWeight } from './bar.js'
 import { isBw } from './history.js'
 import { weightIncrement } from './progression.js'
+import { ownedWeightsFor, ownedFloor } from './dumbbells.js'
 
-/** The plate sizes the inventory editor lists, heaviest first, per unit. */
+/** The plate sizes the inventory editor lists, heaviest first, per unit. The kg list has the
+ *  2, 1.5 and 1 kg change plates of gyms that stock whole and half kilos (#510, Discord "1 kg /
+ *  2 kg discs"), and the lb list the 1 lb and 0.5 lb fractional plates. */
 export const PLATE_SIZES = {
-  kg: [25, 20, 15, 10, 5, 2.5, 1.25, 0.5],
-  lb: [45, 35, 25, 15, 10, 5, 2.5, 1.25],
+  kg: [25, 20, 15, 10, 5, 2.5, 2, 1.5, 1.25, 1, 0.5],
+  lb: [45, 35, 25, 15, 10, 5, 2.5, 1.25, 1, 0.5],
 }
-/** Sizes a gym without an inventory of its own is assumed NOT to have. */
-const UNCOMMON = { kg: new Set([0.5]), lb: new Set([15, 1.25]) }
+/** Sizes a gym without an inventory of its own is assumed NOT to have: the standard set, the
+ *  one every profile had before, stays exactly what it was. */
+const UNCOMMON = { kg: new Set([2, 1.5, 1, 0.5]), lb: new Set([15, 1.25, 1, 0.5]) }
 /** Pairs of each size the default inventory holds — plenty, the way a rack is. */
 export const DEFAULT_PAIRS = 6
 
 /** Equipment that loads a single stack rather than two sides of a bar. */
 const SINGLE_EQ = new Set(['weighted', 'sled machine'])
 
-const exOf = exOrId => (typeof exOrId === 'string' ? EXIDX[exOrId] : exOrId)
 const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : Number(v) || 0)
 const unitOf = S => (S?.unit === 'lb' ? 'lb' : 'kg')
 
@@ -47,8 +50,8 @@ const sizesOf = entry => (entry && typeof entry === 'object' && !Array.isArray(e
 export const ownsPlates = S => sizesOf(S?.plates?.[unitOf(S)]).length > 0
 
 /**
- * The plates this profile can load, heaviest first: [{ w, n }] with n pairs (or plates, for a
- * single stack) of each size. S.plates[unit] is { [size]: count, _ts }; absent or without any
+ * The plates this profile can load, heaviest first: [{ w, n }] with n pairs of each size (a
+ * single stack loads both plates of a pair, see rowLoad). S.plates[unit] is { [size]: count, _ts }; absent or without any
  * size → the default set.
  */
 export function inventoryFor(S) {
@@ -111,8 +114,9 @@ const q = w => Math.round(w * Q)
  *   → { plates: [w, …] heaviest first, missing: number }   (missing 0 = exact)
  */
 export function plateStack(weight, inv) {
-  const target = q(Math.max(0, num(weight)))
-  if (target === 0) return { plates: [], missing: 0 }
+  const requested = Math.max(0, num(weight))
+  const target = Math.floor(requested * Q)
+  if (target === 0) return { plates: [], missing: requested }
   const items = (inv || []).filter(p => p.w > 0 && p.n > 0).sort((a, b) => b.w - a.w)
   // 1. greedy
   const greedy = []
@@ -126,7 +130,7 @@ export function plateStack(weight, inv) {
   // missing. The search below would only find that again, with a table as long as the target:
   // a typo like 9999 in a weight field built it on every keystroke.
   const all = items.reduce((sum, p) => sum + q(p.w) * p.n, 0)
-  if (left === 0 || target >= all) return { plates: greedy, missing: left / Q }
+  if (left === 0 || target >= all) return { plates: greedy, missing: requested - (target - left) / Q }
   // 2. exact fit with the fewest plates: f[i][s] = min plates using sizes i.. to make s
   const n = items.length
   const INF = 1e9
@@ -159,7 +163,7 @@ export function plateStack(weight, inv) {
       }
     }
   }
-  return { plates, missing: (target - sum) / Q }
+  return { plates, missing: requested - sum / Q }
 }
 
 /**
@@ -198,15 +202,15 @@ export function loadKindFor(S, cfgOrId) {
 
 /**
  * The weight that is there before any plate goes on, in the profile unit: the bar for bar
- * exercises (S.barWeights override, 0 = "no bar", else the type's default), the explicit
- * override for anything else (a sled's own weight), 0 otherwise.
+ * exercises (S.barWeights override, 0 = "no bar", else your bar for the type in S.barDefaults,
+ * else the built-in), the explicit override for anything else (a sled's own weight), 0 otherwise.
  */
 export function baseWeightFor(S, exOrId) {
   const ex = exOf(exOrId)
   if (!ex) return 0
   const own = S?.barWeights?.[ex.id]
   if (typeof own === 'number' && own >= 0) return own
-  return defaultBarWeight(ex.eq, S?.unit) ?? 0
+  return barTypeWeight(S, ex.eq) ?? 0
 }
 
 /**
@@ -222,7 +226,10 @@ export function rowLoad(kind, weight, base, inv) {
   const b = Math.max(0, num(base))
   if (w <= b) return { kind, barOnly: true, perSide: 0, plates: [], missing: 0 }
   const perSide = Math.round(((w - b) / (kind === 'pairs' ? 2 : 1)) * 100) / 100
-  const { plates, missing } = plateStack(perSide, inv)
+  // The inventory counts pairs. A bar takes one plate of a pair per side; a single stack can
+  // take both, so one pair of 20s is two 20s on a sled, not one.
+  const stock = kind === 'single' ? (inv || []).map(p => ({ ...p, n: p.n * 2 })) : inv
+  const { plates, missing } = plateStack(perSide, stock)
   return { kind, barOnly: false, perSide, plates, missing }
 }
 
@@ -232,12 +239,17 @@ export const sameLoad = (a, b) =>
   && a.plates.length === b.plates.length && a.plates.every((w, i) => w === b.plates[i])
 
 /**
- * Where a drop-set's next weight may land (lib/workout-model.js nextDropWeight): on the plates
+ * Where a drop-set's next weight may land (lib/workout-model.js nextDropWeight): on the dumbbells
+ * this profile owns for a dumbbell lift, on the plates
  * this profile owns when it has counted them and the exercise is plate-loaded — the heaviest load
  * at or below the drop that those plates make — else on the exercise's own weight step. A drop
  * rounded to .5 read 48.5 kg on a bar that loads in 2.5s (QA 1.3.9).
  */
 export function dropGrid(S, cfg) {
+  // A dumbbell lift with the bells you own listed (issue #376) drops to the heaviest one at or
+  // under the drop: a 20% drop from 21 kg is 16.8, and the rack holds a 15.
+  const owned = ownedWeightsFor(S, cfg)
+  if (owned) return w => ownedFloor(owned, w)
   const kind = loadKindFor(S, cfg)
   if (ownsPlates(S) && (kind === 'pairs' || kind === 'single')) {
     const base = baseWeightFor(S, cfg?.id)

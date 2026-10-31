@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { parseHTML } from 'linkedom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CoachChat from './CoachChat.jsx'
+import { CONSENT_VERSION } from '../lib/coach.js'   // the consent a fixture grants is the current one, whatever its number
 import { effectiveRoutine } from '../lib/history.js'
 import { todayISO } from '../lib/format.js'
 
@@ -42,6 +43,8 @@ vi.mock('../lib/coach-api.js', () => ({
   cohortStats: vi.fn(() => Promise.resolve({ ok: false, enabled: true, sharing: false })),
   setCohortShare: vi.fn(() => Promise.resolve({ ok: true, sharing: true })),
   JOB_ERRORS: { internal: 'x' },
+  ensureAiConsent: vi.fn(() => Promise.resolve(true)),
+  isDeclined: e => e?.code === 'declined',
   awaitedJob: () => null,
   settleAwaited: vi.fn(),
 }))
@@ -70,7 +73,7 @@ const state = () => ({
   unit: 'kg', lang: 'en', customEx: [], workouts: [], bodyweight: [], exWeights: {},
   dayPlan: {}, routines: [], week: {},
   coach: {
-    consent: { agreedAt: '2026-07-01T00:00:00Z', version: 1 },
+    consent: { agreedAt: '2026-07-01T00:00:00Z', version: CONSENT_VERSION },
     profile: { goal: 'muscle', experience: 'new', daysPerWeek: 3, sessionMin: 60, preferredDays: [1, 3, 5], equipment: [] },
     log: [], snapshots: [], chat: [{ id: 'c1', role: 'user', kind: 'intake', at: 1 }], timings: []
   },

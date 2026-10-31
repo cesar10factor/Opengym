@@ -14,7 +14,7 @@ import { editCompletedSession } from '../lib/session-edit.js'
 import { lastEntryFor } from '../lib/history.js'
 import { EXDB } from '../lib/exercises.js'
 
-vi.mock('../lib/sound.js', () => ({ beep: vi.fn(), chime: vi.fn(), vibrate: vi.fn(), unlock: vi.fn() }))
+vi.mock('../lib/sound.js', () => ({ beep: vi.fn(), chime: vi.fn(), vibrate: vi.fn(), alertBuzz: vi.fn(), unlock: vi.fn() }))
 vi.mock('../lib/api.js', () => ({ api: vi.fn(() => Promise.resolve({})), appBase: () => '/' }))
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
@@ -71,7 +71,7 @@ function renderTopSheet() {
   return sheetContainer
 }
 const openHeaderMenu = () => {
-  const more = container.querySelector('button[aria-label="Workout view"]')
+  const more = container.querySelector('button[aria-label="Workout options"]')
   expect(more).toBeTruthy()
   act(() => more.click())
   return renderTopSheet()
@@ -159,6 +159,16 @@ describe('don’t count the whole workout for progression', () => {
     const picker = useUI.getState().sheets.at(-1)
     act(() => picker.render(picker.close).props.onPick(EXDB.find(e => e.id === SQUAT), true))
     expect(active().entries.map(e => [e.id, e.noProg])).toEqual([[BENCH, true], [SQUAT, true]])
+  })
+
+  // #592: the finish summary offers it to the routine, so the add marks it; the planned one is not.
+  it('an exercise added to a routine session is marked as added there', () => {
+    renderWorkout([entry(BENCH, 'main', 100)])
+    const add = [...container.querySelectorAll('button')].find(b => b.textContent.trim() === 'Add exercise')
+    act(() => add.click())
+    const picker = useUI.getState().sheets.at(-1)
+    act(() => picker.render(picker.close).props.onPick(EXDB.find(e => e.id === SQUAT), true))
+    expect(active().entries.map(e => [e.id, e.rid, e.addedInSession])).toEqual([[BENCH, 'main', undefined], [SQUAT, 'main', true]])
   })
 
   it('a routine added afterwards joins it, with its own prescription kept', () => {

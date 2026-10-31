@@ -1,5 +1,5 @@
 // Formatting + date helpers (ported from the vanilla app, unit taken from the store where needed).
-import { dateLocale, t, exerciseNameFor, exerciseNameClass } from './i18n-core.js'
+import { dateLocale, t, tn, exerciseNameFor, exerciseNameClass } from './i18n-core.js'
 export const todayISO = () => {
   const d = new Date()
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
@@ -12,11 +12,26 @@ export const DAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa']
 export const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 export const MONTHS_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
 
+// toLocaleDateString / toLocaleString build a new Intl formatter on every call, which is most of
+// what a long list of dates and weights costs (History with 400 workouts: ~430 ms in fmtDate
+// alone). The formatters are kept per locale and options; their output is the same text.
+const formatters = new Map()
+const formatter = (Kind, locale, options) => {
+  const key = Kind.name + '|' + locale + '|' + (options ? JSON.stringify(options) : '')
+  let f = formatters.get(key)
+  if (!f) { f = new Kind(locale, options); formatters.set(key, f) }
+  return f
+}
+const DATE_SHORT = { day: 'numeric', month: 'short' }
+const DATE_LONG = { weekday: 'short', day: 'numeric', month: 'short' }
+const DATE_SHORT_Y = { ...DATE_SHORT, year: 'numeric' }
+const DATE_LONG_Y = { ...DATE_LONG, year: 'numeric' }
 export function fmtDate(iso, long, withYear = false) {
   const d = new Date(iso + 'T12:00:00')
-  const options = long ? { weekday: 'short', day: 'numeric', month: 'short' } : { day: 'numeric', month: 'short' }
-  if (withYear) options.year = 'numeric'
-  return d.toLocaleDateString(dateLocale(), options)
+  const options = long ? (withYear ? DATE_LONG_Y : DATE_LONG) : (withYear ? DATE_SHORT_Y : DATE_SHORT)
+  // An unreadable date says "Invalid Date" as it always did; a formatter would throw instead.
+  if (Number.isNaN(d.getTime())) return d.toLocaleDateString(dateLocale(), options)
+  return formatter(Intl.DateTimeFormat, dateLocale(), options).format(d)
 }
 // A span of days, e.g. an import's first and last workout. The year is shown when the span
 // crosses one or lies outside the current year: "3 Feb – 21 Dec" over two years read as one.
@@ -57,20 +72,23 @@ export const setWeightDecimals = n => { decimals = n === 2 ? 2 : 1 }
 export const weightDecimals = () => decimals
 export const fmtNum = n => {
   const p = decimals === 2 ? 100 : 10
-  return (Math.round(n * p) / p).toLocaleString(dateLocale(), { maximumFractionDigits: decimals })
+  // `+ 0` turns a -0 into 0: a change that rounds away ("-0.03") printed "-0".
+  return formatter(Intl.NumberFormat, dateLocale(), decimals === 2 ? NUM_2 : NUM_1).format(Math.round(n * p) / p + 0)
 }
+const NUM_1 = { maximumFractionDigits: 1 }
+const NUM_2 = { maximumFractionDigits: 2 }
 // Plate sizes keep their quarter: 1.25 and 21.25 are real numbers on a plate and a bar.
-export const fmtPlate = n => (Math.round(n * 100) / 100).toLocaleString(dateLocale())
+export const fmtPlate = n => formatter(Intl.NumberFormat, dateLocale()).format(Math.round(n * 100) / 100)
 // Volume stays in the profile's unit throughout: the old shorthand turned anything over
 // 10 000 into "t", which is wrong for a pound profile and made one list mix "18.8t" with
 // "7'535 kg" — two numbers you can't compare at a glance.
 export const fmtVol = (v, unit) => fmtNum(v) + ' ' + unit
-// Plural forms are not automatic when the English string is the key.
-export const exCount = n => t(n === 1 ? '{0} exercise' : '{0} exercises', n)
-export const routineCount = n => t(n === 1 ? '{0} routine' : '{0} routines', n)
-export const changeCount = n => t(n === 1 ? '{0} change' : '{0} changes', n)
+// Plural forms come from the pack via tn(): three forms in Russian, two in English.
+export const exCount = n => tn('{0} exercise', '{0} exercises', n)
+export const routineCount = n => tn('{0} routine', '{0} routines', n)
+export const changeCount = n => tn('{0} change', '{0} changes', n)
 // The Sets tile of the finish summary: all the sets logged, then how many of them were work sets.
-export const setsWorkCount = (n, work) => t(n === 1 ? '{0} set · {1} work' : '{0} sets · {1} work', n, work)
+export const setsWorkCount = (n, work) => tn('{0} set · {1} work', '{0} sets · {1} work', n, work)
 
 // "5 minutes ago", "yesterday", "now" — in the UI language, from the platform's own rules
 // (Intl.RelativeTimeFormat), so no pack has to carry a word for every unit and plural. Used for
@@ -80,6 +98,24 @@ export function fmtAgo(ts, now = Date.now()) {
   const [n, unit] = s < 60 ? [0, 'second'] : s < 3600 ? [Math.floor(s / 60), 'minute'] : s < 86400 ? [Math.floor(s / 3600), 'hour'] : [Math.floor(s / 86400), 'day']
   try { return new Intl.RelativeTimeFormat(dateLocale(), { numeric: 'auto' }).format(-n, unit) }
   catch { return new Date(ts).toLocaleString(dateLocale()) }
+}
+
+// How long before `dayIso` a logged day was, in calendar days (#363): "yesterday", "3 days ago",
+// "2 weeks ago", "last month". For the "Last time (…)" line of a workout, so `dayIso` is the
+// session's own day, not the wall clock: a workout logged into the past counts back from its
+// day. Whole calendar days at noon, so a DST weekend between the two is not a day short.
+// The words come from Intl.RelativeTimeFormat, so no pack carries them; it has no compound form
+// ("1 week 1 day ago"), which is why a span rounds down to its coarsest unit. A year or more
+// back reads as the date with its year, which says more than "1 year ago". A day after `dayIso`
+// (a clock set back) reads as today.
+export function fmtDaysAgo(iso, dayIso = todayISO()) {
+  const at = s => Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10))
+  const days = Math.max(0, Math.round((at(dayIso) - at(iso)) / 86400000))
+  if (!(days >= 0)) return fmtDate(iso)
+  if (days >= 365) return fmtDate(iso, false, true)
+  const [n, unit] = days < 7 ? [days, 'day'] : days < 35 ? [Math.floor(days / 7), 'week'] : [Math.max(1, Math.floor(days / 30.44)), 'month']
+  try { return new Intl.RelativeTimeFormat(dateLocale(), { numeric: 'auto' }).format(-n, unit) }
+  catch { return fmtDate(iso) }
 }
 
 /* ---------------------------------------------------------------- week start --
@@ -115,7 +151,22 @@ export function startOfWeek(iso, ws = MONDAY) {
  * to be an ISO week number, and being one would be a liability here: "2026-35" is defined
  * Monday-first, and there is no Sunday-first equivalent to fall back to.
  */
-export const weekKey = (iso, ws = MONDAY) => isoOf(startOfWeek(iso, ws))
+//
+// Memoised: Home's streak and week tally and Stats' weekly charts ask it for every workout on
+// every render, and each call parses a Date. The answer only depends on the calendar date and
+// the week start (noon local, so not on the time zone), so a string date is safe to remember.
+const weekKeys = new Map()
+export const weekKey = (iso, ws = MONDAY) => {
+  if (typeof iso !== 'string') return isoOf(startOfWeek(iso, ws))
+  const k = ws + '|' + iso
+  let v = weekKeys.get(k)
+  if (v === undefined) {
+    if (weekKeys.size >= 20000) weekKeys.clear()
+    v = isoOf(startOfWeek(iso, ws))
+    weekKeys.set(k, v)
+  }
+  return v
+}
 
 export const localTZ = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' } catch { return 'UTC' } }
 

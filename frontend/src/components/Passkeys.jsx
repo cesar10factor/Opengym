@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store/useStore.js'
 import { useUI } from '../store/useUI.js'
-import { t } from '../lib/i18n.js'
+import { t, tn } from '../lib/i18n.js'
 import { dateLocale } from '../lib/i18n-core.js'
 import { api, webauthnOK, createPasskey } from '../lib/api.js'
 import { copyText } from '../lib/clipboard.js'
@@ -14,6 +14,7 @@ import { deviceLinkUrl, deviceLabel } from '../lib/device-link.js'
 import { askAddDeviceData } from '../sheets.jsx'
 import { passwordError, notReached, useAgainOnceReached, ProveOwner } from './PasswordAuth.jsx'
 import QrCanvas from './QrCanvas.jsx'
+import { MOBILE } from '../lib/mobile.js'
 import { Row, Button } from './ui.jsx'
 
 const ui = () => useUI.getState()
@@ -48,7 +49,7 @@ export function passkeyError(e) {
     case 'last-way-in': return t('It is your only way in, so it cannot be removed until there is another.')
     case 'passkey-limit': return t('This profile already has as many passkeys as it can hold.')
     case 'credential-exists': return t('This passkey already belongs to a profile.')
-    case 'link-invalid': return t('That code is wrong, used or expired — make a new one on your other device.')
+    case 'link-invalid': return t('That code is wrong, already used or expired. Make a new one on your other device.')
   }
   return passwordError(e)
 }
@@ -73,8 +74,8 @@ export function usePasskeys(on) {
 export function PasskeysRow({ state, changed }) {
   if (!state) return null
   const n = state.passkeys.length
-  return <Row icon="lock" iconTint="var(--acc)" title={t('Passkeys')} accessory="chevron"
-    subtitle={n === 0 ? t('None yet — add one to sign in without your password.') : n === 1 ? t('1 passkey') : t('{0} passkeys', n)}
+  return <Row icon="fingerprint" iconTint="var(--acc)" title={t('Passkeys')} accessory="chevron"
+    subtitle={n === 0 ? t('None yet. Add one and sign in without your password.') : tn('1 passkey', '{0} passkeys', n)}
     onClick={() => ui().openSheet(close => <PasskeysSheet close={close} changed={changed} />)} />
 }
 
@@ -97,7 +98,7 @@ export function PasskeysSheet({ close, changed }) {
       {t('Each one signs in to this profile from the device or password manager that keeps it. Tap one to rename or remove it.')}
     </div>
     {st.passkeys.length > 0 && <div className="sect-b">
-      {st.passkeys.map((p, i) => <Row key={p.id} icon="lock" iconTint="var(--grey)" title={label(p, i)} subtitle={meta(p) || null}
+      {st.passkeys.map((p, i) => <Row key={p.id} icon="fingerprint" iconTint="var(--grey)" title={label(p, i)} subtitle={meta(p) || null}
         accessory="chevron" onClick={() => edit(p, i)} />)}
     </div>}
     {st.passkeys.length === 1 && st.lastWayIn && <div className="dim small" style={{ marginTop: 8 }}>
@@ -154,7 +155,7 @@ function RemovePasskeySheet({ passkey, title, state, close, done }) {
     <h3>{t('Remove this passkey?')}</h3>
     <div className="small" style={{ fontWeight: 600, marginBottom: 6 }}>{title}</div>
     <div className="muted small" style={{ marginBottom: 6 }}>
-      {t('It can no longer sign in to this profile. A device already signed in with it stays signed in — use Sign out everywhere if it was lost.')}
+      {t('It can no longer sign in to this profile. A device already signed in with it stays signed in. If it was lost, use Sign out everywhere.')}
     </div>
     <div className="dim small" style={{ marginBottom: 14 }}>{t('First confirm that it is you.')}</div>
     <ProveOwner passkey password={state.password} explain={passkeyError} danger submitText={t('Remove')} onProof={remove} />
@@ -192,7 +193,7 @@ function AddPasskeySheet({ state, close, done }) {
   return <>
     <h3>{t('Add a passkey')}</h3>
     <div className="muted small" style={{ marginBottom: 14 }}>{ready
-      ? t('Confirmed. Now create the new passkey — your browser asks where to keep it.')
+      ? t('Confirmed. Now create the new passkey; your browser will ask where to keep it.')
       : t('For this device, a security key, a password manager, or your phone through the browser’s own QR code. First confirm that it is you.')}</div>
     <input className="input" placeholder={t('Name, e.g. Work laptop')} maxLength={40} value={name} onChange={e => setName(e.target.value)} />
     <div style={{ height: 12 }} />
@@ -216,7 +217,11 @@ export function DeviceLinkSheet({ close }) {
     const timer = setTimeout(() => setExpired(true), Math.max(0, link.expires - Date.now()))
     return () => clearTimeout(timer)
   }, [link])
-  const url = link ? deviceLinkUrl(link.code) : ''
+  // The phone app's own origin is not the server's (#551): the link points at the paired server.
+  const server = MOBILE ? useStore.getState().sync?.server : null
+  const url = link ? (server ? deviceLinkUrl(link.code, new URL(server.replace(/\/?$/, '/'))) : deviceLinkUrl(link.code)) : ''
+  // A paired phone holds no passkey for the server, so there only the password can confirm.
+  const passkey = !MOBILE && !!st && st.passkeys.length > 0
   const copy = async () => { if (await copyText(url)) toast(t('Copied')) }
   return <>
     <h3>{t('Add another device')}</h3>
@@ -224,8 +229,10 @@ export function DeviceLinkSheet({ close }) {
       <div className="muted small" style={{ marginBottom: 14 }}>
         {t('You get a code that lets your phone or another computer create a passkey for this profile. First confirm that it is you.')}
       </div>
-      <ProveOwner passkey={st.passkeys.length > 0} password={st.password} explain={passkeyError}
-        onProof={async proof => setLink(await post('/api/account/device-link', proof))} />
+      {MOBILE && !st.password
+        ? <div className="dim small">{t('This app can’t confirm with a passkey. Make the code in a browser signed in to this profile, or add a password there first.')}</div>
+        : <ProveOwner passkey={passkey} password={st.password} explain={passkeyError}
+          onProof={async proof => setLink(await post('/api/account/device-link', proof))} />}
     </> : expired ? <>
       <div className="muted small" style={{ marginBottom: 14 }}>{t('This code has expired.')}</div>
       <Button variant="primary" onClick={() => setLink(null)}>{t('Make a new code')}</Button>
@@ -237,10 +244,53 @@ export function DeviceLinkSheet({ close }) {
       {/* Read out or typed character by character: left to right in every language. */}
       <div className="card" dir="ltr" style={{ textAlign: 'center', fontSize: 24, fontWeight: 700, letterSpacing: '.12em', padding: '14px 0' }}>{link.code}</div>
       <div style={{ height: 12 }} />
-      <Button icon="link" onClick={copy}>{t('Copy link')}</Button>
+      <Button icon="copy" onClick={copy}>{t('Copy link')}</Button>
     </>}
     <div style={{ height: 8 }} />
     <Button variant="ghost" onClick={close}>{t('Done')}</Button>
+  </>
+}
+
+/* Settings → Account → "Pair the mobile app": the code the phone app redeems for its own token
+   (/api/pair/create, /api/pair/redeem). The token is renewed for as long as the phone uses it, so
+   the server asks the same proof a device link does before it makes one: a session alone may be a
+   cookie someone walked off with. Then the code, and when its five minutes are up, a new one on a
+   tap. A paired phone can pair another only with the password, as with a device link. */
+const PAIR_MINUTES = 5
+export function PairSheet({ close }) {
+  const { st } = usePasskeys(true)
+  const [pair, setPair] = useState(null)   // { code, expires }
+  const [expired, setExpired] = useState(false)
+  useEffect(() => {
+    if (!pair) return
+    setExpired(false)
+    const timer = setTimeout(() => setExpired(true), Math.max(0, pair.expires - Date.now()))
+    return () => clearTimeout(timer)
+  }, [pair])
+  const passkey = !MOBILE && !!st && st.passkeys.length > 0
+  const made = async proof => {
+    const r = await post('/api/pair/create', proof)
+    setPair({ code: r.code, expires: Date.now() + PAIR_MINUTES * 60000 })
+  }
+  return <>
+    <h3>{t('Pair the mobile app')}</h3>
+    {!st ? <div className="muted small">…</div> : !pair ? <>
+      <div className="muted small" style={{ marginBottom: 14 }}>{t('First confirm that it is you.')}</div>
+      {MOBILE && !st.password
+        ? <div className="dim small">{t('This app can’t confirm with a passkey. Make the code in a browser signed in to this profile, or add a password there first.')}</div>
+        : <ProveOwner passkey={passkey} password={st.password} explain={passkeyError} onProof={made} />}
+    </> : expired ? <>
+      <div className="muted small" style={{ marginBottom: 14 }}>{t('This code has expired.')}</div>
+      <Button variant="primary" onClick={() => setPair(null)}>{t('Make a new code')}</Button>
+    </> : <>
+      <div className="muted small" style={{ marginBottom: 14 }}>
+        {t('On the openGym app, choose “Connect to my server”, then enter this address and the code below. It expires in 5 minutes.')}
+      </div>
+      {/* Read out or typed character by character: left to right in every language. */}
+      <div className="card" dir="ltr" style={{ textAlign: 'center', fontSize: 30, fontWeight: 700, letterSpacing: '.16em', padding: '18px 0' }}>{pair.code}</div>
+    </>}
+    <div style={{ height: 12 }} />
+    <Button onClick={close}>{t('Done')}</Button>
   </>
 }
 
@@ -322,7 +372,10 @@ export function DeviceLinkRedeemSheet({ close }) {
     <h3>{t('Add this device')}</h3>
     <div className="muted small" style={{ marginBottom: 14 }}>{joining
       ? t('Create a passkey on this device for the profile “{0}”. It signs you in here from now on.', joining.name)
-      : t('Enter the code your other device shows under Settings → Add another device. This device then gets a passkey of its own.')}</div>
+      : t('Enter the code your other device shows under Settings → Account → Add another device. This device then gets a passkey of its own.')}
+      {/* #551: an app that keeps its data on the phone has no account here, so no such row. */}
+      {!joining && <div style={{ marginTop: 6 }}>{t('No code on your phone? It only has one while it’s connected to this server: Settings → Account → Connect to my server.')}</div>}
+      {!joining && <div style={{ marginTop: 6 }}>{t('A recovery code from your admin goes here too.')}</div>}</div>
     {elsewhere && <div className="card small" style={{ textAlign: 'start', marginBottom: 14 }}>
       {user && <div style={{ marginBottom: 8 }}>{user.name === joining.name
         ? t('This code is for a different profile that is also called “{0}”, not the one this browser is signed in as. Adding it there signs yours out here.', joining.name)

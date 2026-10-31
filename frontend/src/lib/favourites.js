@@ -30,23 +30,32 @@ export function sortFavouritesFirst(list, S) {
 }
 
 /**
- * How often each exercise id shows up across your routines and logged workouts — the "Chosen"
- * marker in the picker. Tolerates a profile with either list missing.
+ * A search's results the way a person scans them: favourites, then the exercises they have
+ * already logged or planned (`usage`: id -> count, the picker's "Chosen"), then the rest. Each
+ * group keeps the search's own order. Someone who imported years of history types "press" and
+ * wants their press on top, not the best name match among 5,000.
  */
-export function usageCounts(S) {
+export function sortYoursFirst(list, S, usage) {
+  const fav = new Set(favIds(S))
+  const group = e => (fav.has(e.id) ? 0 : usage?.[e.id] ? 1 : 2)
+  if (!fav.size && !list.some(e => usage?.[e.id])) return list
+  return [0, 1, 2].flatMap(g => list.filter(e => group(e) === g))
+}
+
+/** How often each exercise sits in a routine or a logged workout: id -> count. */
+export function usageOf(S) {
   const u = {}
-  const bump = e => { if (e && e.id) u[e.id] = (u[e.id] || 0) + 1 }
-  ;(S?.routines || []).forEach(r => (r.ex || []).forEach(bump))
-  ;(S?.workouts || []).forEach(w => (w.entries || []).forEach(bump))
+  for (const r of S?.routines || []) for (const e of r.ex || []) u[e.id] = (u[e.id] || 0) + 1
+  for (const w of S?.workouts || []) for (const e of w.entries || []) u[e.id] = (u[e.id] || 0) + 1
   return u
 }
 
 /**
- * The exercises you're most likely after go first: favourites, then the ones you already use
- * (most-used first), then everything else. Each tier keeps the order it came in — so a search's
- * relevance ranking or the catalogue order still decides within it, and ties in usage too.
+ * The exercises you're most likely after go first, always and not only while searching: your
+ * favourites, then the ones you already use (most-used first), then everything else. Each tier
+ * keeps the order it came in, so a search's relevance still decides within it, and ties too.
  */
-export function sortRecommendedFirst(list, S, usage = usageCounts(S)) {
+export function sortRecommendedFirst(list, S, usage = usageOf(S)) {
   const fav = new Set(favIds(S))
   if (!fav.size && !Object.keys(usage).length) return list
   const favs = [], used = [], rest = []

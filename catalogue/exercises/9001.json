@@ -1,0 +1,27 @@
+{
+  "id": "9001",
+  "name": "lever standing one leg calf raise",
+  "bodyPart": "lower legs",
+  "equipment": "leverage machine",
+  "target": "calves",
+  "secondaryMuscles": [
+    "soleus",
+    "ankle stabilizers"
+  ],
+  "category": "strength",
+  "description": "Standing on one foot with pads on your shoulders, you rise onto your toes and lower back down. Isolates the calf of the working leg.",
+  "instructions": [
+    "Adjust the machine to your height and stand with one foot on the platform, the other leg lifted clear.",
+    "Place your shoulders under the pads and hold onto the handles for stability.",
+    "Raise your heel as high as possible by extending your ankle.",
+    "Pause for a moment at the top, then slowly lower your heel back down to the starting position.",
+    "Repeat for the desired number of repetitions, then switch legs."
+  ],
+  "muscleMap": {
+    "primaries": [
+      "calves"
+    ],
+    "secondaries": []
+  },
+  "textSource": "fork"
+}

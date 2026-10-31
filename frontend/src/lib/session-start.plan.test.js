@@ -50,7 +50,7 @@ describe('a planned session opens at the plan\'s reps', () => {
     // plan asks 60 where B's asked 40 — a heavy day and a light day — so it opens at its own 60,
     // not at the light day's load.
     expect(work(a).map(s => s.w)).toEqual([60, 60])
-    expect(a.plan.why[0]).toBe('First time in this routine — starting from its own target.')
+    expect(a.plan.why[0]).toBe('First time in this routine, so starting from its own target.')
     // From then on A progresses on its own line, whatever B does.
     train(st, ['A'])
     train(st, ['B'], { r: 9 })
@@ -156,7 +156,7 @@ describe('a routine whose only history is freestyle or imported', () => {
     st.workouts.push({ id: 'imp', d: '2026-09-01', routineId: null, entries: [{ id: BENCH, sets: [{ w: 30, r: 15, done: true }, { w: 30, r: 15, done: true }, { w: 30, r: 15, done: true }] }] })
     const [e] = start(st, ['A'])
     expect(work(e).map(s => [s.w, s.r])).toEqual([[30, 10], [30, 10]])
-    expect(e.plan.why[0]).toBe('First time in this routine — starting from its own target.')
+    expect(e.plan.why[0]).toBe('First time in this routine, so starting from its own target.')
   })
 })
 
@@ -167,7 +167,7 @@ describe('an edited routine starts again from its new plan', () => {
     cfgOf(st, 'A').reps = 10
     const [e] = start(st, ['A'])
     expect(work(e).map(s => [s.w, s.r])).toEqual([[50, 10], [50, 10]])
-    expect(e.plan.why[0]).toBe('Plan changed — starting from your new target.')
+    expect(e.plan.why[0]).toBe('Plan changed, so starting from your new target.')
     train(st, ['A'])
     expect(start(st, ['A'])[0].plan.kind).toBe('up')   // and progresses from there
   })
@@ -182,7 +182,7 @@ describe('an edited routine starts again from its new plan', () => {
     Object.assign(cfgOf(st, 'A'), { reps: 10, weight: 70 })
     const [e] = start(st, ['A'])
     expect(work(e).map(s => [s.w, s.r])).toEqual([[70, 10], [70, 10], [70, 10]])
-    expect(e.plan.why[0]).toBe('Plan changed — starting from your new target.')
+    expect(e.plan.why[0]).toBe('Plan changed, so starting from your new target.')
     train(st, ['A'])
     expect(work(start(st, ['A'])[0]).map(s => [s.w, s.r])).toEqual([[72.5, 10], [72.5, 10], [72.5, 10]])
   })
@@ -278,5 +278,63 @@ describe('"Your last session" keeps the old carry-over', () => {
     const [e] = start(st, ['A'])
     expect(e.plan.kind).toBe('hold')
     expect(reps(e)).toEqual([10, 10])
+  })
+})
+
+describe('"Your last session" for an exercise with progression off', () => {
+  const routine = extra => [{ id: 'A', name: 'A', ex: [{ id: BENCH, sets: 2, reps: 10, weight: 50, prog: 'off', ...extra }] }]
+  const last = { w: 60, r: 7 }
+
+  it('opens the rows at the weight and reps logged last time', () => {
+    const st = state(routine(), { startFrom: 'last' })
+    train(st, ['A'], last)
+    const [e] = start(st, ['A'])
+    expect(e.plan.kind).toBe('off')
+    expect(work(e).map(s => [s.w, s.r])).toEqual([[60, 7], [60, 7]])
+  })
+
+  it('says on the card that the numbers are last time\'s (#217)', () => {
+    const st = state(routine(), { startFrom: 'last' })
+    train(st, ['A'], last)
+    expect(start(st, ['A'])[0].carried).toBe(true)
+    // "Your plan" opened at the routine's own 2 × 10, so there is nothing to explain.
+    st.startFrom = 'plan'
+    expect(start(st, ['A'])[0].carried).toBeUndefined()
+  })
+
+  it('does the same for a routine that never set a weight', () => {
+    const st = state(routine({ weight: 0 }), { startFrom: 'last' })
+    train(st, ['A'], last)
+    const [e] = start(st, ['A'])
+    expect(work(e).map(s => [s.w, s.r])).toEqual([[60, 7], [60, 7]])
+  })
+
+  it('"Your plan" opens at the routine\'s weight and reps', () => {
+    const st = state(routine())
+    train(st, ['A'], last)
+    const [e] = start(st, ['A'])
+    expect(work(e).map(s => [s.w, s.r])).toEqual([[50, 10], [50, 10]])
+  })
+
+  it('leaves an exercise that has a progression policy to that policy', () => {
+    const st = state(routine({ prog: 'linear' }), { startFrom: 'last' })
+    train(st, ['A'], { w: 50, r: 10 })
+    const [e] = start(st, ['A'])
+    expect(e.plan.kind).toBe('up')
+    expect(work(e).map(s => s.w)).toEqual([52.5, 52.5])
+  })
+
+  it('still opens a routine kept out of progression at its own numbers', () => {
+    const st = state(routine(), { startFrom: 'last' })
+    train(st, ['A'], last)
+    st.routines[0].excludeFromProgression = true
+    const [e] = start(st, ['A'])
+    expect(work(e).map(s => [s.w, s.r])).toEqual([[50, 10], [50, 10]])
+  })
+
+  it('opens at the routine\'s numbers the first time, with nothing to copy', () => {
+    const st = state(routine(), { startFrom: 'last' })
+    const [e] = start(st, ['A'])
+    expect(work(e).map(s => [s.w, s.r])).toEqual([[50, 10], [50, 10]])
   })
 })

@@ -144,7 +144,7 @@ describe('CoachSetup — "use my self-hosted openGym"', () => {
     await click(row)
     expect(mocks.setCoachLocal).not.toHaveBeenCalled()
     expect(mocks.nav).not.toHaveBeenCalled()
-    expect(host.querySelector('.card').textContent).toContain('ask its admin, or bring your own key below')
+    expect(host.querySelector('.card').textContent).toContain('Ask its admin, or bring your own key below')
   })
 
   it('says it is still asking while the server has not answered yet', async () => {
@@ -171,7 +171,7 @@ describe('CoachSetup — bringing your own key', () => {
     await mount(); await openByok()
     const section = all('.sect').find(s => s.querySelector('.sect-t')?.textContent === 'What leaves this phone')
     expect([...section.querySelectorAll('.lrow-t')].map(t => t.textContent))
-      .toEqual(DATA_CATEGORIES.map(k => CATEGORY_TEXT[k][0]))
+      .toEqual(DATA_CATEGORIES.map(k => CATEGORY_TEXT[k]()[0]))
     expect(host.textContent).toContain('Each request goes straight to api.anthropic.com with your key')
   })
 
@@ -317,10 +317,10 @@ describe('CoachSetup — listing the models', () => {
     expect(host.querySelector('select')).toBe(null)
     expect(btn('Save and use the Coach')).toBeUndefined()
 
-    vi.mocked(localModels).mockResolvedValue({ ok: true, models: ['gemini-2.5-pro'] })
+    vi.mocked(localModels).mockResolvedValue({ ok: true, models: [HTTP_PROVIDERS.gemini.defaultModel] })
     await click(btn('List models')); await settle()
     expect(localModels).toHaveBeenLastCalledWith({ provider: 'gemini', baseUrl: null }, 'sk-1')
-    expect(host.querySelector('select').value).toBe('gemini-2.5-pro')
+    expect(host.querySelector('select').value).toBe(HTTP_PROVIDERS.gemini.defaultModel)
   })
 })
 
@@ -423,7 +423,7 @@ describe('CoachSetup — turning it off', () => {
   it('offers the control only once the Coach is actually on', async () => {
     await mount()
     expect(rowTitled('Turn the Coach off on this phone')).toBeUndefined()
-    expect(host.textContent).toContain('Off — choose how the Coach should run.')
+    expect(host.textContent).toContain('Off. Choose how the Coach should run.')
   })
 
   it('says which way it is running now', async () => {

@@ -1,4 +1,4 @@
-# Selfhosting with HTTPS
+# HTTPS at home without exposing your server
 
 This is a rather complex topic of its own, so it lives apart from the [SELF_HOSTING.md](./SELF_HOSTING.md) which focuses on how to run openGym.
 This document takes a more general approach on how to achieve "https at home", it is not necessarily focused on openGym and applies to self hosting in general.
@@ -17,13 +17,12 @@ Given we have the following setup:
 - a client (your PC, mobile, tablet, etc.)
 - your router (the thing that provides internet access, wifi, etc.)
 
-```mermaid
-graph TD
-    A@{ shape: cloud, label: "Internet"}
-    A <--> B[Router]
-    B <-->C[PC]
-    B <-->E[Mobile]
-    B <-->D[homelab]
+```
+Internet
+   │
+Router ──┬── PC
+         ├── phone
+         └── homelab (the server)
 ```
 
 ### DNS
@@ -39,7 +38,7 @@ You probably heard of dyndns, duckdns and the like. This is what they do: provid
 In order to make the public DNS servers out there resolve the local IP address of our homelab we will set up the DNS provider.
 It is strongly advised to check which DNS providers are supported by the tools you choose (we'll get to that later).
 
-### Let's encrypt!
+### Let's Encrypt
 
 Let's encrypt is free to use, they provide certificates for everyone to make the internet safer. Read [here](https://letsencrypt.org/docs/why-all-https/) for more information.
 They provide tools to automatically create certificates with a challenge to ensure your request is valid.  
@@ -48,7 +47,7 @@ If all is checked, the certificate authority of Let's Encrypt signs the certific
 
 We will make use of a wildcard certificate, so we can serve all our services with one certificate.
 
-### proxy
+### Reverse proxy
 
 A proxy is optional but desirable. It acts as sort of a gateway to our service and can be a single entrypoint to multiple services on our homelab.
 Let's say we have three services running on our instance. Since a TCP port can be used only once on a host we would have three ports that access our individual services.
@@ -56,16 +55,13 @@ It would not be very nice to have to remember all the ports when we address our 
 
 Port 443 (https) can only be used once so we would let our proxy answer to that port.
 We configure the proxy to forward requests to our individual services like so:
-```mermaid
-graph TD
-    A[proxy]
-    A <-->B[openGym :8080]
-    A <-->C[openGym-api :3000]
-    A <-->D[Nextcloud :8081]
+```
+proxy :443 ──┬── openGym   :8080   (the web container; it forwards /api itself)
+             └── Nextcloud :8081
 ```
 Now we have a nice URL and can forget about the ports. The proxy reads the URL request and forwards it to the target service/host.
 
-## How?!
+## Putting it together
 
 So how does it all come together?
 
@@ -91,7 +87,7 @@ Additional info:
 1. register with desec.io and choose a name (we take `myhomelab` as example)
     1. create a new A record that points to your service, e.g.: `*.myhomelab.dedyn.io` (Wildcard!) - 192.168.0.100 (the ip of your homelab/mini PC/Raspberry Pi running the proxy)
     2. A wildcard certificate handles all certificates for that given host. e.g.: `opengym.myhomelab.dedyn.io` and `nextcloud.myhomelab.dedyn.io` can share the same certificates.
-    3. create an API token for the certbot plugin. It only needs to write records inside your domain — leave `Can create domains` and `Can delete domains` **off**; a leaked token should not be able to take your domain apart. Note the token, it is only displayed once.
+    3. create an API token for the certbot plugin. It only needs to write records inside your domain, so leave `Can create domains` and `Can delete domains` **off**; a leaked token should not be able to take your domain apart. Note the token, it is only displayed once.
 2. install certbot on your host
     1. most linux distributions provide the packages for this, e.g. debian: `apt install certbot python3-certbot-dns-desec` check the [docs](https://desec.readthedocs.io/en/latest/integrations/lets-encrypt.html) 
     2. create a config file in `/etc/letsencrypt`: `desec.ini` containing `dns_desec_token = YOUR_TOKEN`, and `chmod 600` it
@@ -106,11 +102,11 @@ Additional info:
              -d "*.myhomelab.dedyn.io"
         ```
     4. certbot also installs a systemd timer that renews the certificate automatically. Caddy only re-reads the files when told to, so add a deploy hook once: `certbot renew --deploy-hook "systemctl reload caddy"` (or drop that line into `/etc/letsencrypt/renewal-hooks/deploy/`).
-    5. certbot writes `privkey.pem` readable by root only, while caddy runs as its own user. Either `chgrp caddy /etc/letsencrypt/live /etc/letsencrypt/archive && chmod g+rx` those directories (and `g+r` on the key), or copy the files in the deploy hook — otherwise caddy starts, but every TLS handshake fails.
+    5. certbot writes `privkey.pem` readable by root only, while caddy runs as its own user. Either `chgrp caddy /etc/letsencrypt/live /etc/letsencrypt/archive && chmod g+rx` those directories (and `g+r` on the key), or copy the files in the deploy hook. Otherwise caddy starts, but every TLS handshake fails.
 3. install caddy
     1. most linux distributions provide the packages for this, e.g. debian: `apt install caddy` check the [docs](https://caddyserver.com/docs/install) 
     2. create the caddy config, this is an example that should work:
-    ```jsonc
+    ```caddy
     :443 {
         header Content-Type text/html
         respond <<HTML
@@ -139,7 +135,7 @@ Additional info:
     ```
 
 And that's about it. Now you should be able to access your opengym instance from your local network via https with working passkeys.  
-Be sure to update the openGym config accordingly (`RP_ID=opengym.myhomelab.dedyn.io`, `ORIGIN=https://opengym.myhomelab.dedyn.io` — see [SELF_HOSTING.md](./SELF_HOSTING.md#2-understand-the-passkey-requirement-important)).
+Be sure to update the openGym config accordingly (`RP_ID=opengym.myhomelab.dedyn.io`, `ORIGIN=https://opengym.myhomelab.dedyn.io`, see [SELF_HOSTING.md](./SELF_HOSTING.md#2-understand-the-passkey-requirement-important)).
 
 **If the name does not resolve on your phone:** many home routers (Fritz!Box, some ISP boxes) have *DNS rebind protection* and silently drop public names that resolve to a private IP. Add `myhomelab.dedyn.io` to the router's rebind exception list, or run your own resolver.
 

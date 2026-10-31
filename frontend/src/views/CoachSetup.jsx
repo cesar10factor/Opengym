@@ -17,13 +17,16 @@ import { t } from '../lib/i18n.js'
 import { MOBILE } from '../lib/mobile.js'
 import { CATEGORY_TEXT } from '../lib/coach.js'
 import { getApiKey, setApiKey, clearApiKey } from '../lib/coach-secrets.js'
+import { coachLimits, clampCoachLimit, COACH_LIMITS } from '../lib/coach-device.js'
 import { HTTP_PROVIDERS, HTTP_PROVIDER_IDS, baseUrlFor, validateBaseUrl } from '../../../api/coach/core/providers.js'
 import { DATA_CATEGORIES } from '../../../api/coach/core/categories.js'
 import { ConnectSheet } from './MobileOnboarding.jsx'
+import { AiConsentSection } from '../components/CoachConsentSheet.jsx'
 import Icon from '../components/Icon.jsx'
 import { Section, Row, Button, TextField } from '../components/ui.jsx'
 
-const STEPS = ['Loading the exercise catalogue…', 'Checking the endpoint…', 'Ready']
+// Literal t() calls, so check-source-strings sees the three lines; t(s) over a list of keys hid them.
+const STEPS = () => [t('Loading the exercise catalogue…'), t('Checking the endpoint…'), t('Ready')]
 
 // The phone calls the provider through CapacitorHttp, native networking that obeys the
 // platform's cleartext rule, and Android refuses unencrypted http:// from apps
@@ -53,12 +56,24 @@ export default function CoachSetup() {
   const [models, setModels] = useState(null)
   const [step, setStep] = useState(-1)                     // -1 idle, 0..2 running, 3 done
   const [busy, setBusy] = useState(false)
+  // The three dials the server's admin card has and the phone never did (issue #527). Read from
+  // the device file as clamped, effective values; kept in local state so a number can be typed
+  // freely and is only clamped and saved when the field is left.
+  const [limits, setLimits] = useState(() => coachLimits(coachLocal))
 
   useEffect(() => { if (!MOBILE) nav('/settings', { replace: true }) }, [])
   useEffect(() => { getApiKey().then(k => setHasKey(!!k)) }, [])
   // Ask the paired server afresh: the admin may have switched the Coach on since this phone booted.
   useEffect(() => { if (user) refreshConfig() }, [user])
   useEffect(() => { setModels(null); setModel(coachLocal?.provider === provider ? (coachLocal?.model || '') : '') }, [provider])
+  useEffect(() => { setLimits(coachLimits(coachLocal)) }, [coachLocal])
+
+  const editLimit = (k, raw) => setLimits(l => ({ ...l, [k]: raw }))
+  const commitLimit = k => {
+    const clamped = clampCoachLimit(k, limits[k])
+    setLimits(l => ({ ...l, [k]: clamped }))
+    setCoachLocal({ limits: { ...limits, [k]: clamped } })
+  }
 
   const meta = HTTP_PROVIDERS[provider] || {}
   const host = hostOf(baseUrlFor(provider, { providerOptions: { [provider]: { baseUrl } } }))
@@ -131,17 +146,17 @@ export default function CoachSetup() {
 
   const current = coachLocal?.mode === 'server' ? t('Runs on your openGym server')
     : coachLocal?.mode === 'byok' ? t('Runs on this phone with your own API key')
-    : t('Off — choose how the Coach should run.')
+    : t('Off. Choose how the Coach should run.')
 
   return <div className="narrow">
     <div className="hdr">
-      <button className="iconbtn" onClick={() => nav('/settings')} aria-label={t('Back')}><Icon name="chevronLeft" /></button>
-      <div style={{ flex: 1, marginInlineStart: 10 }}><h1>{t('AI Coach')}</h1></div>
+      <button className="iconbtn" data-back="/settings" onClick={() => nav('/settings')} aria-label={t('Back')}><Icon name="chevronLeft" /></button>
+      <div style={{ flex: 1, marginInlineStart: 12 }}><h1>{t('AI Coach')}</h1></div>
     </div>
 
     <Section title={t('How should the Coach run?')} footer={current}>
       <Row icon="rocket" iconTint="var(--indigo)" title={t('Use my self-hosted openGym')}
-        subtitle={user ? (serverHasCoach ? t('Your server runs the Coach with whatever provider its admin set up. Nothing new leaves this phone beyond what already syncs.') : config == null ? t('Loading…') : t('Your server has no Coach enabled — ask its admin, or bring your own key below.')) : t('Connect to my server')}
+        subtitle={user ? (serverHasCoach ? t('Your server runs the Coach with whatever provider its admin set up. Nothing new leaves this phone beyond what already syncs.') : config == null ? t('Loading…') : t('Your server has no Coach enabled. Ask its admin, or bring your own key below.')) : t('Connect to my server')}
         accessory="chevron" onClick={() => { if (!user || serverHasCoach) useServer(); else setChoice('server') }} />
       <Row icon="key" iconTint="var(--acc)" title={t('Bring my own API key')}
         subtitle={t('This phone calls the provider directly with your key. Every request is charged to your account.')}
@@ -149,7 +164,7 @@ export default function CoachSetup() {
     </Section>
 
     {choice === 'server' && !serverHasCoach && <div className="card">
-      <div className="muted small">{t('Your server has no Coach enabled — ask its admin, or bring your own key below.')}</div>
+      <div className="muted small">{t('Your server has no Coach enabled. Ask its admin, or bring your own key below.')}</div>
     </div>}
 
     {choice === 'byok' && <>
@@ -177,18 +192,18 @@ export default function CoachSetup() {
 
       <Section title={t('What leaves this phone')}>
         {DATA_CATEGORIES.map(k => {
-          const [title, sub] = CATEGORY_TEXT[k] || [k, '']
-          return <Row key={k} icon="check" iconTint="var(--acc)" title={t(title)} subtitle={t(sub)} />
+          const [title, sub] = CATEGORY_TEXT[k]?.() || [k, '']
+          return <Row key={k} icon="check" iconTint="var(--acc)" title={title} subtitle={sub} />
         })}
       </Section>
       <p className="sect-f" style={{ marginTop: -18, marginBottom: 22, lineHeight: 1.5 }}>
-        {t('Each request goes straight to {0} with your key — nobody else sees it, and you pay for it.', host || meta.label)}
+        {t('Each request goes straight to {0} with your key. Nobody else sees it, and you pay for it.', host || meta.label)}
       </p>
 
       {step >= 0 && <div className="card">
-        {STEPS.map((s, i) => <div key={s} className="row" style={{ gap: 8, padding: '3px 0', opacity: i > step ? .4 : 1 }}>
-          <span style={{ color: i < step || step === 2 ? 'var(--green)' : i === step ? 'var(--acc)' : 'var(--dim)' }}><Icon name={i < step || step === 2 ? 'check' : 'timer'} /></span>
-          <span className="small">{t(s)}</span>
+        {STEPS().map((s, i) => <div key={s} className="row" style={{ gap: 8, padding: '3px 0', opacity: i > step ? .4 : 1 }}>
+          <span style={{ color: i < step || step === 2 ? 'var(--green)' : i === step ? 'var(--acc)' : 'var(--dim)' }}><Icon name={i < step || step === 2 ? 'check' : 'hourglass'} /></span>
+          <span className="small">{s}</span>
         </div>)}
       </div>}
 
@@ -201,6 +216,20 @@ export default function CoachSetup() {
         </div>
       </Section>}
 
+      {/* The server's admin card, for the person who owns this phone: in BYOK mode there is no
+          other profile, so the limits protect nobody but the account already holding the key. */}
+      <Section title={t('Advanced')}>
+        <LimitRow label={t('Max output tokens')} hint={t('The ceiling on one answer. Reasoning models count its hidden thinking against it, so raise it if a plan is cut off.')}
+          value={limits.maxOutputTokens} min={COACH_LIMITS.maxOutputTokens.min} max={COACH_LIMITS.maxOutputTokens.max}
+          onChange={v => editLimit('maxOutputTokens', v)} onCommit={() => commitLimit('maxOutputTokens')} />
+        <LimitRow label={t('Daily runs')} hint={t('Every Coach run is one request on your provider account. 0 means no limit.')}
+          value={limits.daily} min={COACH_LIMITS.daily.min} max={COACH_LIMITS.daily.max}
+          onChange={v => editLimit('daily', v)} onCommit={() => commitLimit('daily')} />
+        <LimitRow label={t('Max message length')} hint={t('How long a message, refinement or review note can be.')}
+          value={limits.maxMessageLen} min={COACH_LIMITS.maxMessageLen.min} max={COACH_LIMITS.maxMessageLen.max}
+          onChange={v => editLimit('maxMessageLen', v)} onCommit={() => commitLimit('maxMessageLen')} />
+      </Section>
+
       <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
         {!models
           ? <Button variant="primary" icon="sparkles" disabled={busy} onClick={prepare}>{t('List models')}</Button>
@@ -209,6 +238,8 @@ export default function CoachSetup() {
       </div>
     </>}
 
+    {coachLocal?.mode && coachLocal.mode !== 'off' && <AiConsentSection />}
+
     {coachLocal?.mode && coachLocal.mode !== 'off' && <Section title={t('Controls')}>
       <Row icon="signOut" iconTint="var(--red)" title={t('Turn the Coach off on this phone')} danger onClick={turnOff} />
     </Section>}
@@ -216,3 +247,19 @@ export default function CoachSetup() {
 }
 
 const hostOf = url => { try { return new URL(url).host } catch { return '' } }
+
+// One numeric dial of the Advanced section: a label and its hint on the left, a plain number
+// field on the right, clamped and saved when it is left rather than on every keystroke — a
+// floor applied mid-typing turns a just-typed "1" into "1024".
+function LimitRow({ label, hint, value, min, max, onChange, onCommit }) {
+  return <div className="row between" style={{ gap: 12, padding: '10px 12px', alignItems: 'flex-start' }}>
+    <div style={{ minWidth: 0 }}>
+      <div style={{ fontWeight: 500 }}>{label}</div>
+      <div className="muted small">{hint}</div>
+    </div>
+    <div style={{ width: 118, flex: 'none' }}>
+      <TextField type="number" inputMode="numeric" min={min} max={max} value={value}
+        onChange={e => onChange(e.target.value)} onBlur={onCommit} />
+    </div>
+  </div>
+}
