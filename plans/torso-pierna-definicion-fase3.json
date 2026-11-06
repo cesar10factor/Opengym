@@ -1,0 +1,443 @@
+{
+  "opengym_plan": 1,
+  "exported": "2026-11-06",
+  "name": "Torso/Pierna — Definición (Fase 3)",
+  "unit": "kg",
+  "week": {
+    "0": [
+      "core"
+    ],
+    "1": [
+      "torsoA"
+    ],
+    "3": [
+      "pierna"
+    ],
+    "5": [
+      "torsoB"
+    ]
+  },
+  "routines": [
+    {
+      "id": "torsoA",
+      "name": "Torso A — Banca pesada + espalda",
+      "emoji": "barbell",
+      "ex": [
+        {
+          "id": "0025",
+          "sets": 4,
+          "reps": 3,
+          "pyramid": [
+            3,
+            5,
+            5,
+            5
+          ],
+          "pyramidWeight": [
+            87.5,
+            80,
+            80,
+            80
+          ],
+          "pyramidRest": [
+            180,
+            120,
+            120,
+            120
+          ],
+          "restSec": 120,
+          "note": "Serie 1: pesada 1×3. +2,5 kg cuando las 3 salgan limpias (1-2 en recámara); si no, se mantiene, sin deload. Series 2-4: bajadas 3×5, +2,5 kg cada vez que salgan, en torno al 90 % de la pesada. Subir los pesos a mano en la rutina."
+        },
+        {
+          "id": "0652",
+          "sets": 4,
+          "reps": 3,
+          "repsMax": 6,
+          "prog": "linear",
+          "restSec": 120,
+          "note": "Peso corporal. Progresa en repeticiones de 3 a 6."
+        },
+        {
+          "id": "0606",
+          "sets": 3,
+          "reps": 10,
+          "repsMin": 8,
+          "weight": 40,
+          "prog": "double",
+          "inc": 2.5,
+          "restSec": 90
+        },
+        {
+          "dbLoad": "each",
+          "id": "0405",
+          "sets": 3,
+          "reps": 10,
+          "repsMin": 8,
+          "weight": 20,
+          "prog": "double",
+          "inc": 2,
+          "sg": "sgA1",
+          "sgRest": 90,
+          "note": "Peso por mancuerna."
+        },
+        {
+          "id": "0857",
+          "sets": 3,
+          "reps": 10,
+          "prog": "off",
+          "sg": "sgA1",
+          "sgRest": 90,
+          "note": "Core: no se salta nunca."
+        },
+        {
+          "id": "2330",
+          "sets": 3,
+          "reps": 12,
+          "repsMin": 10,
+          "weight": 65,
+          "prog": "double",
+          "inc": 2.5,
+          "sg": "sgA2",
+          "sgRest": 60
+        },
+        {
+          "id": "0472",
+          "sets": 3,
+          "reps": 12,
+          "prog": "off",
+          "sg": "sgA2",
+          "sgRest": 60,
+          "note": "Core: no se salta nunca."
+        },
+        {
+          "dbLoad": "each",
+          "id": "0334",
+          "sets": 3,
+          "reps": 15,
+          "repsMin": 12,
+          "weight": 10,
+          "prog": "double",
+          "inc": 1,
+          "sg": "sgA3",
+          "sgRest": 60,
+          "note": "Peso por mancuerna. Prescindible si vas justo (junto al curl martillo)."
+        },
+        {
+          "dbLoad": "each",
+          "id": "0313",
+          "sets": 3,
+          "reps": 12,
+          "repsMin": 8,
+          "weight": 11,
+          "prog": "double",
+          "inc": 2,
+          "sg": "sgA3",
+          "sgRest": 60,
+          "note": "Peso por mancuerna. Prescindible si vas justo."
+        }
+      ]
+    },
+    {
+      "id": "pierna",
+      "name": "Pierna",
+      "emoji": "legs",
+      "ex": [
+        {
+          "id": "ankleDorsiWall",
+          "sets": 2,
+          "reps": 20,
+          "side": true,
+          "prog": "off",
+          "note": "Calentamiento: dorsiflexión contra la pared, 10 por lado."
+        },
+        {
+          "id": "0276",
+          "sets": 2,
+          "reps": 16,
+          "side": true,
+          "prog": "off",
+          "note": "Calentamiento: 8 por lado."
+        },
+        {
+          "id": "0739",
+          "sets": 4,
+          "reps": 12,
+          "repsMin": 8,
+          "weight": 120,
+          "prog": "double",
+          "inc": 10,
+          "restSec": 120
+        },
+        {
+          "dbLoad": "each",
+          "id": "1459",
+          "sets": 3,
+          "reps": 12,
+          "repsMin": 8,
+          "weight": 30,
+          "prog": "double",
+          "inc": 2,
+          "restSec": 120,
+          "note": "Peso por mancuerna."
+        },
+        {
+          "dbLoad": "each",
+          "id": "2290",
+          "sets": 3,
+          "reps": 24,
+          "repsMin": 20,
+          "weight": 11,
+          "side": true,
+          "prog": "double",
+          "inc": 2,
+          "sg": "sgP1",
+          "sgRest": 90,
+          "note": "Peso por mancuerna. 10-12 por pierna."
+        },
+        {
+          "id": "0715",
+          "mode": "time",
+          "sets": 3,
+          "sec": 30,
+          "side": true,
+          "prog": "time",
+          "inc": 5,
+          "sg": "sgP1",
+          "sgRest": 90,
+          "note": "30-45 s por lado."
+        },
+        {
+          "id": "0585",
+          "sets": 3,
+          "reps": 15,
+          "repsMin": 12,
+          "weight": 75,
+          "prog": "double",
+          "inc": 2.5,
+          "restSec": 60,
+          "note": "Prescindible si vas justo."
+        },
+        {
+          "id": "9001",
+          "sets": 3,
+          "reps": 30,
+          "repsMin": 24,
+          "weight": 40,
+          "side": true,
+          "prog": "double",
+          "inc": 5,
+          "restSec": 60,
+          "note": "Bajada de 3-4 s en cada repetición. No se salta (fascitis)."
+        }
+      ]
+    },
+    {
+      "id": "torsoB",
+      "name": "Torso B — Espalda + banca ligera",
+      "emoji": "pullup",
+      "ex": [
+        {
+          "id": "7385",
+          "sets": 4,
+          "reps": 3,
+          "prog": "off",
+          "restSec": 120,
+          "note": "Subida con salto o cajón, bajada de 4-5 s."
+        },
+        {
+          "dbLoad": "each",
+          "id": "2393",
+          "sets": 3,
+          "reps": 20,
+          "repsMin": 16,
+          "weight": 20,
+          "side": true,
+          "prog": "double",
+          "inc": 2,
+          "restSec": 60,
+          "note": "Peso por mancuerna. 8-10 por lado."
+        },
+        {
+          "id": "5013",
+          "sets": 3,
+          "reps": 8,
+          "repsMin": 6,
+          "weight": 72.5,
+          "prog": "double",
+          "inc": 2.5,
+          "restSec": 120,
+          "note": "Pausa de 1 s en el pecho, siempre con 2-3 reps en recámara."
+        },
+        {
+          "id": "5107",
+          "sets": 3,
+          "reps": 10,
+          "repsMax": 15,
+          "prog": "off",
+          "restSec": 60,
+          "note": "Elevación de rodillas en paralelas, 10-15. Core: no se salta nunca."
+        },
+        {
+          "id": "0861",
+          "sets": 3,
+          "reps": 12,
+          "repsMin": 10,
+          "weight": 45,
+          "prog": "double",
+          "inc": 2.5,
+          "restSec": 90
+        },
+        {
+          "id": "5813",
+          "sets": 3,
+          "reps": 12,
+          "repsMax": 15,
+          "prog": "double",
+          "inc": 2.5,
+          "restSec": 60,
+          "note": "Pausa de 1-2 s arriba apretando el glúteo, sin pasar de la línea recta. Al hacer 3×15, abraza un disco de 5 kg y desde ahí +2,5 kg. No se salta nunca."
+        },
+        {
+          "id": "5656",
+          "sets": 3,
+          "reps": 18,
+          "repsMin": 12,
+          "weight": 30,
+          "prog": "double",
+          "inc": 2.5,
+          "sg": "sgB1",
+          "sgRest": 60
+        },
+        {
+          "id": "0979",
+          "sets": 3,
+          "reps": 24,
+          "side": true,
+          "prog": "off",
+          "sg": "sgB1",
+          "sgRest": 60,
+          "note": "12 por lado. Core: no se salta nunca."
+        },
+        {
+          "dbLoad": "each",
+          "id": "0318",
+          "sets": 3,
+          "reps": 12,
+          "repsMin": 8,
+          "weight": 11,
+          "prog": "double",
+          "inc": 2,
+          "restSec": 60,
+          "note": "Peso por mancuerna. Prescindible si vas justo."
+        }
+      ]
+    },
+    {
+      "id": "core",
+      "name": "Core (opcional)",
+      "emoji": "abs",
+      "ex": [
+        {
+          "id": "4580",
+          "sets": 1,
+          "reps": 10,
+          "prog": "off",
+          "note": "Calentamiento."
+        },
+        {
+          "id": "1241",
+          "sets": 2,
+          "reps": 16,
+          "side": true,
+          "prog": "off",
+          "note": "Calentamiento: 8 por lado."
+        },
+        {
+          "id": "0276",
+          "sets": 2,
+          "reps": 16,
+          "side": true,
+          "prog": "off",
+          "note": "Calentamiento: 8 por lado."
+        },
+        {
+          "id": "0857",
+          "sets": 4,
+          "reps": 8,
+          "repsMax": 12,
+          "prog": "linear",
+          "restSec": 90,
+          "note": "Peso corporal. Progresa en repeticiones de 8 a 12."
+        },
+        {
+          "id": "0872",
+          "sets": 3,
+          "reps": 15,
+          "prog": "off",
+          "sg": "sgC1",
+          "sgRest": 60,
+          "note": "12-15 repeticiones."
+        },
+        {
+          "id": "1246",
+          "mode": "time",
+          "sets": 3,
+          "sec": 30,
+          "prog": "time",
+          "inc": 5,
+          "sg": "sgC1",
+          "sgRest": 60,
+          "note": "30-40 s."
+        },
+        {
+          "id": "0715",
+          "mode": "time",
+          "sets": 3,
+          "sec": 30,
+          "side": true,
+          "prog": "time",
+          "inc": 5,
+          "sg": "sgC2",
+          "sgRest": 60,
+          "note": "30-45 s por lado."
+        },
+        {
+          "id": "7229",
+          "sets": 3,
+          "reps": 16,
+          "side": true,
+          "prog": "off",
+          "sg": "sgC2",
+          "sgRest": 60,
+          "note": "Con disco o kettlebell, 8 por lado."
+        },
+        {
+          "id": "0175",
+          "sets": 3,
+          "reps": 15,
+          "repsMin": 12,
+          "weight": 25,
+          "prog": "double",
+          "inc": 2.5,
+          "restSec": 60
+        },
+        {
+          "id": "5813",
+          "sets": 3,
+          "reps": 15,
+          "prog": "off",
+          "restSec": 60,
+          "note": "12-15, peso corporal, siempre sin disco. Pausa de 1-2 s arriba."
+        }
+      ]
+    }
+  ],
+  "customEx": [
+    {
+      "id": "ankleDorsiWall",
+      "n": "Dorsiflexión de tobillo en pared",
+      "bp": "lower legs",
+      "desc": "Calentamiento: 2x10 por lado, rodilla hacia la pared sin levantar el talón."
+    }
+  ]
+}
